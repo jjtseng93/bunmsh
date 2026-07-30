@@ -80,6 +80,23 @@ describe("execution", () => {
     expect(output.state.env.OLDPWD).toBe(`${cwd}/src`);
   });
 
+  test("treats standalone - as cd -", async () => {
+    const cwd = process.cwd();
+    const output = await run("cd src; -; pwd", { cwd });
+    expect(output.stdout).toBe(`${cwd}\n${cwd}\n`);
+    expect(output.state.cwd).toBe(cwd);
+    expect(output.state.env.OLDPWD).toBe(`${cwd}/src`);
+  });
+
+  test("treats standalone ~ as cd HOME", async () => {
+    const cwd = process.cwd();
+    const home = cwd.slice(0, cwd.lastIndexOf("/"));
+    const output = await run("cd src; ~; pwd", { cwd, env: { HOME: home } });
+    expect(output.stdout).toBe(`${home}\n`);
+    expect(output.state.cwd).toBe(home);
+    expect(output.state.env.OLDPWD).toBe(`${cwd}/src`);
+  });
+
   test("// reports a missing child and continues", async () => {
     const output = await run("//; print still-running");
     expect(output.stdout).toBe("still-running\n");

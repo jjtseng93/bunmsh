@@ -479,6 +479,8 @@ const builtins = {
     if (!target) return result(1, "", "bunmsh: cd: HOME is not set\n");
     return changeDirectory(state, target);
   },
+  "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
+  "~": async (_argv, state) => builtins.cd(["cd"], state),
   "..": async (_argv, state) => changeDirectory(state, ".."),
   "//": async (_argv, state) => previousChildDirectory(state),
   export: async (argv, state) => {
@@ -581,7 +583,14 @@ async function writeRedirect(path, data, append) {
 }
 
 async function runCommand(command, state, options = {}) {
-  const expanded = command.words.map((word) => expandWord(word, state));
+  const standaloneTilde =
+    command.words.length === 1 &&
+    command.words[0].fragments.length === 1 &&
+    command.words[0].fragments[0].quote === "none" &&
+    command.words[0].fragments[0].text === "~";
+  const expanded = standaloneTilde
+    ? ["~"]
+    : command.words.map((word) => expandWord(word, state));
   const localEnv = {};
   while (expanded.length) {
     const assignment = splitAssignment(expanded[0]);
