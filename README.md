@@ -1,6 +1,6 @@
 # bunmsh
 
-- `bunmsh` is a dependency-free, mksh-inspired cross-platform command shell for Bun
+- `bunmsh` is a dependency-free, mksh-inspired cross-platform command shell for Bun JavaScript
   * Bun Modern Shell
 - Early releases focus on a small, usable command interpreter rather than full mksh compatibility.
 
