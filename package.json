@@ -1,0 +1,21 @@
+{
+  "name": "bunmsh",
+  "version": "0.0.1",
+  "description": "Cross-platform command shell for Bun",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/main.js",
+  "bin": {
+    "bunmsh": "./src/main.js"
+  },
+  "scripts": {
+    "start": "bun ./src/main.js",
+    "test": "bun test"
+  },
+  "keywords": [
+    "bun",
+    "shell",
+    "command-line",
+    "mksh"
+  ]
+}
