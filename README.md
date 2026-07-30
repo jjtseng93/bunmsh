@@ -36,8 +36,6 @@ uses Bun. Bun must therefore already be available on `PATH`.
 
 ### Option 2: Run with git clone
 
-After the repository is publicly available:
-
 - Interactive shell
 
 ```sh
@@ -62,11 +60,11 @@ bun ./bunmsh -c 'print $PATH'
 - Sequential pipelines (`a | b`)
 - Command lists with `;`, `&&` and `||`
 - Single quotes, double quotes and backslash quoting
-- `$NAME`, `${NAME}`, `$?`, `$$`, `$#`, `$0` through `$9`
+- `$NAME`, `${NAME}`, `$?`, `$$`, `$#`, `$0` through `$9` .
 - Leading environment assignments and persistent assignment-only commands
 - `<`, `>`, `>>`, `2>` and `2>>`
 - `cd`, `pwd`, `export`, `unset`, `env`, `exit`, `set`, `:`, `true`, `false`,
-  `echo`, `print` and a small `printf`
+  `echo`, `print` and a small `printf` .
 
 - See [PORTING.md](PORTING.md) for semantic limitations and the remaining mksh work.
 
