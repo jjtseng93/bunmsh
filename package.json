@@ -1,7 +1,7 @@
 {
   "name": "bunmsh",
   "version": "0.0.1",
-  "description": "Cross-platform command shell for Bun",
+  "description": "Cross-platform command shell for Bun JavaScript",
   "license": "MIT",
   "type": "module",
   "main": "./src/main.js",
