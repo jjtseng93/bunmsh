@@ -1,10 +1,50 @@
-import { posix } from "node:path";
+import { join, posix, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { IS_COMPILED, REPO_ROOT } from "./compiled.js";
+import { pkg } from "./assetsPacker.js";
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 
+//  This package own namespace inside a shared archive. Matches what
+//  `assetsPacker -p` writes, and what `--asset ./build/assets` lands at
+//  under /$bunfs/root, so one key reaches either back end.
+export const SELF = `assets/${pkg.name}@${pkg.version}`;
+
+//  "" when this build packed flat keys, SELF when it packed namespaced
+//  ones. Detected from what is actually there rather than declared by a
+//  build flag, which can disagree with the packer and fail silently.
+//
+//  NOTE: nothing reads this yet; the lookups below are still flat.
+//
+//  Lazy because the tar back end fills globalThis.internalAssets
+//  asynchronously, so module-load time is too early to look.
+let detectedPrefix;
+
+export function assetPrefix() {
+  if (detectedPrefix === undefined) detectedPrefix = detectPrefix();
+  return detectedPrefix;
+}
+
+function detectPrefix() {
+  const store = getAssetStore();
+
+  if (store) {
+    const keys = store instanceof Map ? store.keys() : Object.keys(store);
+    for (const key of keys) if (key.startsWith(SELF + "/")) return SELF;
+  }
+
+  if (IS_COMPILED && existsSync(join(import.meta.dir, SELF))) return SELF;
+
+  return "";
+}
+
+//  Whether THIS package has anything embedded. A bare store check was
+//  true even for an empty one, which sent every caller down the internal
+//  branch to find nothing and never try the disk fallback.
 export function hasInternalAssets() {
-  return Boolean(getAssetStore());
+  return listInternalAssetPaths().length > 0;
 }
 
 export function assetPath(...parts) {
@@ -95,18 +135,81 @@ export async function buildHtmlBundleImageMap(
   return images;
 }
 
-export function listInternalAssetPaths(prefix = "") {
-  const store = getAssetStore();
-  if (!store) return [];
+//  `bun build --compile --asset` puts the files at real paths under
+//  import.meta.dir instead of into the tar map. Only in a compiled
+//  binary: in the source tree this file sits in single-exe/, which is
+//  not the asset root.
+function bunfsBase() {
+  return IS_COMPILED ? import.meta.dir : null;
+}
 
-  const normalizedPrefix = assetPath(prefix);
-  const entries = iterateAssetKeys(store);
-  if (!normalizedPrefix) {
-    return entries.sort();
+//  Store-space keys for every regular file under <base>/<sub>.
+//
+//  NOTE: with no namespace, <sub> is "" and the scan starts at
+//  /$bunfs/root, which also holds the executable and any file-loader
+//  assets. Nothing marks those apart from real assets, so pack with -p
+//  when the --asset back end is in play.
+function walkBunfs(base, sub) {
+  const dir = sub ? join(base, sub) : base;
+
+  let names;
+  try {
+    names = readdirSync(dir, { recursive: true });
+  } catch {
+    return [];
   }
 
-  const base = `${normalizedPrefix}/`;
-  return entries.filter((path) => path === normalizedPrefix || path.startsWith(base)).sort();
+  const out = [];
+
+  for (const name of names) {
+    const rel = String(name).split(sep).join("/");
+
+    try {
+      if (!statSync(join(dir, String(name))).isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    out.push(sub ? `${sub}/${rel}` : rel);
+  }
+
+  return out;
+}
+
+//  Callers always speak package-relative keys. This is the one place
+//  those become store keys, so the namespace stays invisible to them.
+function storeKey(path) {
+  const key = assetPath(path);
+  const at = assetPrefix();
+  return at ? (key ? `${at}/${key}` : at) : key;
+}
+
+export function listInternalAssetPaths(prefix = "") {
+  const at = assetPrefix();
+  const wanted = storeKey(prefix);
+  const store = getAssetStore();
+  const found = new Set();
+
+  if (store) for (const key of iterateAssetKeys(store)) found.add(key);
+
+  const base = bunfsBase();
+  if (base) for (const key of walkBunfs(base, wanted)) found.add(key);
+
+  let entries = [...found];
+
+  if (wanted) {
+    const base = `${wanted}/`;
+    entries = entries.filter((path) => path === wanted || path.startsWith(base));
+  }
+
+  //  Hand the namespace back off on the way out, or every caller that
+  //  matches on the returned paths would have to know about it.
+  if (at) {
+    const cut = at.length + 1;
+    entries = entries.filter((path) => path.startsWith(at + "/")).map((path) => path.slice(cut));
+  }
+
+  return entries.sort();
 }
 
 export function listInternalAssetDirs(prefix = "") {
@@ -124,11 +227,24 @@ export function listInternalAssetDirs(prefix = "") {
 }
 
 export function getInternalAsset(path) {
+  const key = storeKey(path);
+
   const store = getAssetStore();
-  if (!store) return null;
-  const key = assetPath(path);
-  if (store instanceof Map) return store.get(key) ?? null;
-  return store[key] ?? store[path] ?? null;
+  if (store) {
+    const hit = store instanceof Map ? store.get(key) : (store[key] ?? store[path]);
+    if (hit != null) return hit;
+  }
+
+  //  Tar first so an existing build keeps its exact behaviour; the
+  //  --asset back end answers whatever the tar does not hold.
+  const base = bunfsBase();
+  if (base) {
+    try {
+      return readFileSync(join(base, key));
+    } catch {}
+  }
+
+  return null;
 }
 
 export function readInternalAssetBytes(path) {
@@ -147,6 +263,30 @@ export function readInternalAssetText(path) {
   const bytes = readInternalAssetBytes(path);
   if (!bytes) return null;
   return textDecoder.decode(bytes);
+}
+
+//  The fallback reads through node:fs so the same call works under plain
+//  Node, which is the whole point of keeping the loader out of the main
+//  program's module graph.
+export async function readAssetText(path) {
+  const internal = readInternalAssetText(path);
+  if (internal != null) return internal;
+
+  //  TextDecoder drops a leading BOM, so the embedded path never returns
+  //  one; readFile keeps it. Strip it here or the same file reads
+  //  differently depending on whether it was embedded.
+  return (await readFile(join(REPO_ROOT, path), "utf8")).replace(/^\uFEFF/, "");
+}
+
+export async function readAssetBytes(path) {
+  const internal = readInternalAssetBytes(path);
+  if (internal) return internal;
+
+  const buf = await readFile(join(REPO_ROOT, path));
+
+  //  Buffer is a Uint8Array, but hand back a plain one so callers cannot
+  //  come to depend on the Buffer-only methods.
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
 export function internalAssetSource(path) {

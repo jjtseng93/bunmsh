@@ -17,5 +17,8 @@
     "shell",
     "command-line",
     "mksh"
+  ],
+  "assets": [
+    "README.md"
   ]
 }
