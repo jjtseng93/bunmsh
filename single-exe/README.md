@@ -94,6 +94,8 @@ appear in `package.json`.
 | `listInternalAssetPaths(prefix?)` | every embedded path under `prefix` |
 | `listInternalAssetDirs(prefix?)` | the immediate child names under `prefix` |
 | `assetPath(...parts)` | joins parts into a key |
+| `getAssetKey(path)` | the key as stored, namespace included |
+| `assetDiskPath(path)` | where the disk fallback reads that key from |
 | `SELF` | this package's namespace, `assets/<name>@<version>` |
 
 The read functions are synchronous for embedded assets on both back ends.
@@ -338,6 +340,8 @@ Never hard-code `/$bunfs/root/` or `B:/~BUN/`; always use the path that
 The rest of this file is generic. These names belong to bunmsh itself and are
 not reserved by the bootstrap — an adopting project picks its own.
 
+bunmsh does not run under Node; it needs Bun.
+
 ```shell
 bun ./src/main.js --build-exe
 bun ./src/main.js --build-for bun-linux-x64
@@ -361,30 +365,24 @@ before a shell is ever started. `--build-exe` and `--build-for` are listed in
 { "assets": ["README.md"] }
 ```
 
-`--readme` is what reads it. It takes the embedded copy when there is one and
-falls back to the file beside the executable otherwise:
+`--readme` is what reads it, in one line:
 
 ```js
-const source = readInternalAssetText("README.md")
-  ?? await Bun.file(join(REPO_ROOT, "README.md")).text();
+const source = await readAssetText("README.md");
 ```
 
-The synchronous `readInternalAssetText` plus an explicit `Bun.file` fallback,
-rather than the async `readAssetText`, because the fallback is Bun-only here
-anyway — `src/main.js` uses `Bun.file`, `Bun.markdown` and `Bun.stdin`, so
-bunmsh itself does not run under Node even though `assetsHelper.js` and
-`compiled.js` would.
+Embedded first, the file on disk otherwise — and `assetDiskPath` decides which
+file that is, so `--assets-extract` and `--assets-external` compose:
 
-`REPO_ROOT` is the executable's own folder once compiled, so the fallback looks
-for `README.md` directly beside `bmsh`. Note that `--assets-extract` does not
-put it there: it writes the archive as packed, namespace and all —
-
-```
-./bmsh --assets-extract   ->   ./assets/bunmsh@0.0.1/README.md
+```shell
+./bmsh --assets-extract          # -> ./assets/bunmsh@0.0.1/README.md
+./bmsh --assets-external --readme
 ```
 
-— so `./bmsh --assets-external --readme` throws until that file is copied up to
-`./README.md`. Extracting and reading back externally is two steps, not one.
+The extracted tree keeps the archive's namespace rather than landing beside the
+executable, which a hand-written `join(REPO_ROOT, "README.md")` fallback would
+miss. That is the whole reason `readAsset*` is worth using over rolling the
+fallback yourself — `bunmsh` did roll its own until it wasn't.
 
 ### The loader is not zero-copy
 
@@ -392,5 +390,5 @@ The tar back end materializes every packed file in memory and keeps the bytes
 in `globalThis.internalAssets` for the life of the process. With one README
 that is nothing, but it scales with the archive. `ASSETS_BUNFS=1` is one answer
 (see the table at the top); for Linux there is also an experimental zero-copy
-hack of mine:
+hack of mine for the tar back end:
 [bun-assets-zerocopy](https://github.com/jjtseng93/bun-assets-zerocopy).

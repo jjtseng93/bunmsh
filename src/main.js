@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 
-import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { createState, execute } from "./shell.js";
-import { readInternalAssetText } from "../single-exe/assetsHelper.js";
-import { REPO_ROOT, buildEarlyExit } from "../single-exe/compiled.js";
+import { readAssetText } from "../single-exe/assetsHelper.js";
+import { buildEarlyExit } from "../single-exe/compiled.js";
 import pkg from "../package.json" with { type:"json" }
 
 const VERSION = `
@@ -16,8 +15,7 @@ Version: ${pkg.version}
 `
 
 async function printReadme() {
-  const source = readInternalAssetText("README.md")
-    ?? await Bun.file(join(REPO_ROOT, "README.md")).text();
+  const source = await readAssetText("README.md");
   console.log(
     Bun.markdown?.ansi(source, { hyperlinks: true }) || source,
   );
