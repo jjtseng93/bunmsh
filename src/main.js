@@ -53,10 +53,11 @@ function renderPrompt(state) {
 }
 
 async function interactive(state) {
+  const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const readline = createInterface({
     input: process.stdin,
     output: process.stdout,
-    terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    terminal,
   });
   const closed = new Promise((resolve) => readline.once("close", () => resolve(null)));
   try {
@@ -66,7 +67,20 @@ async function interactive(state) {
         closed,
       ]);
       if (line === null) break;
-      await execute(line, state);
+      // readline must not keep reading from the terminal while a foreground
+      // program owns it.  Otherwise both processes race for input and the
+      // first key (notably Ctrl-Q in full-screen editors) can be consumed by
+      // the shell.  Also give the child a sane terminal mode to start from.
+      readline.pause();
+      if (terminal) process.stdin.setRawMode(false);
+      try {
+        await execute(line, state);
+      } finally {
+        if (!state.exitRequested) {
+          if (terminal) process.stdin.setRawMode(true);
+          readline.resume();
+        }
+      }
     }
   } finally {
     readline.close();
