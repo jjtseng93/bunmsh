@@ -1576,6 +1576,45 @@ export async function execute(source, state = createState(), io = {}) {
     }
     return execution;
   }
+  const lines = source.match(/.*(?:\n|$)/g)?.filter(Boolean) ?? [];
+  if (lines.some((line) => line.trimStart().startsWith("Bun."))) {
+    const parts = [];
+    let shellSource = "";
+    for (const line of lines) {
+      if (!line.trimStart().startsWith("Bun.")) {
+        shellSource += line;
+        continue;
+      }
+      // Only split at a valid top-level shell boundary. This prevents a
+      // Bun.-looking line inside an open quote or $(...) from escaping its
+      // surrounding shell construct.
+      try {
+        if (shellSource.trim()) parse(shellSource);
+      } catch {
+        shellSource += line;
+        continue;
+      }
+      if (shellSource.trim()) parts.push(shellSource);
+      parts.push(line.replace(/\n$/, ""));
+      shellSource = "";
+    }
+    if (shellSource.trim()) parts.push(shellSource);
+    if (parts.length > 1) {
+      let execution = result(state.lastStatus);
+      const stdout = [], stderr = [];
+      for (const part of parts) {
+        execution = await execute(part, state, io);
+        if (io.capture) {
+          if (execution.stdout.byteLength) stdout.push(execution.stdout);
+          if (execution.stderr.byteLength) stderr.push(execution.stderr);
+        }
+        if (state.exitRequested) break;
+      }
+      return io.capture
+        ? result(execution.status, concatBytes(stdout), concatBytes(stderr))
+        : execution;
+    }
+  }
   let jobs;
   try {
     jobs = parse(source);

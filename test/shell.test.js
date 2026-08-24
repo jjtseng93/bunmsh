@@ -163,6 +163,28 @@ describe("execution", () => {
 });
 
 describe("CLI", () => {
+  test("detects highest-priority Bun. lines inside script files", async () => {
+    const cwd = new URL("..", import.meta.url).pathname;
+    const proc = Bun.spawn([process.execPath, "src/main.js", "test/t.sh"], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toBe(
+      `shell-before\n${Bun.version}\n${Math.cos(1)}\n` +
+        `{ message: 'shared', count: 1 }\n2\n` +
+        `{ message: 'shared', count: 2 }\n` +
+        `from command substitution: shared\nshell-after\n`,
+    );
+    expect(stderr).toBe("");
+  });
+
   test("--readme renders the bundled README and exits", async () => {
     const proc = Bun.spawn([process.execPath, "src/main.js", "--readme"], {
       cwd: new URL("..", import.meta.url).pathname,
