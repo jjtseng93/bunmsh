@@ -1,6 +1,7 @@
 import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename as pathBasename, dirname as pathDirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { format as formatValue } from "node:util";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1559,6 +1560,22 @@ async function runPipeline(pipeline, state, options = {}) {
 }
 
 export async function execute(source, state = createState(), io = {}) {
+  const rawSource = source.trimStart();
+  if (rawSource.startsWith("Bun.")) {
+    let execution;
+    try {
+      const value = await eval(rawSource);
+      execution = result(0, value === undefined ? "" : `${formatValue(value)}\n`);
+    } catch (error) {
+      execution = result(1, "", `${error?.stack ?? formatValue(error)}\n`);
+    }
+    state.lastStatus = execution.status;
+    if (!io.capture) {
+      if (execution.stdout.byteLength) await writeStream(process.stdout, execution.stdout);
+      if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
+    }
+    return execution;
+  }
   let jobs;
   try {
     jobs = parse(source);

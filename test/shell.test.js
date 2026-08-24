@@ -29,6 +29,23 @@ describe("parser", () => {
 });
 
 describe("execution", () => {
+  test("evaluates raw Bun. lines before shell parsing and expansion", async () => {
+    const output = await run(`  Bun.version + " $HOME * ; raw"`);
+    expect(output.status).toBe(0);
+    expect(output.stdout).toBe(`${Bun.version} $HOME * ; raw\n`);
+    expect(output.stderr).toBe("");
+  });
+
+  test("awaits Bun. eval results, suppresses undefined, and reports errors", async () => {
+    const empty = await run("Bun.sleep(0)");
+    expect(empty).toMatchObject({ status: 0, stdout: "", stderr: "" });
+
+    const failure = await run("Bun.thisMethodDoesNotExist()");
+    expect(failure.status).toBe(1);
+    expect(failure.stdout).toBe("");
+    expect(failure.stderr).toContain("TypeError");
+  });
+
   test("provides color aliases for common commands", () => {
     const state = createState();
     expect(state.aliases).toEqual({
