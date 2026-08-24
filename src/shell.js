@@ -1551,6 +1551,25 @@ export async function execute(source, state = createState(), io = {}) {
     : execution;
 }
 
+export async function executeArgv(argv, state = createState(), io = {}) {
+  if (argv.length === 0)
+    return result(2, "", "bunmsh: -cc requires a command\n");
+  const commandArgv = [...argv];
+  const execution = await runCommandArgv(
+    commandArgv,
+    state,
+    null,
+    Boolean(io.capture),
+    Boolean(io.capture),
+  );
+  state.lastStatus = execution.status;
+  if (!io.capture) {
+    if (execution.stdout.byteLength) await writeStream(process.stdout, execution.stdout);
+    if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
+  }
+  return execution;
+}
+
 export function decode(data) {
   return decoder.decode(data);
 }

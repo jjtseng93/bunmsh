@@ -314,3 +314,44 @@ describe("command mksh extensions", () => {
     expect(names).toContain("//");
   });
 });
+
+describe("CLI direct argv forwarding", () => {
+  test("-cc preserves every argument without shell expansion", async () => {
+    const output = await invoke(
+      [process.execPath, "src/main.js", "-cc"],
+      "/usr/bin/printf",
+      process.env,
+      ["<%s>\\n", "a b", "$HOME", "*", "semi;colon"],
+    );
+    expect(output).toEqual({
+      status: 0,
+      stdout: "<a b>\n<$HOME>\n<*>\n<semi;colon>\n",
+      stderr: "",
+    });
+  });
+
+  test("-cc uses builtin and PATH dispatch while preserving status", async () => {
+    const builtin = await invoke(
+      [process.execPath, "src/main.js", "-cc"],
+      "echo",
+      process.env,
+      ["direct", "argv"],
+    );
+    expect(builtin).toEqual({ status: 0, stdout: "direct argv\n", stderr: "" });
+
+    const failure = await invoke(
+      [process.execPath, "src/main.js", "-cc"],
+      "false",
+    );
+    expect(failure).toEqual({ status: 1, stdout: "", stderr: "" });
+  });
+
+  test("-cc without a command is a usage error", async () => {
+    const output = await invoke([process.execPath, "src/main.js"], "-cc");
+    expect(output).toEqual({
+      status: 2,
+      stdout: "",
+      stderr: "bunmsh: -cc requires a command\n",
+    });
+  });
+});

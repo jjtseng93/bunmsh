@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createInterface } from "node:readline/promises";
-import { createState, execute } from "./shell.js";
+import { createState, execute, executeArgv } from "./shell.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
 import pkg from "../package.json" with { type:"json" }
@@ -27,9 +27,11 @@ Usage:
   bunmsh
   bunmsh [options] [script [arguments...]]
   bunmsh -c command [name [arguments...]]
+  bunmsh -cc command [arguments...]
 
 Options:
   -c command   Execute command text
+  -cc command  Forward already-quoted argv without shell expansion
   -i           Enter interactive mode
   -h, --help   Show this help
   -V, --version
@@ -90,6 +92,7 @@ async function interactive(state) {
 
 async function main(argv) {
   let command = null;
+  let forwardedArgv = null;
   let forceInteractive = false;
   let i = 0;
   for (; i < argv.length; i++) {
@@ -105,6 +108,11 @@ async function main(argv) {
       }
       command = argv[++i];
       i++;
+      break;
+    }
+    if (arg === "-cc") {
+      forwardedArgv = argv.slice(i + 1);
+      i = argv.length;
       break;
     }
     if (arg === "-i") {
@@ -128,6 +136,16 @@ async function main(argv) {
       return 2;
     }
     break;
+  }
+
+  if (forwardedArgv !== null) {
+    if (forwardedArgv.length === 0) {
+      console.error("bunmsh: -cc requires a command");
+      return 2;
+    }
+    const state = createState();
+    const result = await executeArgv(forwardedArgv, state);
+    return state.exitRequested ? state.exitStatus : result.status;
   }
 
   if (command !== null) {
