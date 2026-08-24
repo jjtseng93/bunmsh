@@ -43,15 +43,23 @@ Options:
 `);
 }
 
-function renderPrompt(state) {
+function renderCwd(state, cwd) {
   const rawHome = state.env.HOME;
   const home = rawHome === "/" ? "/" : rawHome?.replace(/\/+$/, "");
-  let cwd = state.cwd;
-  if (home && state.cwd === home) cwd = "~";
-  else if (home === "/" && state.cwd.startsWith("/")) cwd = `~${state.cwd}`;
-  else if (home && state.cwd.startsWith(`${home}/`))
-    cwd = `~${state.cwd.slice(home.length)}`;
-  return (state.env.PS1 ?? "📁 \\w\n$ ").replaceAll("\\w", cwd);
+  if (home && cwd === home) return "~";
+  if (home === "/" && cwd.startsWith("/")) return `~${cwd}`;
+  if (home && cwd.startsWith(`${home}/`)) return `~${cwd.slice(home.length)}`;
+  return cwd;
+}
+
+function renderPrompt(state) {
+  const cwd = state.tabs.length > 1
+    ? state.tabs.map((path, index) =>
+        `${index === state.activeTab ? "📂" : "📁"} ${renderCwd(state, path)}`,
+      ).join("  ")
+    : renderCwd(state, state.cwd);
+  const defaultPrompt = state.tabs.length > 1 ? "\\w\n$ " : "📁 \\w\n$ ";
+  return (state.env.PS1 ?? defaultPrompt).replaceAll("\\w", cwd);
 }
 
 async function interactive(state) {

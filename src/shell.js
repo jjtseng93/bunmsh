@@ -446,6 +446,7 @@ async function commandSubstitution(source, state) {
     aliases: { ...state.aliases },
     readonly: new Set(state.readonly),
     directoryHistory: [...state.directoryHistory],
+    tabs: [...state.tabs],
     exitRequested: false,
     exitStatus: 0,
   };
@@ -700,6 +701,7 @@ async function changeDirectory(state, target, { print = false } = {}) {
     const previous = state.cwd;
     state.directoryHistory.push(previous);
     state.cwd = resolved;
+    state.tabs[state.activeTab] = resolved;
     state.env.OLDPWD = previous;
     state.env.PWD = resolved;
     return result(0, print ? `${resolved}\n` : "");
@@ -1008,6 +1010,44 @@ const builtins = {
     return changeDirectory(state, target);
   },
   chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
+  tab: async (argv, state) => {
+    if (argv.length > 2)
+      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|number]\n");
+    const action = argv[1];
+    const activate = (index) => {
+      state.activeTab = index;
+      state.cwd = state.tabs[index];
+      state.env.PWD = state.cwd;
+    };
+    if (action === "n" || (action === undefined && state.tabs.length === 1)) {
+      state.tabs.push(state.cwd);
+      activate(state.tabs.length - 1);
+      return result();
+    }
+    if (action === undefined || action === "r") {
+      activate((state.activeTab + 1) % state.tabs.length);
+      return result();
+    }
+    if (action === "l") {
+      activate((state.activeTab - 1 + state.tabs.length) % state.tabs.length);
+      return result();
+    }
+    if (action === "x") {
+      if (state.tabs.length === 1)
+        return result(1, "", "bunmsh: tab: cannot close the last tab\n");
+      state.tabs.splice(state.activeTab, 1);
+      activate(Math.min(state.activeTab, state.tabs.length - 1));
+      return result();
+    }
+    if (/^[1-9][0-9]*$/.test(action ?? "")) {
+      const index = Number(action) - 1;
+      if (index >= state.tabs.length)
+        return result(1, "", `bunmsh: tab: ${action}: no such tab\n`);
+      activate(index);
+      return result();
+    }
+    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|number]\n");
+  },
   "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
   "~": async (_argv, state) => builtins.cd(["cd"], state),
   "..": async (_argv, state) => changeDirectory(state, ".."),
@@ -1233,6 +1273,8 @@ export function createState(options = {}) {
     env,
     cwd,
     directoryHistory: [...(options.directoryHistory ?? [])],
+    tabs: [...(options.tabs ?? [cwd])],
+    activeTab: options.activeTab ?? 0,
     aliases: { ...DEFAULT_ALIASES, ...(options.aliases ?? {}) },
     readonly: new Set(options.readonly ?? []),
     getoptsOffset: 1,
@@ -1461,6 +1503,7 @@ async function runCommand(command, state, options = {}) {
         ...state,
         env: { ...state.env, ...localEnv },
         directoryHistory: [...state.directoryHistory],
+        tabs: [...state.tabs],
         readonly: new Set(state.readonly),
       }
     : state;

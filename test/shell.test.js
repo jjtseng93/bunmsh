@@ -110,6 +110,39 @@ describe("execution", () => {
     });
     expect(output.stdout).toBe("script arg 1 1\n");
   });
+
+  test("tab creates cwd-only workspaces and cycles between them", async () => {
+    const cwd = process.cwd();
+    const output = await run("tab; cd src; tab; pwd; tab; pwd", { cwd });
+    expect(output.stdout).toBe(`${cwd}\n${cwd}/src\n`);
+    expect(output.state.tabs).toEqual([cwd, `${cwd}/src`]);
+    expect(output.state.activeTab).toBe(1);
+    expect(output.state.cwd).toBe(`${cwd}/src`);
+    expect(output.state.env.OLDPWD).toBe(cwd);
+  });
+
+  test("tab supports new, numbered, left, right, and close operations", async () => {
+    const cwd = process.cwd();
+    const output = await run(
+      "tab n; cd src; tab n; cd ../test; tab 1; tab r; pwd; tab l; pwd; " +
+        "tab 3; pwd; tab x; pwd",
+      { cwd },
+    );
+    expect(output.stdout).toBe(`${cwd}/src\n${cwd}\n${cwd}/test\n${cwd}/src\n`);
+    expect(output.state.tabs).toEqual([cwd, `${cwd}/src`]);
+    expect(output.state.activeTab).toBe(1);
+    expect(output.state.cwd).toBe(`${cwd}/src`);
+  });
+
+  test("tab rejects invalid selection and closing the final tab", async () => {
+    const missing = await run("tab 2");
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toBe("bunmsh: tab: 2: no such tab\n");
+
+    const last = await run("tab x");
+    expect(last.status).toBe(1);
+    expect(last.stderr).toBe("bunmsh: tab: cannot close the last tab\n");
+  });
 });
 
 describe("CLI", () => {
@@ -149,6 +182,29 @@ describe("CLI", () => {
     ]);
     expect(status).toBe(0);
     expect(stdout).toBe(`[~${cwd.slice(home.length)}] `);
+    expect(stderr).toBe("");
+  });
+
+  test("shows all tab paths and marks the active tab", async () => {
+    const cwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+    const home = cwd.slice(0, cwd.lastIndexOf("/"));
+    const shown = `~${cwd.slice(home.length)}`;
+    const proc = Bun.spawn([process.execPath, "src/main.js", "-i"], {
+      cwd,
+      env: { ...process.env, HOME: home, PS1: "[\\w] " },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write("tab\nexit\n");
+    proc.stdin.end();
+    const [status, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toBe(`[${shown}] [📁 ${shown}  📂 ${shown}] `);
     expect(stderr).toBe("");
   });
 });
