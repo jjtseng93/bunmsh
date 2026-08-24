@@ -12,7 +12,7 @@ mksh's user-facing model; it is not yet a drop-in mksh replacement.
 | Lexing | Words, whitespace, comments at word boundaries, quotes, escapes |
 | Lists | `;`, newline, `&&`, `||` |
 | Pipelines | Basic stdout-to-stdin pipelines |
-| Expansion | Simple parameters and positional parameters |
+| Expansion | Quotes, parameters, command/arithmetic substitution, IFS fields, braces and globs |
 | Redirection | stdin, stdout/stderr truncate and append |
 | Processes | External commands use `Bun.spawn` with cwd and environment |
 | State | Persistent cwd, environment, last status and exit status |
@@ -25,9 +25,10 @@ mksh's user-facing model; it is not yet a drop-in mksh replacement.
   that require streaming/backpressure.
 - Builtins in a pipeline use copied shell state. External stages are real
   processes; builtin stages are JavaScript functions.
-- Unquoted parameter expansion currently produces one argument. POSIX IFS
-  field splitting is not implemented.
-- Filename generation/globbing is not implemented.
+- Expansion supports the common POSIX parameter operators, but not arrays,
+  namerefs or every mksh replacement/transform extension.
+- Filename generation supports standard `*`, `?` and bracket patterns;
+  mksh extended glob operators are not implemented yet.
 - The builtin `printf` supports only `%%`, `%s`, `%d`, `%i` and simple numeric
   width/zero-padding. It is not yet POSIX-complete.
 - `print` implements the common `-r`, `-R`, `-n`, `-l`, `-N`, `-u2` forms,
@@ -53,13 +54,10 @@ mksh's user-facing model; it is not yet a drop-in mksh replacement.
 
 ### Expansion
 
-- Command substitution: `$(...)` and legacy backticks
-- Arithmetic expansion: `$((...))`
-- Full parameter operators such as `${x:-default}`, trimming and replacement
+- Full parameter replacement and mksh transformation operators
 - Arrays, associative arrays and namerefs
-- IFS field splitting
-- Pathname expansion and extended glob patterns
-- Brace expansion, process substitution and mksh `${| ...; }` forms
+- Extended glob patterns, brace ranges and process substitution
+- mksh `${| ...; }` forms
 
 ### Runtime and job control
 

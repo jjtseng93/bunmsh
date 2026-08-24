@@ -39,6 +39,74 @@ async function invokeInternal(source, options = {}) {
 }
 
 describe("/bin/sh reference", () => {
+  describe("quote and word expansion", () => {
+    test("preserves quoted fields and removes quote syntax", async () => {
+      await expectLikeSh("value='a b'; /usr/bin/printf '<%s>\\n' \"$value\" '$value' a\\ b");
+    });
+
+    test("splits unquoted expansions using IFS", async () => {
+      await expectLikeSh("value='one two  three'; /usr/bin/printf '<%s>\\n' $value");
+    });
+
+    test("does not apply IFS splitting to literal parts of a word", async () => {
+      await expectLikeSh(
+        "IFS=:; value='one:two'; /usr/bin/printf '<%s>\\n' $value literal:field",
+      );
+    });
+
+    test("preserves empty fields from non-whitespace IFS delimiters", async () => {
+      await expectLikeSh("IFS=:; value=':a::b:'; /usr/bin/printf '<%s>\\n' $value");
+    });
+
+    test("supports parameter defaults, alternatives, lengths, and trimming", async () => {
+      await expectLikeSh(
+        "value=abc.txt; empty=; /usr/bin/printf '%s\\n' ${missing:-fallback} ${empty:-fallback} " +
+          "${value:+present} ${#value} ${value%.txt}",
+      );
+    });
+
+    test("keeps spaces and nested expansions inside parameter operands", async () => {
+      await expectLikeSh(
+        "fallback=inside; /usr/bin/printf '<%s>\\n' \"${missing:-two words}\" " +
+          "\"${missing:-${fallback}}\"",
+      );
+    });
+
+    test("performs command substitution and strips trailing newlines", async () => {
+      await expectLikeSh("/usr/bin/printf '<%s>\\n' \"$(printf 'a b\\n\\n')\"");
+    });
+
+    test("supports legacy backtick substitution", async () => {
+      await expectLikeSh("/usr/bin/printf '<%s>\\n' \"`echo legacy`\"");
+    });
+
+    test("uses command substitution status for assignment-only commands", async () => {
+      await expectLikeSh("value=$(false); echo $?");
+    });
+
+    test("performs arithmetic expansion with shell variables", async () => {
+      await expectLikeSh("number=6; /usr/bin/printf '%s\\n' $((number * 7 + 1))");
+    });
+
+    test("expands quoted and unquoted positional parameters", async () => {
+      await expectLikeSh(
+        "/usr/bin/printf '<%s>\\n' \"$@\"; /usr/bin/printf '[%s]\\n' $@",
+        process.env,
+        ["reference", "a b", "c"],
+      );
+    });
+
+    test("performs pathname generation but preserves quoted patterns", async () => {
+      await expectLikeSh(
+        "/usr/bin/printf '<%s>\\n' test/reference-*.sh 'test/reference-*.sh' test/no-match-*.none",
+      );
+    });
+
+    test("expands tilde in words and assignment values", async () => {
+      await expectLikeSh("path=~/folder; /usr/bin/printf '%s\\n' ~ \"$path\"");
+    });
+  });
+
   describe("command", () => {
     test("executes a utility and preserves its status", async () => {
       await expectLikeSh(
@@ -129,6 +197,32 @@ describe("/bin/sh reference", () => {
 });
 
 describe("command mksh extensions", () => {
+  test("performs mksh brace expansion", async () => {
+    const output = await invoke(bunmsh, "/usr/bin/printf '<%s>\\n' pre{one,two}post");
+    expect(output).toEqual({
+      status: 0,
+      stdout: "<preonepost>\n<pretwopost>\n",
+      stderr: "",
+    });
+  });
+
+  test("performs mksh parameter replacement", async () => {
+    const output = await invoke(
+      bunmsh,
+      "value=one-two-two; echo ${value/two/2}; echo ${value//two/2}",
+    );
+    expect(output).toEqual({
+      status: 0,
+      stdout: "one-2-two\none-2-2\n",
+      stderr: "",
+    });
+  });
+
+  test("quoted command names suppress alias expansion", async () => {
+    const output = await invokeInternal("'echo' hello", { aliases: { echo: ["false"] } });
+    expect(output).toEqual({ status: 0, stdout: "hello\n", stderr: "" });
+  });
+
   test("bypasses aliases while retaining builtins", async () => {
     const output = await invokeInternal("command echo hello", {
       aliases: { echo: ["false"] },

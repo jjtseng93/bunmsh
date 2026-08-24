@@ -1,4 +1,4 @@
-import { constants as fsConstants, accessSync, lstatSync, realpathSync, statSync } from "node:fs";
+import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 
@@ -43,6 +43,41 @@ function pushFragment(word, text, quote) {
   const previous = word.fragments.at(-1);
   if (previous?.quote === quote) previous.text += text;
   else word.fragments.push({ text, quote });
+}
+
+function substitutionEnd(source, start) {
+  if (source[start] === "`") {
+    for (let i = start + 1; i < source.length; i++) {
+      if (source[i] === "\\") i++;
+      else if (source[i] === "`") return i + 1;
+    }
+    throw new ShellSyntaxError("unterminated command substitution", start);
+  }
+  if (source[start] !== "$" || source[start + 1] !== "(") return start;
+  let depth = source[start + 2] === "(" ? 2 : 1;
+  let quote = null;
+  for (let i = start + 2 + (depth === 2 ? 1 : 0); i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "\\") { i++; continue; }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; continue; }
+    if (ch === "(") depth++;
+    else if (ch === ")" && --depth === 0) return i + 1;
+  }
+  throw new ShellSyntaxError("unterminated substitution", start);
+}
+
+function parameterEnd(source, start) {
+  let depth = 1;
+  for (let i = start + 2; i < source.length; i++) {
+    if (source[i] === "\\") { i++; continue; }
+    if (source[i] === "$" && source[i + 1] === "{") { depth++; i++; continue; }
+    if (source[i] === "}" && --depth === 0) return i + 1;
+  }
+  throw new ShellSyntaxError("unterminated parameter expansion", start);
 }
 
 export function tokenize(source) {
@@ -136,6 +171,12 @@ export function tokenize(source) {
             continue;
           }
         }
+        if ((source[i] === "$" && ["(", "{"].includes(source[i + 1])) || source[i] === "`") {
+          const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+          text += source.slice(i, end);
+          i = end;
+          continue;
+        }
         text += source[i++];
       }
       if (!closed)
@@ -162,6 +203,12 @@ export function tokenize(source) {
     let text = "";
     while (i < source.length) {
       const c = source[i];
+      if ((c === "$" && ["(", "{"].includes(source[i + 1])) || c === "`") {
+        const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+        text += source.slice(i, end);
+        i = end;
+        continue;
+      }
       const maybeOp =
         ["|", ";", "<", ">"].includes(c) ||
         source.slice(i, i + 2) === "&&" ||
@@ -245,44 +292,214 @@ function parameterValue(name, state) {
   if (name === "?") return String(state.lastStatus);
   if (name === "$") return String(process.pid);
   if (name === "#") return String(Math.max(0, state.args.length - 1));
+  if (name === "-") return "";
   if (name === "0") return state.args[0] ?? "bunmsh";
-  if (/^[1-9]$/.test(name)) return state.args[Number(name)] ?? "";
+  if (name === "@" || name === "*") return state.args.slice(1).join((state.env.IFS ?? " ")[0] ?? " ");
+  if (/^[1-9][0-9]*$/.test(name)) return state.args[Number(name)] ?? "";
   return state.env[name] ?? "";
 }
 
-function expandText(text, state) {
+function tildeDirectory(name, state) {
+  if (name === "") return state.env.HOME ?? "";
+  if (name === "+") return state.env.PWD ?? state.cwd;
+  if (name === "-") return state.env.OLDPWD ?? "~-";
+  try {
+    const entry = readFileSync("/etc/passwd", "utf8").split("\n")
+      .find((line) => line.split(":", 2)[0] === name);
+    return entry?.split(":")[5] ?? `~${name}`;
+  } catch { return `~${name}`; }
+}
+
+function expandTildes(text, state, assignment) {
+  const pattern = assignment ? /(^|[=:])~([A-Za-z0-9_.+-]*)(?=\/|:|$)/g : /^~([A-Za-z0-9_.+-]*)(?=\/|$)/;
+  if (assignment)
+    return text.replace(pattern, (_match, prefix, name) => `${prefix}${tildeDirectory(name, state)}`);
+  return text.replace(pattern, (_match, name) => tildeDirectory(name, state));
+}
+
+function arithmeticValue(source, state) {
+  const tokens = source.match(/(?:0[xX][0-9a-fA-F]+|\d+|[A-Za-z_][A-Za-z0-9_]*|\|\||&&|==|!=|<=|>=|<<|>>|[()+\-*/%<>&^|!~])/g) ?? [];
+  let i = 0;
+  const precedence = { "||": 1, "&&": 2, "|": 3, "^": 4, "&": 5, "==": 6, "!=": 6,
+    "<": 7, "<=": 7, ">": 7, ">=": 7, "<<": 8, ">>": 8, "+": 9, "-": 9,
+    "*": 10, "/": 10, "%": 10 };
+  const atom = () => {
+    const token = tokens[i++];
+    if (["+", "-", "!", "~"].includes(token)) {
+      const value = atom();
+      return token === "+" ? value : token === "-" ? -value : token === "!" ? Number(!value) : ~value;
+    }
+    if (token === "(") {
+      const value = expression(0);
+      if (tokens[i++] !== ")") throw new ShellSyntaxError("bad arithmetic expression");
+      return value;
+    }
+    if (/^[A-Za-z_]/.test(token ?? "")) return Number(state.env[token] ?? 0) || 0;
+    if (token === undefined) throw new ShellSyntaxError("bad arithmetic expression");
+    return Number(token);
+  };
+  const expression = (minimum) => {
+    let left = atom();
+    while ((precedence[tokens[i]] ?? -1) >= minimum) {
+      const op = tokens[i++], priority = precedence[op], right = expression(priority + 1);
+      left = { "||": Number(Boolean(left || right)), "&&": Number(Boolean(left && right)),
+        "|": left | right, "^": left ^ right, "&": left & right, "==": Number(left === right),
+        "!=": Number(left !== right), "<": Number(left < right), "<=": Number(left <= right),
+        ">": Number(left > right), ">=": Number(left >= right), "<<": left << right,
+        ">>": left >> right, "+": left + right, "-": left - right, "*": left * right,
+        "/": Math.trunc(left / right), "%": left % right }[op];
+    }
+    return left;
+  };
+  const value = expression(0);
+  if (i !== tokens.length || !Number.isFinite(value)) throw new ShellSyntaxError("bad arithmetic expression");
+  return String(value | 0);
+}
+
+function globPatternRegex(pattern, anchoredStart, anchoredEnd, greedy) {
+  let source = "";
+  for (const ch of pattern) {
+    if (ch === "*") source += greedy ? ".*" : ".*?";
+    else if (ch === "?") source += ".";
+    else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+  return new RegExp(`${anchoredStart ? "^" : ""}${source}${anchoredEnd ? "$" : ""}`);
+}
+
+async function parameterExpansion(body, state) {
+  if (/^[!%][A-Za-z_][A-Za-z0-9_]*$/.test(body)) {
+    const value = parameterValue(body.slice(1), state);
+    return body[0] === "!" ? parameterValue(value, state) : String([...value].length);
+  }
+  if (body.startsWith("#") && /^[A-Za-z_][A-Za-z0-9_]*$/.test(body.slice(1)))
+    return String(parameterValue(body.slice(1), state).length);
+  const trim = /^([A-Za-z_][A-Za-z0-9_]*|[?$#@*]|[0-9]+)(%%|%|##|#)(.*)$/s.exec(body);
+  if (trim) {
+    const value = parameterValue(trim[1], state);
+    const pattern = stripExpansionMarkers(await expandText(trim[3], state));
+    const matches = (part) => globPatternRegex(pattern, true, true, true).test(part);
+    if (trim[2] === "%") {
+      for (let i = value.length; i >= 0; i--) if (matches(value.slice(i))) return value.slice(0, i);
+    } else if (trim[2] === "%%") {
+      for (let i = 0; i <= value.length; i++) if (matches(value.slice(i))) return value.slice(0, i);
+    } else if (trim[2] === "#") {
+      for (let i = 0; i <= value.length; i++) if (matches(value.slice(0, i))) return value.slice(i);
+    } else {
+      for (let i = value.length; i >= 0; i--) if (matches(value.slice(0, i))) return value.slice(i);
+    }
+    return value;
+  }
+  const replace = /^([A-Za-z_][A-Za-z0-9_]*|[?$#@*-]|[0-9]+)\/(\/|#|%)?([^/]*)\/(.*)$/s.exec(body);
+  if (replace) {
+    const value = parameterValue(replace[1], state);
+    const pattern = stripExpansionMarkers(await expandText(replace[3], state));
+    const replacement = stripExpansionMarkers(await expandText(replace[4], state));
+    let source = "";
+    for (const ch of pattern) {
+      if (ch === "*") source += ".*";
+      else if (ch === "?") source += ".";
+      else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+    const prefix = replace[2] === "#" ? "^" : "";
+    const suffix = replace[2] === "%" ? "$" : "";
+    return value.replace(new RegExp(`${prefix}${source}${suffix}`, replace[2] === "/" ? "g" : ""), replacement);
+  }
+  const match = /^([A-Za-z_][A-Za-z0-9_]*|[?$#@*-]|[0-9]+)(?:(:?[-+=?])(.*))?$/s.exec(body);
+  if (!match) throw new ShellSyntaxError(`unsupported parameter expansion: \${${body}}`);
+  const [, name, operator, operand = ""] = match;
+  const value = parameterValue(name, state);
+  const unset = !Object.hasOwn(state.env, name) && !/^[?$#@*0-9]$/.test(name);
+  const empty = value === "";
+  if (!operator) return value;
+  const useEmpty = operator.startsWith(":");
+  const op = operator.at(-1);
+  const missing = unset || (useEmpty && empty);
+  const expandedOperand = async () => stripExpansionMarkers(await expandText(operand, state));
+  if (op === "-") return missing ? expandedOperand() : value;
+  if (op === "+") return missing ? "" : expandedOperand();
+  if (op === "=") {
+    if (missing) {
+      if (!/^[A-Za-z_]/.test(name)) throw new ShellSyntaxError("cannot assign positional parameter");
+      if (state.readonly?.has(name)) throw new ShellSyntaxError(`${name}: is read only`);
+      const expanded = await expandedOperand();
+      state.env[name] = expanded;
+      return expanded;
+    }
+    return value;
+  }
+  if (op === "?" && missing) throw new ShellSyntaxError(operand ? await expandedOperand() : `${name}: parameter null or not set`);
+  return value;
+}
+
+function markedExpansion(value) {
+  return `\u0001${value}\u0002`;
+}
+
+function stripExpansionMarkers(value) {
+  return value.replace(/[\u0001\u0002]/g, "");
+}
+
+async function commandSubstitution(source, state) {
+  const child = {
+    ...state,
+    env: { ...state.env },
+    aliases: { ...state.aliases },
+    readonly: new Set(state.readonly),
+    directoryHistory: [...state.directoryHistory],
+    exitRequested: false,
+    exitStatus: 0,
+  };
+  const output = await execute(source, child, { capture: true });
+  state.expansionStatus = output.status;
+  return decode(output.stdout).replace(/\n+$/, "");
+}
+
+async function expandText(text, state) {
   let output = "";
   for (let i = 0; i < text.length; ) {
     if (text[i] === "\u0000") {
-      output += text[i + 1] ?? "";
+      output += `\u0000${text[i + 1] ?? ""}`;
       i += 2;
+      continue;
+    }
+    if (text[i] === "`") {
+      const end = substitutionEnd(text, i);
+      output += markedExpansion(await commandSubstitution(text.slice(i + 1, end - 1), state));
+      i = end;
       continue;
     }
     if (text[i] !== "$") {
       output += text[i++];
       continue;
     }
+    if (text.startsWith("$((", i)) {
+      const end = substitutionEnd(text, i);
+      output += markedExpansion(arithmeticValue(text.slice(i + 3, end - 2), state));
+      i = end;
+      continue;
+    }
+    if (text.startsWith("$(", i)) {
+      const end = substitutionEnd(text, i);
+      output += markedExpansion(await commandSubstitution(text.slice(i + 2, end - 1), state));
+      i = end;
+      continue;
+    }
     if (text[i + 1] === "{") {
-      const end = text.indexOf("}", i + 2);
-      if (end === -1)
-        throw new ShellSyntaxError("unterminated parameter expansion");
-      const name = text.slice(i + 2, end);
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$|^[?$#0-9]$/.test(name))
-        throw new ShellSyntaxError(`unsupported parameter expansion: \${${name}}`);
-      output += parameterValue(name, state);
-      i = end + 1;
+      const end = parameterEnd(text, i);
+      output += markedExpansion(await parameterExpansion(text.slice(i + 2, end - 1), state));
+      i = end;
       continue;
     }
     const next = text[i + 1];
-    if (["?", "$", "#"].includes(next) || /[0-9]/.test(next ?? "")) {
-      output += parameterValue(next, state);
+    if (["?", "$", "#", "@", "*", "-"].includes(next) || /[0-9]/.test(next ?? "")) {
+      output += markedExpansion(parameterValue(next, state));
       i += 2;
       continue;
     }
     if (isNameStart(next)) {
       let end = i + 2;
       while (isNameChar(text[end])) end++;
-      output += parameterValue(text.slice(i + 1, end), state);
+      output += markedExpansion(parameterValue(text.slice(i + 1, end), state));
       i = end;
       continue;
     }
@@ -292,18 +509,111 @@ function expandText(text, state) {
   return output;
 }
 
-export function expandWord(word, state) {
-  let result = "";
-  let quoted = false;
-  for (const fragment of word.fragments) {
-    quoted ||= fragment.quote !== "none";
-    result += fragment.quote === "single"
-      ? fragment.text.replaceAll("\u0000", "")
-      : expandText(fragment.text, state);
+function splitFields(segments, state) {
+  const ifs = state.env.IFS === undefined ? " \t\n" : state.env.IFS;
+  const fields = [];
+  let current = [];
+  let forced = false;
+  let afterWhitespaceDelimiter = false;
+  const finish = (includeEmpty = false) => {
+    if (current.length || forced || includeEmpty) fields.push(current);
+    current = [];
+    forced = false;
+  };
+  for (const segment of segments) {
+    if (segment.quoted && segment.text === "") forced = true;
+    for (const ch of segment.text) {
+      if (!segment.quoted && segment.splittable && ifs.includes(ch)) {
+        const whitespace = " \t\n".includes(ch);
+        finish(!whitespace && !afterWhitespaceDelimiter);
+        afterWhitespaceDelimiter = whitespace;
+      } else {
+        current.push({ ch, quoted: segment.quoted });
+        afterWhitespaceDelimiter = false;
+      }
+    }
   }
-  if (!quoted && result.startsWith("~") && (result.length === 1 || result[1] === "/"))
-    result = `${state.env.HOME ?? ""}${result.slice(1)}`;
-  return result;
+  finish();
+  return fields;
+}
+
+async function pathnameFields(field, state) {
+  const value = field.map(({ ch }) => ch).join("");
+  if (!field.some(({ ch, quoted }) => !quoted && "*?[".includes(ch))) return [value];
+  const pattern = field.map(({ ch, quoted }) => {
+    if (!quoted) return ch;
+    if (ch === "*") return "[*]";
+    if (ch === "?") return "[?]";
+    if (ch === "[") return "[[]";
+    return ch;
+  }).join("");
+  const glob = new Bun.Glob(pattern);
+  const matches = [...glob.scanSync({ cwd: state.cwd, dot: false, onlyFiles: false })].sort();
+  return matches.length ? matches : [value];
+}
+
+function braceFields(field) {
+  let open = -1;
+  for (let i = 0; i < field.length; i++) {
+    if (!field[i].quoted && field[i].ch === "{") { open = i; break; }
+  }
+  if (open < 0) return [field];
+  let depth = 0, close = -1;
+  const commas = [];
+  for (let i = open; i < field.length; i++) {
+    if (field[i].quoted) continue;
+    if (field[i].ch === "{") depth++;
+    else if (field[i].ch === "}" && --depth === 0) { close = i; break; }
+    else if (field[i].ch === "," && depth === 1) commas.push(i);
+  }
+  if (close < 0 || commas.length === 0) return [field];
+  const boundaries = [open, ...commas, close];
+  const output = [];
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    const replacement = field.slice(boundaries[i] + 1, boundaries[i + 1]);
+    output.push(...braceFields([...field.slice(0, open), ...replacement, ...field.slice(close + 1)]));
+  }
+  return output;
+}
+
+export async function expandWord(word, state, options = {}) {
+  if (!options.single && word.fragments.length === 1 &&
+      word.fragments[0].quote === "double" && word.fragments[0].text === "$@")
+    return state.args.slice(1);
+  const segments = [];
+  for (let index = 0; index < word.fragments.length; index++) {
+    const fragment = word.fragments[index];
+    const source = fragment.quote === "none"
+      ? expandTildes(fragment.text, state, Boolean(options.assignment))
+      : fragment.text;
+    let text = fragment.quote === "single"
+      ? source.replaceAll("\u0000", "")
+      : await expandText(source, state);
+    if (fragment.quote !== "none") {
+      segments.push({ text: stripExpansionMarkers(text.replaceAll("\u0000", "")), quoted: true, splittable: false });
+    } else {
+      let plain = "";
+      let splittable = false;
+      const flush = () => {
+        if (plain) segments.push({ text: plain, quoted: false, splittable });
+        plain = "";
+      };
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === "\u0001") { flush(); splittable = true; continue; }
+        if (text[i] === "\u0002") { flush(); splittable = false; continue; }
+        if (text[i] !== "\u0000") { plain += text[i]; continue; }
+        flush();
+        segments.push({ text: text[++i] ?? "", quoted: true, splittable: false });
+      }
+      flush();
+    }
+  }
+  if (options.single) return [segments.map(({ text }) => text).join("")];
+  const fields = splitFields(segments, state);
+  const output = [];
+  for (const field of fields)
+    for (const expanded of braceFields(field)) output.push(...await pathnameFields(expanded, state));
+  return output;
 }
 
 function splitAssignment(value) {
@@ -992,14 +1302,28 @@ async function writeRedirect(path, data, append) {
 }
 
 async function runCommand(command, state, options = {}) {
+  state.expansionStatus = null;
   const standaloneTilde =
     command.words.length === 1 &&
     command.words[0].fragments.length === 1 &&
     command.words[0].fragments[0].quote === "none" &&
     command.words[0].fragments[0].text === "~";
-  const expanded = standaloneTilde
-    ? ["~"]
-    : command.words.map((word) => expandWord(word, state));
+  let assignmentPrefix = true;
+  let aliasEligible = false;
+  const expanded = standaloneTilde ? ["~"] : [];
+  if (!standaloneTilde) {
+    for (const word of command.words) {
+      const literal = word.fragments.map((fragment) => fragment.text.replaceAll("\u0000", "")).join("");
+      const assignment = assignmentPrefix && /^[A-Za-z_][A-Za-z0-9_]*=/.test(literal);
+      expanded.push(...await expandWord(word, state, { single: assignment, assignment }));
+      if (!assignment) {
+        if (assignmentPrefix)
+          aliasEligible = word.fragments.every((fragment) =>
+            fragment.quote === "none" && !fragment.text.includes("\u0000"));
+        assignmentPrefix = false;
+      }
+    }
+  }
   const localEnv = {};
   while (expanded.length) {
     const assignment = splitAssignment(expanded[0]);
@@ -1011,9 +1335,9 @@ async function runCommand(command, state, options = {}) {
     for (const name of Object.keys(localEnv))
       if (state.readonly.has(name)) return readonlyError(name);
     Object.assign(state.env, localEnv);
-    return result();
+    return result(state.expansionStatus ?? 0);
   }
-  const alias = state.aliases[expanded[0]];
+  const alias = aliasEligible ? state.aliases[expanded[0]] : null;
   if (alias) expanded.splice(0, 1, ...alias);
 
   let input = options.input ?? null;
@@ -1022,7 +1346,8 @@ async function runCommand(command, state, options = {}) {
   let stderrPath = null;
   let stderrAppend = false;
   for (const redirect of command.redirects) {
-    const target = expandWord(redirect.target, state);
+    const targets = await expandWord(redirect.target, state, { single: true });
+    const target = targets[0];
     const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
     if (redirect.op === "<") {
       try {
