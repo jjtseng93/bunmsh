@@ -1216,7 +1216,10 @@ function formatMilliseconds(milliseconds, color = Boolean(process.stderr.isTTY))
       continue;
     }
     const magnitude = i < decimal ? decimal - i - 1 : decimal - i;
-    const index = ((magnitude % palette.length) + palette.length) % palette.length;
+    // Keep each three-digit magnitude region the same colour: units
+    // (000), thousands (000), millions (000), then fractional groups.
+    const group = Math.floor(magnitude / 3);
+    const index = ((group % palette.length) + palette.length) % palette.length;
     output += `\x1b[38;5;${palette[index]}m${rendered[i]}\x1b[0m`;
   }
   return output;
