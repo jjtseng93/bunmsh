@@ -1252,8 +1252,13 @@ async function runCommandArgv(argv, state, input, captureStdout, captureStderr) 
   let commandState = state;
   while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
     if (commandArgv[0] !== "command") {
+      const builtinName = commandArgv[0];
       const start = commandArgv[1] === "--" ? 2 : 1;
-      if (start >= commandArgv.length) return result();
+      if (start >= commandArgv.length) {
+        if (builtinName === "builtin")
+          return result(0, `${Object.keys(builtins).sort().join("\n")}\n`);
+        return result();
+      }
       commandArgv = commandArgv.slice(start);
       if (!Object.hasOwn(builtins, commandArgv[0]))
         return result(1, "", `bunmsh: builtin: ${commandArgv[0]}: not found\n`);

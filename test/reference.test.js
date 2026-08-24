@@ -243,4 +243,16 @@ describe("command mksh extensions", () => {
     const output = await invoke(bunmsh, "whence echo; builtin echo builtin-ok");
     expect(output).toEqual({ status: 0, stdout: "echo\nbuiltin-ok\n", stderr: "" });
   });
+
+  test("standalone builtin lists registered builtin names", async () => {
+    const output = await invoke(bunmsh, "builtin");
+    expect(output.status).toBe(0);
+    expect(output.stderr).toBe("");
+    const names = output.stdout.trimEnd().split("\n");
+    expect(names).toEqual([...names].sort());
+    expect(names).toContain("builtin");
+    expect(names).toContain("command");
+    expect(names).toContain("..");
+    expect(names).toContain("//");
+  });
 });
