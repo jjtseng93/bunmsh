@@ -1,3 +1,7 @@
+import { constants as fsConstants, accessSync, lstatSync, realpathSync, statSync } from "node:fs";
+import { constants as osConstants } from "node:os";
+import { isAbsolute, resolve as resolvePath } from "node:path";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEFAULT_ALIASES = {
@@ -5,6 +9,7 @@ const DEFAULT_ALIASES = {
   diff: ["diff", "--color=auto"],
   grep: ["grep", "--color=auto"],
 };
+const DEFAULT_COMMAND_PATH = "/bin:/usr/bin";
 
 export class ShellSyntaxError extends Error {
   constructor(message, offset = -1) {
@@ -326,6 +331,27 @@ function result(status = 0, stdout = "", stderr = "") {
   return { status, stdout: bytes(stdout), stderr: bytes(stderr) };
 }
 
+function quoteShellWord(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function findExecutable(name, state, defaultPath = false) {
+  const path = defaultPath ? DEFAULT_COMMAND_PATH : (state.env.PATH ?? "");
+  return Bun.which(name, { PATH: path, cwd: state.cwd });
+}
+
+function aliasWords(value) {
+  const tokens = tokenize(value);
+  if (tokens.some((token) => token.type !== "word")) return null;
+  return tokens.map((token) => token.fragments
+    .map((fragment) => fragment.text.replaceAll("\u0000", ""))
+    .join(""));
+}
+
+function readonlyError(name) {
+  return result(1, "", `bunmsh: ${name}: is read only\n`);
+}
+
 function writeStream(stream, data) {
   return new Promise((resolve, reject) => {
     stream.write(data, (error) => error ? reject(error) : resolve());
@@ -384,10 +410,188 @@ async function previousChildDirectory(state) {
   return result(1, "", "bunmsh: //: no previous child directory\n");
 }
 
+async function sourceFile(argv, state) {
+  if (!argv[1]) return result(2, "", `bunmsh: ${argv[0]}: missing file operand\n`);
+  let path = argv[1];
+  if (!path.includes("/")) {
+    const found = (state.env.PATH ?? "").split(":")
+      .map((directory) => resolvePath(directory || state.cwd, path))
+      .find((candidate) => {
+        try { return statSync(candidate).isFile(); } catch { return false; }
+      });
+    if (found) path = found;
+  } else if (!isAbsolute(path)) path = resolvePath(state.cwd, path);
+  try {
+    const source = await Bun.file(path).text();
+    const previousArgs = state.args;
+    if (argv.length > 2) state.args = [previousArgs[0], ...argv.slice(2)];
+    try {
+      return await execute(source, state, { capture: true });
+    } finally {
+      state.args = previousArgs;
+    }
+  } catch (error) {
+    return result(1, "", `bunmsh: ${argv[0]}: ${argv[1]}: ${error.message}\n`);
+  }
+}
+
+function testStat(path, state) {
+  try { return statSync(isAbsolute(path) ? path : resolvePath(state.cwd, path)); }
+  catch { return null; }
+}
+
+function evaluateTest(argv, state) {
+  if (argv.length === 0) return false;
+  if (argv[0] === "!") return !evaluateTest(argv.slice(1), state);
+  const or = argv.indexOf("-o");
+  if (or >= 0) return evaluateTest(argv.slice(0, or), state) || evaluateTest(argv.slice(or + 1), state);
+  const and = argv.indexOf("-a");
+  if (and >= 0) return evaluateTest(argv.slice(0, and), state) && evaluateTest(argv.slice(and + 1), state);
+  if (argv.length === 1) return argv[0].length > 0;
+  if (argv.length === 2) {
+    const [op, value] = argv;
+    if (op === "-n") return value.length > 0;
+    if (op === "-z") return value.length === 0;
+    const stat = testStat(value, state);
+    if (op === "-e") return stat !== null;
+    if (op === "-f") return Boolean(stat?.isFile());
+    if (op === "-d") return Boolean(stat?.isDirectory());
+    if (op === "-b") return Boolean(stat?.isBlockDevice());
+    if (op === "-c") return Boolean(stat?.isCharacterDevice());
+    if (op === "-p") return Boolean(stat?.isFIFO());
+    if (op === "-S") return Boolean(stat?.isSocket());
+    if (op === "-L" || op === "-h") {
+      try { return lstatSync(isAbsolute(value) ? value : resolvePath(state.cwd, value)).isSymbolicLink(); }
+      catch { return false; }
+    }
+    if (op === "-s") return Boolean(stat && stat.size > 0);
+    if (op === "-r" || op === "-w" || op === "-x") {
+      try {
+        const mode = op === "-r" ? fsConstants.R_OK : op === "-w" ? fsConstants.W_OK : fsConstants.X_OK;
+        accessSync(isAbsolute(value) ? value : resolvePath(state.cwd, value), mode);
+        return true;
+      } catch { return false; }
+    }
+    return false;
+  }
+  if (argv.length === 3) {
+    const [left, op, right] = argv;
+    if (op === "=" || op === "==") return left === right;
+    if (op === "!=") return left !== right;
+    if (["-eq", "-ne", "-gt", "-ge", "-lt", "-le"].includes(op)) {
+      const a = Number(left), b = Number(right);
+      if (!Number.isInteger(a) || !Number.isInteger(b)) throw new Error("integer expression expected");
+      return { "-eq": a === b, "-ne": a !== b, "-gt": a > b, "-ge": a >= b,
+        "-lt": a < b, "-le": a <= b }[op];
+    }
+    const a = testStat(left, state), b = testStat(right, state);
+    if (op === "-nt") return Boolean(a && (!b || a.mtimeMs > b.mtimeMs));
+    if (op === "-ot") return Boolean(b && (!a || a.mtimeMs < b.mtimeMs));
+    if (op === "-ef") return Boolean(a && b && a.dev === b.dev && a.ino === b.ino);
+  }
+  throw new Error("unsupported expression");
+}
+
 const builtins = {
   ":": async () => result(),
   true: async () => result(),
   false: async () => result(1),
+  // Execution is handled specially by runCommand so command can alter command
+  // lookup without creating another parsed command.
+  command: null,
+  builtin: null,
+  __builtin: null,
+  whence: async (argv, state) => {
+    let pathOnly = false, verbose = false, i = 1;
+    for (; i < argv.length; i++) {
+      if (argv[i] === "--") { i++; break; }
+      if (argv[i] === "-p") pathOnly = true;
+      else if (argv[i] === "-v") verbose = true;
+      else if (argv[i].startsWith("-") && argv[i] !== "-")
+        return result(1, "", `bunmsh: whence: ${argv[i]}: unknown option\n`);
+      else break;
+    }
+    let status = 0, output = "";
+    for (const name of argv.slice(i)) {
+      let description;
+      if (pathOnly) {
+        const path = findExecutable(name, state);
+        description = path ? `${path}\n` : null;
+      } else description = describeCommand(name, state, verbose, false);
+      if (description === null || description.endsWith(" not found\n")) status = 1;
+      if (description) output += description;
+    }
+    return result(status, output);
+  },
+  type: async (argv, state) => {
+    let status = 0, output = "";
+    for (const name of argv.slice(1)) {
+      const description = describeCommand(name, state, true, false);
+      if (description.endsWith(" not found\n")) status = 1;
+      output += description;
+    }
+    return result(status, output);
+  },
+  alias: async (argv, state) => {
+    if (argv.length === 1) {
+      const output = Object.entries(state.aliases)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, words]) => `alias ${name}=${quoteShellWord(words.join(" "))}\n`)
+        .join("");
+      return result(0, output);
+    }
+    let status = 0;
+    let output = "";
+    let stderr = "";
+    for (const item of argv.slice(1)) {
+      const equal = item.indexOf("=");
+      if (equal < 0) {
+        const words = state.aliases[item];
+        if (words) output += `alias ${item}=${quoteShellWord(words.join(" "))}\n`;
+        else {
+          status = 1;
+          stderr += `bunmsh: alias: ${item}: not found\n`;
+        }
+        continue;
+      }
+      const name = item.slice(0, equal);
+      const words = aliasWords(item.slice(equal + 1));
+      if (!name || words === null) {
+        status = 1;
+        stderr += `bunmsh: alias: ${name || item}: invalid alias\n`;
+      } else state.aliases[name] = words;
+    }
+    return result(status, output, stderr);
+  },
+  unalias: async (argv, state) => {
+    let i = 1;
+    if (argv[i] === "-a") {
+      state.aliases = {};
+      return result();
+    }
+    if (argv[i] === "--") i++;
+    if (i === argv.length)
+      return result(1, "", "bunmsh: unalias: missing alias name\n");
+    let status = 0;
+    let stderr = "";
+    for (; i < argv.length; i++) {
+      if (Object.hasOwn(state.aliases, argv[i])) delete state.aliases[argv[i]];
+      else {
+        status = 1;
+        stderr += `bunmsh: unalias: ${argv[i]}: not found\n`;
+      }
+    }
+    return result(status, "", stderr);
+  },
+  test: async (argv, state) => {
+    try { return result(evaluateTest(argv.slice(1), state) ? 0 : 1); }
+    catch (error) { return result(2, "", `bunmsh: test: ${error.message}\n`); }
+  },
+  "[": async (argv, state) => {
+    if (argv.at(-1) !== "]") return result(2, "", "bunmsh: [: missing ]\n");
+    try { return result(evaluateTest(argv.slice(1, -1), state) ? 0 : 1); }
+    catch (error) { return result(2, "", `bunmsh: [: ${error.message}\n`); }
+  },
   echo: async (argv) => {
     let newline = true;
     let start = 1;
@@ -479,6 +683,7 @@ const builtins = {
     if (!target) return result(1, "", "bunmsh: cd: HOME is not set\n");
     return changeDirectory(state, target);
   },
+  chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
   "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
   "~": async (_argv, state) => builtins.cd(["cd"], state),
   "..": async (_argv, state) => changeDirectory(state, ".."),
@@ -493,7 +698,10 @@ const builtins = {
     }
     for (const item of argv.slice(1)) {
       const assignment = splitAssignment(item);
-      if (assignment) state.env[assignment.name] = assignment.value;
+      if (assignment) {
+        if (state.readonly.has(assignment.name)) return readonlyError(assignment.name);
+        state.env[assignment.name] = assignment.value;
+      }
       else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(item))
         state.env[item] ??= "";
       else return result(1, "", `bunmsh: export: ${item}: invalid name\n`);
@@ -501,10 +709,34 @@ const builtins = {
     return result();
   },
   unset: async (argv, state) => {
-    for (const name of argv.slice(1)) {
+    let i = 1;
+    if (argv[i] === "-v" || argv[i] === "--") i++;
+    for (const name of argv.slice(i)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
         return result(1, "", `bunmsh: unset: ${name}: invalid name\n`);
+      if (state.readonly.has(name)) return readonlyError(name);
       delete state.env[name];
+    }
+    return result();
+  },
+  readonly: async (argv, state) => {
+    if (argv.length === 1 || (argv.length === 2 && argv[1] === "-p")) {
+      const output = [...state.readonly].sort()
+        .map((name) => `readonly ${name}=${quoteShellWord(state.env[name] ?? "")}\n`)
+        .join("");
+      return result(0, output);
+    }
+    let i = argv[1] === "--" ? 2 : 1;
+    for (; i < argv.length; i++) {
+      const assignment = splitAssignment(argv[i]);
+      const name = assignment?.name ?? argv[i];
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+        return result(1, "", `bunmsh: readonly: ${name}: invalid name\n`);
+      if (assignment) {
+        if (state.readonly.has(name)) return readonlyError(name);
+        state.env[name] = assignment.value;
+      } else state.env[name] ??= "";
+      state.readonly.add(name);
     }
     return result();
   },
@@ -520,6 +752,102 @@ const builtins = {
     state.exitRequested = true;
     state.exitStatus = status & 255;
     return result(state.exitStatus);
+  },
+  shift: async (argv, state) => {
+    const count = argv[1] === undefined ? 1 : Number(argv[1]);
+    if (!Number.isInteger(count) || count < 0)
+      return result(1, "", `bunmsh: shift: ${argv[1]}: bad number\n`);
+    if (count > state.args.length - 1) return result(1);
+    state.args.splice(1, count);
+    return result();
+  },
+  getopts: async (argv, state) => {
+    if (argv.length < 3)
+      return result(2, "", "bunmsh: getopts: usage: getopts optstring name [arg ...]\n");
+    const optstring = argv[1];
+    const variable = argv[2];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable))
+      return result(2, "", `bunmsh: getopts: ${variable}: invalid name\n`);
+    const args = argv.length > 3 ? argv.slice(3) : state.args.slice(1);
+    let index = Number(state.env.OPTIND ?? "1");
+    if (!Number.isInteger(index) || index < 1) index = 1;
+    let offset = state.getoptsOffset ?? 1;
+    const current = args[index - 1];
+    if (!current || current === "--" || !current.startsWith("-") || current === "-") {
+      if (current === "--") state.env.OPTIND = String(index + 1);
+      state.getoptsOffset = 1;
+      return result(1);
+    }
+    const option = current[offset];
+    const position = optstring.indexOf(option);
+    const requiresArgument = position >= 0 && optstring[position + 1] === ":";
+    let stderr = "";
+    delete state.env.OPTARG;
+    if (position < 0 || option === ":") {
+      state.env[variable] = "?";
+      if (optstring[0] === ":") state.env.OPTARG = option;
+      else stderr = `bunmsh: getopts: -${option}: unknown option\n`;
+    } else if (requiresArgument) {
+      if (offset + 1 < current.length) state.env.OPTARG = current.slice(offset + 1);
+      else if (index < args.length) state.env.OPTARG = args[index++];
+      else {
+        state.env[variable] = optstring[0] === ":" ? ":" : "?";
+        if (optstring[0] === ":") state.env.OPTARG = option;
+        else stderr = `bunmsh: getopts: -${option}: argument expected\n`;
+        state.env.OPTIND = String(index + 1);
+        state.getoptsOffset = 1;
+        return result(0, "", stderr);
+      }
+      state.env[variable] = option;
+      offset = current.length;
+    } else state.env[variable] = option;
+    if (offset + 1 >= current.length) {
+      index++;
+      offset = 1;
+    } else offset++;
+    state.env.OPTIND = String(index);
+    state.getoptsOffset = offset;
+    return result(0, "", stderr);
+  },
+  eval: async (argv, state) => execute(argv.slice(1).join(" "), state, { capture: true }),
+  ".": async (argv, state) => sourceFile(argv, state),
+  source: async (argv, state) => sourceFile(argv, state),
+  realpath: async (argv, state) => {
+    let output = "";
+    try {
+      for (const item of argv.slice(1))
+        output += `${realpathSync(isAbsolute(item) ? item : resolvePath(state.cwd, item))}\n`;
+      return result(0, output);
+    } catch (error) {
+      return result(1, "", `bunmsh: realpath: ${error.message}\n`);
+    }
+  },
+  umask: async (argv) => {
+    if (argv.length === 1) return result(0, `${process.umask().toString(8).padStart(4, "0")}\n`);
+    if (argv.length !== 2 || !/^[0-7]{1,4}$/.test(argv[1]))
+      return result(1, "", "bunmsh: umask: bad mask\n");
+    process.umask(Number.parseInt(argv[1], 8));
+    return result();
+  },
+  kill: async (argv) => {
+    let signal = "SIGTERM";
+    let i = 1;
+    if (argv[i] === "-l") {
+      const names = Object.keys(osConstants.signals).map((name) => name.replace(/^SIG/, ""));
+      return result(0, `${names.join(" ")}\n`);
+    }
+    if (argv[i]?.startsWith("-") && argv[i] !== "-") {
+      const value = argv[i++].slice(1).toUpperCase();
+      signal = /^\d+$/.test(value) ? Number(value) : `SIG${value.replace(/^SIG/, "")}`;
+    }
+    if (i >= argv.length) return result(2, "", "bunmsh: kill: missing pid\n");
+    let status = 0, stderr = "";
+    for (; i < argv.length; i++) {
+      const pid = Number(argv[i]);
+      try { process.kill(pid, signal); }
+      catch (error) { status = 1; stderr += `bunmsh: kill: ${argv[i]}: ${error.message}\n`; }
+    }
+    return result(status, "", stderr);
   },
   set: async (argv, state) => {
     if (argv.length === 1)
@@ -537,6 +865,8 @@ export function createState(options = {}) {
     cwd,
     directoryHistory: [...(options.directoryHistory ?? [])],
     aliases: { ...DEFAULT_ALIASES, ...(options.aliases ?? {}) },
+    readonly: new Set(options.readonly ?? []),
+    getoptsOffset: 1,
     args: options.args ?? ["bunmsh"],
     lastStatus: 0,
     exitRequested: false,
@@ -572,6 +902,85 @@ async function runExternal(argv, state, input, captureStdout, captureStderr) {
   }
 }
 
+function parseCommandOptions(argv) {
+  let defaultPath = false;
+  let query = null;
+  let i = 1;
+  for (; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      i++;
+      break;
+    }
+    if (arg === "-" || !arg.startsWith("-")) break;
+    for (const option of arg.slice(1)) {
+      if (option === "p") defaultPath = true;
+      else if (option === "v" || option === "V") query = option;
+      else return { error: option };
+    }
+  }
+  return { defaultPath, query, operands: argv.slice(i) };
+}
+
+function describeCommand(name, state, verbose, defaultPath) {
+  const alias = state.aliases[name];
+  if (alias) {
+    const definition = quoteShellWord(alias.join(" "));
+    return verbose
+      ? `${name} is an alias for ${definition}\n`
+      : `alias ${name}=${definition}\n`;
+  }
+  if (Object.hasOwn(builtins, name))
+    return verbose ? `${name} is a shell builtin\n` : `${name}\n`;
+  const path = findExecutable(name, state, defaultPath);
+  if (path) return verbose ? `${name} is ${path}\n` : `${path}\n`;
+  return verbose ? `${name} not found\n` : null;
+}
+
+async function runCommandArgv(argv, state, input, captureStdout, captureStderr) {
+  let commandArgv = argv;
+  let commandState = state;
+  while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
+    if (commandArgv[0] !== "command") {
+      const start = commandArgv[1] === "--" ? 2 : 1;
+      if (start >= commandArgv.length) return result();
+      commandArgv = commandArgv.slice(start);
+      if (!Object.hasOwn(builtins, commandArgv[0]))
+        return result(1, "", `bunmsh: builtin: ${commandArgv[0]}: not found\n`);
+      if (!["command", "builtin", "__builtin"].includes(commandArgv[0]))
+        return builtins[commandArgv[0]](commandArgv, commandState, input);
+      continue;
+    }
+    const parsed = parseCommandOptions(commandArgv);
+    if (parsed.error)
+      return result(1, "", `bunmsh: command: -${parsed.error}: unknown option\n`);
+    if (parsed.query) {
+      let status = 0;
+      let output = "";
+      for (const name of parsed.operands) {
+        const description = describeCommand(
+          name,
+          commandState,
+          parsed.query === "V",
+          parsed.defaultPath,
+        );
+        if (description === null || description.endsWith(" not found\n")) status = 1;
+        if (description !== null) output += description;
+        if (status && parsed.query === "v") break;
+      }
+      return result(status, output);
+    }
+    if (parsed.operands.length === 0) return result();
+    commandArgv = parsed.operands;
+    if (parsed.defaultPath) {
+      commandState = { ...commandState, env: { ...commandState.env, PATH: DEFAULT_COMMAND_PATH } };
+    }
+  }
+  if (Object.hasOwn(builtins, commandArgv[0]))
+    return builtins[commandArgv[0]](commandArgv, commandState, input);
+  return runExternal(commandArgv, commandState, input, captureStdout, captureStderr);
+}
+
 async function writeRedirect(path, data, append) {
   if (!append) {
     await Bun.write(path, data);
@@ -599,6 +1008,8 @@ async function runCommand(command, state, options = {}) {
     expanded.shift();
   }
   if (expanded.length === 0) {
+    for (const name of Object.keys(localEnv))
+      if (state.readonly.has(name)) return readonlyError(name);
     Object.assign(state.env, localEnv);
     return result();
   }
@@ -633,18 +1044,24 @@ async function runCommand(command, state, options = {}) {
         ...state,
         env: { ...state.env, ...localEnv },
         directoryHistory: [...state.directoryHistory],
+        readonly: new Set(state.readonly),
       }
     : state;
-  if (!options.subshell) Object.assign(commandState.env, localEnv);
+  if (!options.subshell) {
+    for (const name of Object.keys(localEnv))
+      if (commandState.readonly.has(name)) return readonlyError(name);
+    Object.assign(commandState.env, localEnv);
+  }
 
   const captureStdout = options.captureStdout || stdoutPath !== null;
   const captureStderr = options.captureStderr || stderrPath !== null;
-  let execution;
-  if (builtins[expanded[0]]) {
-    execution = await builtins[expanded[0]](expanded, commandState, input);
-  } else {
-    execution = await runExternal(expanded, commandState, input, captureStdout, captureStderr);
-  }
+  const execution = await runCommandArgv(
+    expanded,
+    commandState,
+    input,
+    captureStdout,
+    captureStderr,
+  );
 
   if (stdoutPath !== null) {
     try {
