@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createState, decode, execute } from "../src/shell.js";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -161,6 +164,23 @@ describe("/bin/sh reference", () => {
   });
 
   describe("query and system builtins", () => {
+    test("basename handles an optional suffix", async () => {
+      await expectLikeSh("basename /usr/src/shell.js .js");
+    });
+
+    test("dirname returns the containing path", async () => {
+      await expectLikeSh("dirname /usr/src/shell.js");
+    });
+
+    test("which searches PATH using Bun.which semantics", async () => {
+      const output = await invoke(bunmsh, "which sh; which bunmsh-command-that-does-not-exist");
+      expect(output).toEqual({
+        status: 1,
+        stdout: `${Bun.which("sh", { PATH: process.env.PATH, cwd: root })}\n`,
+        stderr: "",
+      });
+    });
+
     test("test and [ evaluate files, strings, and integers", async () => {
       await expectLikeSh(
         "test -d . && echo directory; test -n value && echo string; " +
@@ -197,6 +217,44 @@ describe("/bin/sh reference", () => {
 });
 
 describe("command mksh extensions", () => {
+  test("PATH overrides fallback builtins, while builtin selects them explicitly", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-fallback-"));
+    const executable = join(directory, "basename");
+    await Bun.write(executable, "#!/bin/sh\necho external-basename\n");
+    chmodSync(executable, 0o755);
+    const output = await invoke(
+      bunmsh,
+      "basename /a/b/file.txt; builtin basename /a/b/file.txt",
+      { ...process.env, PATH: directory },
+    );
+    expect(output).toEqual({
+      status: 0,
+      stdout: "external-basename\nfile.txt\n",
+      stderr: "",
+    });
+  });
+
+  test("fallback builtins run when PATH has no matching executable", async () => {
+    const output = await invoke(
+      bunmsh,
+      "basename /a/b/file.txt; dirname /a/b/file.txt",
+      { ...process.env, PATH: "/no/such/path" },
+    );
+    expect(output).toEqual({ status: 0, stdout: "file.txt\n/a/b\n", stderr: "" });
+  });
+
+  test("time reports elapsed nanosecond timing and preserves command results", async () => {
+    const output = await invoke(bunmsh, "time echo timed");
+    expect(output.status).toBe(0);
+    expect(output.stdout).toBe("timed\n");
+    expect(output.stderr).toMatch(/^real \d+\.\d{6} ms\n$/);
+
+    const failure = await invoke(bunmsh, "time false");
+    expect(failure.status).toBe(1);
+    expect(failure.stdout).toBe("");
+    expect(failure.stderr).toMatch(/^real \d+\.\d{6} ms\n$/);
+  });
+
   test("performs mksh brace expansion", async () => {
     const output = await invoke(bunmsh, "/usr/bin/printf '<%s>\\n' pre{one,two}post");
     expect(output).toEqual({

@@ -1,6 +1,6 @@
 import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { basename as pathBasename, dirname as pathDirname, isAbsolute, resolve as resolvePath } from "node:path";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -811,6 +811,7 @@ const builtins = {
   command: null,
   builtin: null,
   __builtin: null,
+  time: null,
   whence: async (argv, state) => {
     let pathOnly = false, verbose = false, i = 1;
     for (; i < argv.length; i++) {
@@ -830,6 +831,19 @@ const builtins = {
       } else description = describeCommand(name, state, verbose, false);
       if (description === null || description.endsWith(" not found\n")) status = 1;
       if (description) output += description;
+    }
+    return result(status, output);
+  },
+  which: async (argv, state) => {
+    let i = 1;
+    if (argv[i] === "--") i++;
+    if (i >= argv.length)
+      return result(1, "", "bunmsh: which: missing command name\n");
+    let status = 0, output = "";
+    for (; i < argv.length; i++) {
+      const path = Bun.which(argv[i], { PATH: state.env.PATH ?? "", cwd: state.cwd });
+      if (path) output += `${path}\n`;
+      else status = 1;
     }
     return result(status, output);
   },
@@ -1166,6 +1180,48 @@ const builtins = {
   },
 };
 
+// These are used only when PATH does not provide an executable of the same
+// name. `builtin name` can still select them explicitly.
+const fallbackBuiltins = {
+  basename: async (argv) => {
+    const i = argv[1] === "--" ? 2 : 1;
+    if (i >= argv.length || argv.length - i > 2)
+      return result(1, "", "bunmsh: basename: usage: basename string [suffix]\n");
+    let name = pathBasename(argv[i]);
+    const suffix = argv[i + 1];
+    if (suffix && suffix !== name && name.endsWith(suffix)) name = name.slice(0, -suffix.length);
+    return result(0, `${name}\n`);
+  },
+  dirname: async (argv) => {
+    const i = argv[1] === "--" ? 2 : 1;
+    if (argv.length - i !== 1)
+      return result(1, "", "bunmsh: dirname: usage: dirname string\n");
+    return result(0, `${pathDirname(argv[i])}\n`);
+  },
+};
+
+function builtinNames() {
+  return [...new Set([...Object.keys(builtins), ...Object.keys(fallbackBuiltins)])].sort();
+}
+
+function formatMilliseconds(milliseconds, color = Boolean(process.stderr.isTTY)) {
+  const rendered = milliseconds.toFixed(6);
+  if (!color) return rendered;
+  const decimal = rendered.indexOf(".");
+  const palette = [46, 82, 118, 154, 190, 226, 220, 214, 208, 202, 196, 198, 201, 165, 129, 93, 57, 21, 27, 33, 39, 45];
+  let output = "";
+  for (let i = 0; i < rendered.length; i++) {
+    if (rendered[i] === ".") {
+      output += "\x1b[2m.\x1b[0m";
+      continue;
+    }
+    const magnitude = i < decimal ? decimal - i - 1 : decimal - i;
+    const index = ((magnitude % palette.length) + palette.length) % palette.length;
+    output += `\x1b[38;5;${palette[index]}m${rendered[i]}\x1b[0m`;
+  }
+  return output;
+}
+
 export function createState(options = {}) {
   const env = { ...process.env, ...(options.env ?? {}) };
   const cwd = options.cwd ?? process.cwd();
@@ -1244,6 +1300,8 @@ function describeCommand(name, state, verbose, defaultPath) {
     return verbose ? `${name} is a shell builtin\n` : `${name}\n`;
   const path = findExecutable(name, state, defaultPath);
   if (path) return verbose ? `${name} is ${path}\n` : `${path}\n`;
+  if (Object.hasOwn(fallbackBuiltins, name))
+    return verbose ? `${name} is a fallback shell builtin\n` : `${name}\n`;
   return verbose ? `${name} not found\n` : null;
 }
 
@@ -1256,14 +1314,19 @@ async function runCommandArgv(argv, state, input, captureStdout, captureStderr) 
       const start = commandArgv[1] === "--" ? 2 : 1;
       if (start >= commandArgv.length) {
         if (builtinName === "builtin")
-          return result(0, `${Object.keys(builtins).sort().join("\n")}\n`);
+          return result(0, `${builtinNames().join("\n")}\n`);
         return result();
       }
       commandArgv = commandArgv.slice(start);
-      if (!Object.hasOwn(builtins, commandArgv[0]))
+      if (!Object.hasOwn(builtins, commandArgv[0]) &&
+          !Object.hasOwn(fallbackBuiltins, commandArgv[0]))
         return result(1, "", `bunmsh: builtin: ${commandArgv[0]}: not found\n`);
-      if (!["command", "builtin", "__builtin"].includes(commandArgv[0]))
-        return builtins[commandArgv[0]](commandArgv, commandState, input);
+      if (!["command", "builtin", "__builtin", "time"].includes(commandArgv[0]))
+        return (builtins[commandArgv[0]] ?? fallbackBuiltins[commandArgv[0]])(
+          commandArgv,
+          commandState,
+          input,
+        );
       continue;
     }
     const parsed = parseCommandOptions(commandArgv);
@@ -1291,8 +1354,29 @@ async function runCommandArgv(argv, state, input, captureStdout, captureStderr) 
       commandState = { ...commandState, env: { ...commandState.env, PATH: DEFAULT_COMMAND_PATH } };
     }
   }
+  if (commandArgv[0] === "time") {
+    const started = Bun.nanoseconds();
+    const execution = commandArgv.length === 1
+      ? result()
+      : await runCommandArgv(
+          commandArgv.slice(1),
+          commandState,
+          input,
+          captureStdout,
+          captureStderr,
+        );
+    const milliseconds = (Bun.nanoseconds() - started) / 1_000_000;
+    execution.stderr = concatBytes([
+      execution.stderr,
+      `real ${formatMilliseconds(milliseconds)} ms\n`,
+    ]);
+    return execution;
+  }
   if (Object.hasOwn(builtins, commandArgv[0]))
     return builtins[commandArgv[0]](commandArgv, commandState, input);
+  if (!commandArgv[0].includes("/") && Object.hasOwn(fallbackBuiltins, commandArgv[0]) &&
+      !findExecutable(commandArgv[0], commandState))
+    return fallbackBuiltins[commandArgv[0]](commandArgv, commandState, input);
   return runExternal(commandArgv, commandState, input, captureStdout, captureStderr);
 }
 
