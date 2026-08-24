@@ -224,4 +224,31 @@ describe("CLI", () => {
     expect(stdout).toBe(`[${shown}] [📁 ${shown}  📂 ${shown}] `);
     expect(stderr).toBe("");
   });
+
+  test("adds the active tab number to the default multi-tab prompt", async () => {
+    const cwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+    const home = cwd.slice(0, cwd.lastIndexOf("/"));
+    const shown = `~${cwd.slice(home.length)}`;
+    const env = { ...process.env, HOME: home };
+    delete env.PS1;
+    const proc = Bun.spawn([process.execPath, "src/main.js", "-i"], {
+      cwd,
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write("tab\nexit\n");
+    proc.stdin.end();
+    const [status, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toBe(
+      `📁 ${shown}\n$ 📁 ${shown}  📂 ${shown}\n[2]$ `,
+    );
+    expect(stderr).toBe("");
+  });
 });

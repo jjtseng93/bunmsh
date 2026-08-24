@@ -58,7 +58,9 @@ function renderPrompt(state) {
         `${index === state.activeTab ? "📂" : "📁"} ${renderCwd(state, path)}`,
       ).join("  ")
     : renderCwd(state, state.cwd);
-  const defaultPrompt = state.tabs.length > 1 ? "\\w\n$ " : "📁 \\w\n$ ";
+  const defaultPrompt = state.tabs.length > 1
+    ? `\\w\n[${state.activeTab + 1}]$ `
+    : "📁 \\w\n$ ";
   return (state.env.PS1 ?? defaultPrompt).replaceAll("\\w", cwd);
 }
 
