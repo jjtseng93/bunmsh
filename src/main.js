@@ -41,25 +41,45 @@ async function printReadme() {
 function usage() {
   console.log(`
 Usage:
-  bunmsh
-  bunmsh [options] [script [arguments...]]
-  bunmsh -c command [name [arguments...]]
-  bunmsh -cc command [arguments...]
+  bunmsh [options]
+  bunmsh <script_path> [argv Array]
+  bunmsh -c <script_text> [argv Array]
+  bunmsh -cc <command> [argv Array]
 
 Options:
-  -c command   Execute command text
-  -cc command  Forward already-quoted argv without shell expansion
-  -i           Enter interactive mode
-  --mouse      Enable interactive tab mouse tracking
+  -c <script_text> [argv Array]
+    Command text as shell script 
+      → Parse & Execute
+      
+    -c 'echo "$0" "$1"' Hello world
+      → Hello world
+      
+  -cc <command> [argv Array]
+    Call Command with argv as is
+      Can be alias/builtin or from PATH
+      Without shell parsing
+      Without shell expansions
+      
+    -cc echo '$HOME' '*.js'
+      → $HOME *.js
+    -cc lsfancy -lh
+      → List cwd with emojis
+
+  --mouse      Enable mouse events
   --builtin-only
-               Skip command lookup through PATH
-  -h, --help   Show this help
+               Skip $PATH lookup
+               
+  -i           Enter interactive mode
+  
   -V, --version
                Show version
+  -h, --help   Show this help
   --readme     Show bunmsh's README.md
-  --build-exe  Build ./bmsh for the current platform
+  
+  --build-exe
+      Build ./bmsh for the current platform
   --build-for TARGET
-               Cross-compile ./bmsh for TARGET
+      Cross-compile ./bmsh for TARGET
 `);
 }
 
