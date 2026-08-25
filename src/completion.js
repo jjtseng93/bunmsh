@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import { safeHistoryEntry } from "./history.js";
+import { environmentValue } from "./environment.js";
 
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".com", ".cmd", ".bat"];
 
@@ -151,7 +152,7 @@ export class CommandIndex {
 
   async refresh(state) {
     if (this.refreshing) return this.refreshing;
-    const pathValue = state.env.PATH ?? "";
+    const pathValue = environmentValue(state.env, "PATH", this.platform) ?? "";
     const cwd = state.cwd;
     this.refreshing = (async () => {
       const directories = [...new Set(pathValue.split(this.pathDelimiter).map((directory) => {
@@ -182,9 +183,10 @@ export class CommandIndex {
 
   refreshIfChanged(state) {
     this.syncShellNames(state);
-    const relativePath = (state.env.PATH ?? "").split(this.pathDelimiter)
+    const pathValue = environmentValue(state.env, "PATH", this.platform) ?? "";
+    const relativePath = pathValue.split(this.pathDelimiter)
       .some((directory) => !directory || !isAbsolute(directory));
-    if (this.pathValue !== (state.env.PATH ?? "") || (relativePath && this.cwd !== state.cwd))
+    if (this.pathValue !== pathValue || (relativePath && this.cwd !== state.cwd))
       void this.refresh(state);
   }
 

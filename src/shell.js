@@ -24,6 +24,7 @@ import {
   hostname as osHostname,
   release as osRelease,
   type as osType,
+  version as osVersion,
 } from "node:os";
 import {
   basename as pathBasename,
@@ -37,6 +38,7 @@ import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
 import { saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
+import { canonicalEnvironment, environmentValue } from "./environment.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -46,7 +48,7 @@ const DEFAULT_ALIASES = {
   grep: ["grep", "--color=auto"],
 };
 const DEFAULT_COMMAND_PATH = process.platform === "win32"
-  ? (process.env.PATH ?? "")
+  ? (environmentValue(process.env, "PATH") ?? "")
   : ["/bin", "/usr/bin"].join(pathDelimiter);
 const BUN_EXECUTABLE = Bun.which("bun") || process.argv0;
 const BUN_RUNTIME_COMMAND = EXECUTABLE_COMMAND.length > 1
@@ -726,7 +728,7 @@ function quoteShellWord(value) {
 }
 
 function findExecutable(name, state, defaultPath = false) {
-  const path = defaultPath ? DEFAULT_COMMAND_PATH : (state.env.PATH ?? "");
+  const path = defaultPath ? DEFAULT_COMMAND_PATH : (environmentValue(state.env, "PATH") ?? "");
   const found = Bun.which(name, { PATH: path, cwd: nativePath(state.cwd) });
   return found ? shellPath(found) : null;
 }
@@ -807,7 +809,7 @@ async function sourceFile(argv, state) {
   if (!argv[1]) return result(2, "", `bunmsh: ${argv[0]}: missing file operand\n`);
   let path = argv[1];
   if (!path.includes("/")) {
-    const found = (state.env.PATH ?? "").split(pathDelimiter)
+    const found = (environmentValue(state.env, "PATH") ?? "").split(pathDelimiter)
       .map((directory) => resolvePath(directory || state.cwd, path))
       .find((candidate) => {
         try { return statSync(candidate).isFile(); } catch { return false; }
@@ -2062,19 +2064,25 @@ function runChmodFallback(argv, state) {
   return result(status, "", stderr);
 }
 
-function runUnameFallback(argv) {
-  const machine = ({ arm64: "aarch64", x64: "x86_64" })[osArch()] ?? osArch();
+export function runUnameFallback(argv, system = {}) {
+  const arch = system.arch ?? osArch();
+  const machine = ({ arm64: "aarch64", x64: "x86_64" })[arch] ?? arch;
   const values = {
-    s: osType(), n: osHostname(), r: osRelease(), v: osRelease(), m: machine,
+    s: system.type ?? osType(),
+    n: system.hostname ?? osHostname(),
+    r: system.release ?? osRelease(),
+    v: system.version ?? osVersion(),
+    m: machine,
+    p: machine,
   };
   if (argv.length === 1) return result(0, `${values.s}\n`);
-  let flags = "";
+  const flags = new Set();
   for (const arg of argv.slice(1)) {
-    if (arg === "-a") flags += "snrvm";
-    else if (/^-[snrvm]+$/.test(arg)) flags += arg.slice(1);
+    if (arg === "-a") for (const flag of "snrvmp") flags.add(flag);
+    else if (/^-[snrvmp]+$/.test(arg)) for (const flag of arg.slice(1)) flags.add(flag);
     else return result(1, "", `bunmsh: uname: unsupported option: ${arg}\n`);
   }
-  return result(0, `${[...new Set(flags)].map((flag) => values[flag]).join(" ")}\n`);
+  return result(0, `${[..."snrvmp"].filter((flag) => flags.has(flag)).map((flag) => values[flag]).join(" ")}\n`);
 }
 
 const fallbackBuiltins = {
@@ -2154,7 +2162,7 @@ function formatMilliseconds(milliseconds, color = Boolean(process.stderr.isTTY))
 }
 
 export function createState(options = {}) {
-  const env = { ...process.env, ...(options.env ?? {}) };
+  const env = canonicalEnvironment({ ...process.env, ...(options.env ?? {}) });
   const cwd = shellPath(options.cwd ?? process.cwd());
   env.PWD = cwd;
   return {

@@ -8,6 +8,7 @@ import {
   decode,
   execute,
   parse,
+  runUnameFallback,
   tokenize,
 } from "../src/shell.js";
 import {
@@ -30,6 +31,7 @@ import {
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
+import { canonicalEnvironment, environmentValue } from "../src/environment.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -69,6 +71,13 @@ describe("parser", () => {
 });
 
 describe("completion", () => {
+  test("treats Windows Path as PATH after copying process.env", () => {
+    const env = canonicalEnvironment({ TEMP: "C:\\Temp", Path: "C:\\Windows;C:\\Tools" }, "win32");
+    expect(env.PATH).toBe("C:\\Windows;C:\\Tools");
+    expect(env.Path).toBeUndefined();
+    expect(environmentValue({ path: "C:\\Bin" }, "PATH", "win32")).toBe("C:\\Bin");
+  });
+
   test("removes split SGR mouse and cursor reports from readline input", async () => {
     const mice = [];
     const cursors = [];
@@ -385,6 +394,14 @@ fi
     expect(await run("printf 'exact\\nextra\\n' | builtin grep -qFx exact")).toMatchObject({ status: 0, stdout: "" });
     expect(await run("printf '123456789\\n' | builtin cut -c6-")).toMatchObject({ stdout: "6789\n" });
     expect(await run("builtin uname -m")).toMatchObject({ status: 0 });
+    const windows = runUnameFallback(["uname", "-mprs"], {
+      arch: "x64",
+      type: "Windows_NT",
+      hostname: "windows-host",
+      release: "10.0.26100",
+      version: "Windows 11 Pro",
+    });
+    expect(decode(windows.stdout)).toBe("Windows_NT 10.0.26100 x86_64 x86_64\n");
     const directory = mkdtempSync(join(tmpdir(), "bunmsh-script-tools-"));
     try {
       await Bun.write(`${directory}/source`, "one");

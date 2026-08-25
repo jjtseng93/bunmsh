@@ -393,7 +393,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `cut` | `-c LIST`, `-cLIST` |
 | `ln` | `-s`, `-f`, `-T`, combinable (including `-sfT`) |
 | `chmod` | Octal modes, `+x`, `a+x` |
-| `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, combinable |
+| `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, `-p`, combinable (including `-mprs`); uses Node's OS APIs on Windows without `/proc` |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
 | `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
