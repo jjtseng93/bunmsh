@@ -50,6 +50,9 @@ Options:
   -c command   Execute command text
   -cc command  Forward already-quoted argv without shell expansion
   -i           Enter interactive mode
+  --mouse      Enable interactive tab mouse tracking
+  --builtin-only
+               Skip command lookup through PATH
   -h, --help   Show this help
   -V, --version
                Show version
@@ -113,7 +116,7 @@ function renderPrompt(state, withRegions = false) {
 
 async function interactive(state) {
   const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const mouseTracking = terminal && /^(?:1|true|on|yes)$/i.test(state.env.BUNMSH_MOUSE ?? "");
+  let mouseTracking = terminal && state.mouseTracking;
   const commandIndex = new CommandIndex(builtinNames());
   const fileIndex = new FileIndex();
   state.history = await importedHistory(state.env);
@@ -124,7 +127,18 @@ async function interactive(state) {
   let pendingClick = null;
   let lastTabClick = null;
   let mouseCommandRunning = false;
-  const filteredInput = mouseTracking ? mouseInput((mouse) => {
+  const runTabShortcut = (args) => {
+    if (!readline || mouseCommandRunning) return;
+    mouseCommandRunning = true;
+    void executeArgv(["builtin", "tab", ...args], state, { capture: true }).finally(() => {
+      mouseCommandRunning = false;
+      const next = renderPrompt(state, true);
+      promptRegions = next.regions;
+      readline.setPrompt(next.text);
+      readline.prompt(true);
+    });
+  };
+  const filteredInput = terminal ? mouseInput((mouse) => {
     if (!mouse.press || (mouse.button & 3) !== 0 || (mouse.button & 32)) return;
     pendingClick = { ...mouse, at: Date.now() };
     process.stdout.write("\x1b[6n");
@@ -162,6 +176,9 @@ async function interactive(state) {
       readline.setPrompt(next.text);
       readline.prompt(true);
     });
+  }, (shortcut) => {
+    if (shortcut === "tab") runTabShortcut([]);
+    else if (shortcut === "tab-left") runTabShortcut(["l"]);
   }) : process.stdin;
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);
@@ -193,10 +210,8 @@ async function interactive(state) {
   let refreshTimer = null;
   let removeGhostHooks = () => {};
   if (terminal) {
-    if (mouseTracking) {
-      process.stdin.pipe(filteredInput);
-      process.stdout.write(MOUSE_ON);
-    }
+    process.stdin.pipe(filteredInput);
+    if (mouseTracking) process.stdout.write(MOUSE_ON);
     refreshTimer = setInterval(() => void commandIndex.refresh(state), 10_000);
     refreshTimer.unref?.();
 
@@ -277,8 +292,8 @@ async function interactive(state) {
       // first key (notably Ctrl-Q in full-screen editors) can be consumed by
       // the shell.  Also give the child a sane terminal mode to start from.
       readline.pause();
-      if (mouseTracking) {
-        process.stdout.write(MOUSE_OFF);
+      if (terminal) {
+        if (mouseTracking) process.stdout.write(MOUSE_OFF);
         process.stdin.unpipe(filteredInput);
       }
       if (terminal) process.stdin.setRawMode(false);
@@ -287,17 +302,18 @@ async function interactive(state) {
       } finally {
         if (!state.exitRequested) {
           if (terminal) process.stdin.setRawMode(true);
-          if (mouseTracking) {
+          if (terminal) {
             process.stdin.pipe(filteredInput);
-            process.stdout.write(MOUSE_ON);
+            mouseTracking = Boolean(state.mouseTracking);
+            if (mouseTracking) process.stdout.write(MOUSE_ON);
           }
           readline.resume();
         }
       }
     }
   } finally {
-    if (mouseTracking) {
-      process.stdout.write(MOUSE_OFF);
+    if (terminal) {
+      if (mouseTracking) process.stdout.write(MOUSE_OFF);
       process.stdin.unpipe(filteredInput);
     }
     if (refreshTimer !== null) clearInterval(refreshTimer);
@@ -313,6 +329,8 @@ async function main(argv) {
   let command = null;
   let forwardedArgv = null;
   let forceInteractive = false;
+  let forceMouse = false;
+  let builtinOnly = false;
   let i = 0;
   for (; i < argv.length; i++) {
     const arg = argv[i];
@@ -336,6 +354,14 @@ async function main(argv) {
     }
     if (arg === "-i") {
       forceInteractive = true;
+      continue;
+    }
+    if (arg === "--mouse") {
+      forceMouse = true;
+      continue;
+    }
+    if (arg === "--builtin-only") {
+      builtinOnly = true;
       continue;
     }
     if (arg === "-h" || arg === "--help") {
@@ -363,13 +389,19 @@ async function main(argv) {
       return 2;
     }
     const state = pipelineChildState();
+    if (forceMouse) state.mouseTracking = true;
+    if (builtinOnly) state.pathSearch = false;
     const result = await executeArgv(forwardedArgv, state);
     return state.exitRequested ? state.exitStatus : result.status;
   }
 
   if (command !== null) {
     const name = argv[i] ?? "bunmsh";
-    const state = createState({ args: [name, ...argv.slice(i + 1)] });
+    const state = createState({
+      args: [name, ...argv.slice(i + 1)],
+      mouseTracking: forceMouse || undefined,
+      pathSearch: builtinOnly ? false : undefined,
+    });
     const result = await execute(command, state);
     return state.exitRequested ? state.exitStatus : result.status;
   }
@@ -378,7 +410,11 @@ async function main(argv) {
     const script = argv[i];
     try {
       const source = await Bun.file(script).text();
-      const state = createState({ args: [script, ...argv.slice(i + 1)] });
+      const state = createState({
+        args: [script, ...argv.slice(i + 1)],
+        mouseTracking: forceMouse || undefined,
+        pathSearch: builtinOnly ? false : undefined,
+      });
       const result = await execute(source, state);
       if (forceInteractive && !state.exitRequested) return interactive(state);
       return state.exitRequested ? state.exitStatus : result.status;
@@ -388,7 +424,10 @@ async function main(argv) {
     }
   }
 
-  const state = createState();
+  const state = createState({
+    mouseTracking: forceMouse || undefined,
+    pathSearch: builtinOnly ? false : undefined,
+  });
   if (forceInteractive || process.stdin.isTTY) return interactive(state);
   const source = await Bun.stdin.text();
   const result = await execute(source, state);

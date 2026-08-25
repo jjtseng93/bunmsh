@@ -40,6 +40,8 @@ async function run(source, options = {}) {
     cwd: options.cwd ?? process.cwd(),
     args: options.args ?? ["bunmsh"],
     history: options.history ?? [],
+    mouseTracking: options.mouseTracking,
+    pathSearch: options.pathSearch,
   });
   const output = await execute(source, state, { capture: true });
   return {
@@ -84,17 +86,23 @@ describe("completion", () => {
   test("removes split SGR mouse and cursor reports from readline input", async () => {
     const mice = [];
     const cursors = [];
+    const shortcuts = [];
     let forwarded = "";
-    const input = mouseInput((event) => mice.push(event), (position) => cursors.push(position));
+    const input = mouseInput(
+      (event) => mice.push(event),
+      (position) => cursors.push(position),
+      (shortcut) => shortcuts.push(shortcut),
+    );
     input.on("data", (chunk) => { forwarded += chunk.toString(); });
     input.write("echo ");
     input.write("\x1b[<0;12");
-    input.write(";3M\x1b[4;9Rok");
+    input.write(";3M\x1b[4;9Rok\x14\x1bt");
     input.end();
     await new Promise((resolve) => input.once("end", resolve));
     expect(forwarded).toBe("echo ok");
     expect(mice).toEqual([{ button: 0, x: 12, y: 3, press: true }]);
     expect(cursors).toEqual([{ row: 4, column: 9 }]);
+    expect(shortcuts).toEqual(["tab", "tab-left"]);
   });
 
   test("imports Bash and Fish history by default and can be disabled", async () => {
@@ -567,6 +575,49 @@ fi
     expect(output.state.cwd).toBe(`${cwd}/src`);
   });
 
+  test("tab mouse toggles and explicitly sets mouse tracking", async () => {
+    let output = await run("tab mouse", { mouseTracking: false });
+    expect(output.state.mouseTracking).toBe(true);
+    output = await run("tab mouse off", { mouseTracking: true });
+    expect(output.state.mouseTracking).toBe(false);
+    output = await run("tab mouse true", { mouseTracking: false });
+    expect(output.state.mouseTracking).toBe(true);
+    output = await run("tab mouse false", { mouseTracking: true });
+    expect(output.state.mouseTracking).toBe(false);
+    expect(await run("tab mouse maybe")).toMatchObject({
+      status: 1,
+      stderr: "bunmsh: tab: mouse: expected on, off, true, or false\n",
+    });
+  });
+
+  test("tab path toggles and explicitly controls PATH lookup", async () => {
+    let output = await run("tab path; sh -c 'echo external'; printf builtin");
+    expect(output.state.pathSearch).toBe(false);
+    expect(output.stdout).toBe("builtin");
+    expect(output.stderr).toContain("bunmsh: sh: not found");
+
+    output = await run("tab path off; tab path on; sh -c 'printf external'");
+    expect(output.state.pathSearch).toBe(true);
+    expect(output.stdout).toBe("external");
+
+    output = await run("tab path false; printf fallback-ok");
+    expect(output.state.pathSearch).toBe(false);
+    expect(output.stdout).toBe("fallback-ok");
+    expect(await run("tab path maybe")).toMatchObject({
+      status: 1,
+      stderr: "bunmsh: tab: path: expected on, off, true, or false\n",
+    });
+  });
+
+  test("which still searches PATH while direct PATH lookup is disabled", async () => {
+    const shell = Bun.which("sh");
+    expect(shell).toBeTruthy();
+    const output = await run("tab path off; which sh; $(which sh) -c 'printf explicit-path'");
+    expect(output.status).toBe(0);
+    expect(output.stdout).toBe(`${shell}\nexplicit-path`);
+    expect(output.stderr).toBe("");
+  });
+
   test("tab rejects invalid selection and closing the final tab", async () => {
     const missing = await run("tab 2");
     expect(missing.status).toBe(1);
@@ -763,6 +814,108 @@ describe("CLI", () => {
     } finally { terminal.close(); }
     expect(transcript).toContain(MOUSE_ON);
     expect(transcript).toContain(MOUSE_OFF);
+  });
+
+  test("--mouse enables terminal mouse reporting", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const env = { ...process.env, PS1: "> " };
+    delete env.BUNMSH_MOUSE;
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "--mouse", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env,
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain(MOUSE_ON);
+    expect(transcript).toContain(MOUSE_OFF);
+  });
+
+  test("--builtin-only skips PATH lookup but keeps builtins available", () => {
+    const bun = Bun.which("bun") || process.argv0;
+    const cwd = new URL("..", import.meta.url).pathname;
+    const builtin = Bun.spawnSync({
+      cmd: [bun, "src/main.js", "--builtin-only", "-c", "printf '%s' builtin-ok"],
+      cwd,
+    });
+    expect(builtin.exitCode).toBe(0);
+    expect(builtin.stdout.toString()).toBe("builtin-ok");
+
+    const external = Bun.spawnSync({
+      cmd: [bun, "src/main.js", "--builtin-only", "-c", "sh -c 'printf external'"],
+      cwd,
+    });
+    expect(external.exitCode).toBe(127);
+    expect(external.stderr.toString()).toContain("bunmsh: sh: not found");
+  });
+
+  test("tab mouse applies tracking changes immediately", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const env = { ...process.env, PS1: "> " };
+    delete env.BUNMSH_MOUSE;
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env,
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("tab mouse on\r");
+      await Bun.sleep(100);
+      terminal.write("tab mouse off\r");
+      await Bun.sleep(100);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain(MOUSE_ON);
+    expect(transcript).toContain(MOUSE_OFF);
+  });
+
+  test("Ctrl-T and Alt-T switch tabs without discarding the edited line", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 100,
+      rows: 30,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const env = { ...process.env };
+    delete env.PS1;
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env,
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("echo shortcut-preserved");
+      terminal.write("\x14");
+      await Bun.sleep(100);
+      terminal.write("\r");
+      await Bun.sleep(100);
+      terminal.write("\x1bt");
+      await Bun.sleep(100);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("shortcut-preserved\r\n");
+    expect(transcript).toContain("[2]$ ");
+    expect(transcript).toContain("[1]$ ");
   });
 
   test("renders ghosts and accepts history words, file paths, and commands", async () => {

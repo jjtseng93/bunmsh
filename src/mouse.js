@@ -4,13 +4,15 @@ import { StringDecoder } from "node:string_decoder";
 export const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
 export const MOUSE_OFF = "\x1b[?1000l\x1b[?1006l";
 
-export function mouseInput(onMouse, onCursorPosition) {
+export function mouseInput(onMouse, onCursorPosition, onShortcut = () => {}) {
   const decoder = new StringDecoder("utf8");
   let pending = "";
   const input = new Transform({
     transform(chunk, _encoding, done) {
       let source = pending + decoder.write(chunk);
       pending = "";
+      source = source.replace(/\x14/g, () => { onShortcut("tab"); return ""; });
+      source = source.replace(/\x1bt/g, () => { onShortcut("tab-left"); return ""; });
       let output = "";
       while (source) {
         const escape = source.indexOf("\x1b[");
@@ -44,4 +46,3 @@ export function mouseInput(onMouse, onCursorPosition) {
   input.setRawMode = (mode) => process.stdin.setRawMode?.(mode);
   return input;
 }
-

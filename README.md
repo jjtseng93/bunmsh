@@ -270,10 +270,11 @@ the active tab's 1-based number when multiple tabs exist; no number is shown
 when there is only one tab.
 
 Mouse support is opt-in because application mouse tracking prevents normal
-scrollback gestures in terminals such as Termux and xterm. Enable it before
-starting bunmsh with:
+scrollback gestures in terminals such as Termux and xterm. Enable it at
+startup with either form:
 
 ```sh
+bunmsh --mouse
 BUNMSH_MOUSE=1 bunmsh
 ```
 
@@ -287,6 +288,19 @@ directory without using the completion cache. Mouse reporting is disabled
 while a foreground command owns the terminal, so full-screen editors and other
 TUI programs receive their own mouse input normally; bunmsh restores it on
 return.
+
+To start without searching `PATH` for command names, use:
+
+```sh
+bunmsh --builtin-only
+```
+
+Regular and fallback builtins, aliases and functions remain available. An
+explicit executable path containing `/` can still run. Use `tab path` while
+the shell is running to toggle this mode or select it explicitly with
+`tab path on`, `tab path off`, `tab path true`, or `tab path false`. The
+`which` builtin always searches the current `PATH`, so `$(which COMMAND)` can
+be used to explicitly select a PATH executable while this mode is active.
 
 The shell starts with one tab. With no argument, `tab` creates a second tab
 when only one exists; after that it cycles to the tab on the right:
@@ -306,7 +320,17 @@ tab r      # cycle right
 tab x      # close the active tab
 tab s      # save interactive history (same as tab save)
 tab save   # save interactive history; never done automatically
+tab mouse       # toggle terminal mouse tracking
+tab mouse on    # explicitly enable (same as tab mouse true)
+tab mouse off   # explicitly disable (same as tab mouse false)
+tab path        # toggle command lookup through PATH
+tab path on     # enable PATH lookup (same as tab path true)
+tab path off    # builtin-only mode (same as tab path false)
 ```
+
+Interactive keyboard shortcuts call the same builtins without adding a command
+to history: Ctrl-T is equivalent to `builtin tab`, while Alt-T is equivalent to
+`builtin tab l`. Any command text currently being edited is preserved.
 
 Left and right movement wrap at the ends. Closing a tab selects the tab that
 moves into the same position, or the previous tab when closing the rightmost
@@ -350,7 +374,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `read` | `-r`, `--`; defaults to `REPLY` when no name is given |
 | `pwd` | No flags |
 | `cd`, `chdir` | `cd`, `cd DIR`, `cd -`, `cd //` |
-| `tab` | `n`, `x`, `l`, `r`, `s`, `save`, or a 1-based tab number |
+| `tab` | `n`, `x`, `l`, `r`, `s`, `save`, `mouse [on\|off\|true\|false]`, `path [on\|off\|true\|false]`, or a 1-based tab number |
 | `-`, `~`, `..`, `//` | Directory-navigation shortcuts |
 | `export` | `NAME`, `NAME=VALUE` |
 | `unset` | `-v`, `--` |

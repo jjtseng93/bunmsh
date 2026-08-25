@@ -729,6 +729,7 @@ function quoteShellWord(value) {
 }
 
 function findExecutable(name, state, defaultPath = false) {
+  if (!state.pathSearch) return null;
   const path = defaultPath ? DEFAULT_COMMAND_PATH : (environmentValue(state.env, "PATH") ?? "");
   const found = Bun.which(name, { PATH: path, cwd: nativePath(state.cwd) });
   return found ? shellPath(found) : null;
@@ -931,7 +932,9 @@ const builtins = {
       return result(1, "", "bunmsh: which: missing command name\n");
     let status = 0, output = "";
     for (; i < argv.length; i++) {
-      const path = findExecutable(argv[i], state);
+      // `which` is an explicit PATH query, so it remains useful even while
+      // direct command-name lookup is disabled with `tab path off`.
+      const path = findExecutable(argv[i], { ...state, pathSearch: true });
       if (path) output += `${path}\n`;
       else status = 1;
     }
@@ -1139,8 +1142,8 @@ const builtins = {
   },
   chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
   tab: async (argv, state) => {
-    if (argv.length > 2)
-      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|number]\n");
+    if (argv.length > 3 || (argv.length > 2 && !["mouse", "path"].includes(argv[1])))
+      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
     const action = argv[1];
     const activate = (index) => {
       state.activeTab = index;
@@ -1175,6 +1178,22 @@ const builtins = {
         return result(1, "", `bunmsh: tab: cannot save history: ${error.message}\n`);
       }
     }
+    if (action === "mouse") {
+      const mode = argv[2];
+      if (mode === undefined) state.mouseTracking = !state.mouseTracking;
+      else if (mode === "on" || mode === "true") state.mouseTracking = true;
+      else if (mode === "off" || mode === "false") state.mouseTracking = false;
+      else return result(1, "", "bunmsh: tab: mouse: expected on, off, true, or false\n");
+      return result();
+    }
+    if (action === "path") {
+      const mode = argv[2];
+      if (mode === undefined) state.pathSearch = !state.pathSearch;
+      else if (mode === "on" || mode === "true") state.pathSearch = true;
+      else if (mode === "off" || mode === "false") state.pathSearch = false;
+      else return result(1, "", "bunmsh: tab: path: expected on, off, true, or false\n");
+      return result();
+    }
     if (/^[1-9][0-9]*$/.test(action ?? "")) {
       const index = Number(action) - 1;
       if (index >= state.tabs.length)
@@ -1182,7 +1201,7 @@ const builtins = {
       activate(index);
       return result();
     }
-    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|number]\n");
+    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
   },
   "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
   "~": async (_argv, state) => builtins.cd(["cd"], state),
@@ -2185,6 +2204,8 @@ export function createState(options = {}) {
     aliases: { ...DEFAULT_ALIASES, ...(options.aliases ?? {}) },
     functions: { ...(options.functions ?? {}) },
     history: [...(options.history ?? [])],
+    mouseTracking: options.mouseTracking ?? /^(?:1|true|on|yes)$/i.test(env.BUNMSH_MOUSE ?? ""),
+    pathSearch: options.pathSearch ?? true,
     readonly: new Set(options.readonly ?? []),
     getoptsOffset: 1,
     args: options.args ?? ["bunmsh"],
@@ -2594,6 +2615,7 @@ function pipelineBuiltinState(state) {
         functions: state.functions,
         readonly: [...state.readonly],
         args: state.args,
+        pathSearch: state.pathSearch,
       }),
     },
   };
@@ -2758,6 +2780,8 @@ async function runCommandArgv(
   if (!commandArgv[0].includes("/") && Object.hasOwn(fallbackBuiltins, commandArgv[0]) &&
       !findExecutable(commandArgv[0], commandState))
     return fallbackBuiltins[commandArgv[0]](commandArgv, commandState, input);
+  if (!commandState.pathSearch && !commandArgv[0].includes("/"))
+    return result(127, "", `bunmsh: ${commandArgv[0]}: not found\n`);
   return runExternal(
     commandArgv,
     commandState,
@@ -3120,6 +3144,7 @@ export function pipelineChildState() {
       functions: inherited.functions,
       readonly: inherited.readonly,
       args: inherited.args,
+      pathSearch: inherited.pathSearch,
       pipelineChild: true,
     });
   } catch {
