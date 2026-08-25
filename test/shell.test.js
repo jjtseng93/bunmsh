@@ -72,6 +72,8 @@ describe("completion", () => {
       .toEqual(["echo bash", "shared"]);
     expect(parseFishHistory("- cmd: echo fish\n  when: 1720000001\n- cmd: shared\n"))
       .toEqual(["echo fish", "shared"]);
+    expect(parseFishHistory("- cmd: echo invalid YAML: value\n  when: 1720000002\n- cmd: cp Hello2.apk /sdcard/Documents/\n"))
+      .toEqual(["echo invalid YAML: value", "cp Hello2.apk /sdcard/Documents/"]);
 
     const home = mkdtempSync(join(tmpdir(), "bunmsh-history-"));
     try {
@@ -90,7 +92,7 @@ describe("completion", () => {
     expect(safeHistoryEntry(dangerous)).toBe(false);
     expect(safeHistoryEntry("cp file\nrm file")).toBe(false);
     expect(parseBashHistory(`cp safe\n${dangerous}\n`)).toEqual(["cp safe"]);
-    expect(parseFishHistory(`- cmd: cp safe\n- cmd: "cp file\\u001b[2D"\n`))
+    expect(parseFishHistory(`- cmd: cp safe\n- cmd: ${dangerous}\n`))
       .toEqual(["cp safe"]);
     expect(historyGhost([dangerous, "cp safe-file"], "cp ")).toBe("safe-file");
     expect(historyGhost([dangerous], "cp ")).toBeNull();

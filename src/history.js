@@ -35,10 +35,14 @@ export function parseBashHistory(source) {
 }
 
 export function parseFishHistory(source) {
-  const parsed = Bun.YAML.parse(source);
-  if (!Array.isArray(parsed)) return [];
-  return parsed
-    .map((entry) => typeof entry?.cmd === "string" ? entry.cmd : null)
+  const records = source.split(/\r?\n/)
+    .map((line) => /^- cmd:\s?(.*)$/.exec(line)?.[1] ?? null)
+    .filter((entry) => entry !== null);
+  // Fish documents this as "YAML-style", not YAML. Command scalars use Fish's
+  // own escaping and can be rejected or only partially consumed by YAML
+  // parsers. The stable record boundary is the unindented `- cmd:` prefix.
+  return records
+    .map((entry) => entry.replace(/\\(\\|n)/g, (_match, escaped) => escaped === "n" ? "\n" : "\\"))
     .filter(safeHistoryEntry);
 }
 

@@ -199,8 +199,9 @@ read-only and are never modified by bunmsh:
 ~/.local/share/fish/fish_history
 ```
 
-Fish history is parsed with `Bun.YAML`. Empty entries, Bash timestamp records
-and duplicate commands are removed while keeping the most recent occurrence.
+Fish history uses Fish's documented YAML-style records; it is not treated as
+standards-compliant YAML. Empty entries, Bash timestamp records and duplicate
+commands are removed while keeping the most recent occurrence.
 `BUNMSH_IMPORT_HISTORY` controls only the Bash and Fish imports; saved bunmsh
 history is still loaded. Set it to disable external startup imports:
 
