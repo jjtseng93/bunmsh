@@ -32,6 +32,8 @@ npx bunmsh -c 'print $PATH'
 
 # Call cmd; this can call bunmsh builtins too
 npx bunmsh -cc echo 'hello world' '*.txt' '$HOME'
+
+npx bunmsh script.sh argv1 argv2
 ```
 
 `-cc` means **call cmd**. Every argument after it is forwarded as an
@@ -60,7 +62,7 @@ bun ./bunmsh -c 'print $PATH'
 # Call cmd; this can call bunmsh builtins too
 bun ./bunmsh -cc echo 'hello world' '*.txt' '$HOME'
 
-# bun ./bunmsh script.sh arg1 arg2
+bun ./bunmsh script.sh argv1 argv2
 ```
 
 `-cc` means **call cmd**. Every argument after it is forwarded as an
@@ -399,7 +401,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `umask` | No operand to display, or an octal mask |
 | `kill` | `-l`, `-SIGNAL`, `-NUMBER` |
 | `set` | No operand to list variables; `-- ARG ...` sets positional arguments |
-| `time` | Command and arguments; reports milliseconds |
+| `time` | Command and arguments; reports `real` elapsed time in milliseconds, with each decimal magnitude group shown in a different color |
 | `yes` | Optional output words; no flags |
 
 ### PATH-fallback builtins
@@ -450,19 +452,29 @@ detailed compatibility snapshot.
 
 ## What's implemented
 
-- Interactive prompt, standard-input scripts, script files and `-c`
-- Highest-priority raw `Bun.*` JavaScript evaluation with `Bun.e;`/`Bun.e,` escape prefixes
-- External commands through `Bun.spawn`
-- Sequential pipelines (`a | b`)
-- Command lists with `;`, `&&` and `||`
-- Single quotes, double quotes and backslash quoting
-- `$NAME`, `${NAME}`, `$?`, `$$`, `$#`, `$0` through `$9` .
-- Leading environment assignments and persistent assignment-only commands
-- `<`, `>`, `>>`, `2>` and `2>>`
-- `cd`, `pwd`, `export`, `unset`, `env`, `exit`, `set`, `:`, `true`, `false`,
-  `echo`, `print` and a small `printf` .
+- Interactive use, stdin and script files, `-c` shell text, and direct `-cc`
+  argv forwarding.
+- Highest-priority `Bun.*` JavaScript evaluation, including awaited promises,
+  command substitution, and the `Bun.e;`/`Bun.e,` arbitrary-JavaScript forms.
+- Concurrent streaming pipelines and streamed redirects built on `Bun.spawn`,
+  including large output and early-closing consumers.
+- Shell lists, pipelines, negation, functions, subshells, and `if`, `case`,
+  `while`, `until`, and `for` compound commands.
+- Quotes, parameter/command/arithmetic expansion, IFS field splitting, tilde,
+  brace, and pathname expansion.
+- Environment assignments, aliases, readonly names, positional parameters,
+  shell functions, common redirections, and `2>&1` descriptor duplication.
+- Regular builtins, system-command-first fallback builtins, Bun Shell fallbacks,
+  and explicit lookup through `command`, `builtin`, `whence`, `type`, and
+  `which`.
+- Interactive history import/save/recall, command and file completion, ghost
+  suggestions, cwd tabs, keyboard shortcuts, optional mouse interactions, and
+  fancy directory listings.
+- Linux, Android/Termux, macOS, and Windows-aware paths, plus standalone builds
+  and dynamic-linker re-execution support.
 
-- See [PORTING.md](PORTING.md) for semantic limitations and the remaining mksh work.
+See [PORTING.md](PORTING.md) for detailed semantics, implementation boundaries,
+platform notes, and the remaining mksh/POSIX compatibility work.
 
 ## Test
 
