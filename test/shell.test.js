@@ -577,7 +577,9 @@ describe("CLI", () => {
       new Response(proc.stderr).text(),
     ]);
     expect(status).toBe(0);
-    expect(stdout).toBe(`[${shown}] [📁 ${shown}  📂 ${shown}] `);
+    expect(stdout).toBe(
+      `[${shown}] [📁 ${shown}  \x1b[38;5;81m📂 ${shown}\x1b[0m] `,
+    );
     expect(stderr).toBe("");
   });
 
@@ -603,7 +605,7 @@ describe("CLI", () => {
     ]);
     expect(status).toBe(0);
     expect(stdout).toBe(
-      `📁 ${shown}\n$ 📁 ${shown}  📂 ${shown}\n[2]$ `,
+      `📁 ${shown}\n$ 📁 ${shown}  \x1b[38;5;81m📂 ${shown}\x1b[0m\n[2]$ `,
     );
     expect(stderr).toBe("");
   });

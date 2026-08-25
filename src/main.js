@@ -71,7 +71,9 @@ function renderCwd(state, cwd) {
 function renderPrompt(state) {
   const cwd = state.tabs.length > 1
     ? state.tabs.map((path, index) =>
-        `${index === state.activeTab ? "📂" : "📁"} ${renderCwd(state, path)}`,
+        index === state.activeTab
+          ? `\x1b[38;5;81m📂 ${renderCwd(state, path)}\x1b[0m`
+          : `📁 ${renderCwd(state, path)}`,
       ).join("  ")
     : renderCwd(state, state.cwd);
   const defaultPrompt = state.tabs.length > 1
