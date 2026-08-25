@@ -2,6 +2,7 @@ import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpath
 import { constants as osConstants } from "node:os";
 import { basename as pathBasename, dirname as pathDirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { format as formatValue } from "node:util";
+import { IS_COMPILED } from "../single-exe/compiled.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -11,6 +12,9 @@ const DEFAULT_ALIASES = {
   grep: ["grep", "--color=auto"],
 };
 const DEFAULT_COMMAND_PATH = "/bin:/usr/bin";
+const BUN_EXECUTABLE = Bun.which("bun") || process.argv0;
+const BUNMSH_ENTRY = resolvePath(import.meta.dirname, "main.js");
+const PIPELINE_STATE_ENV = "BUNMSH_INTERNAL_PIPELINE_STATE";
 
 export class ShellSyntaxError extends Error {
   constructor(message, offset = -1) {
@@ -815,6 +819,10 @@ const builtins = {
   builtin: null,
   __builtin: null,
   time: null,
+  // This is handled specially by runCommandArgv because its output is
+  // unbounded and therefore cannot be represented by the normal buffered
+  // builtin result.
+  yes: null,
   whence: async (argv, state) => {
     let pathOnly = false, verbose = false, i = 1;
     for (; i < argv.length; i++) {
@@ -1286,20 +1294,41 @@ export function createState(options = {}) {
   };
 }
 
-async function runExternal(argv, state, input, captureStdout, captureStderr) {
+async function runExternal(
+  argv,
+  state,
+  input,
+  captureStdout,
+  captureStderr,
+  stdoutSink = null,
+  runtimeOptions = {},
+) {
   const options = {
     cmd: argv,
     cwd: state.cwd,
     env: state.env,
     stdin: input === null ? "inherit" : input,
-    stdout: captureStdout ? "pipe" : "inherit",
+    stdout: captureStdout || stdoutSink ? "pipe" : "inherit",
     stderr: captureStderr ? "pipe" : "inherit",
+    onExit(proc, exitCode, signalCode, error) {
+      runtimeOptions.onExit?.(proc, exitCode, signalCode, error);
+    },
   };
   try {
     const proc = Bun.spawn(options);
+    const pipelineKillSignal = runtimeOptions.pipelineKillSignal ?? "SIGPIPE";
+    runtimeOptions.onSpawn?.(proc, pipelineKillSignal);
     const outputPromise = captureStdout
       ? new Response(proc.stdout).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
+    const streamPromise = stdoutSink
+      ? proc.stdout.pipeTo(stdoutSink).catch(() => {
+          // A downstream stage (for example `head`) closed early. Bun's
+          // ReadableStream bridge does not always turn that into SIGPIPE for
+          // the producer, so deliver the normal shell signal explicitly.
+          try { proc.kill(pipelineKillSignal); } catch {}
+        })
+      : Promise.resolve();
     const errorPromise = captureStderr
       ? new Response(proc.stderr).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
@@ -1307,11 +1336,66 @@ async function runExternal(argv, state, input, captureStdout, captureStderr) {
       proc.exited,
       outputPromise,
       errorPromise,
+      streamPromise,
     ]);
-    return result(status, new Uint8Array(output), new Uint8Array(error));
+    const execution = result(status, new Uint8Array(output), new Uint8Array(error));
+    execution.stdoutStreamed = Boolean(stdoutSink);
+    return execution;
   } catch (error) {
     return result(127, "", `bunmsh: ${argv[0]}: ${error.message}\n`);
   }
+}
+
+function runsInPipelineSubprocess(argv, state) {
+  if (["command", "builtin", "__builtin", "time"].includes(argv[0])) return true;
+  if (Object.hasOwn(builtins, argv[0])) return true;
+  return !argv[0].includes("/") &&
+    Object.hasOwn(fallbackBuiltins, argv[0]) &&
+    !findExecutable(argv[0], state);
+}
+
+function pipelineBuiltinArgv(argv) {
+  return IS_COMPILED
+    ? [process.execPath, "-cc", ...argv]
+    : [BUN_EXECUTABLE, BUNMSH_ENTRY, "-cc", ...argv];
+}
+
+function pipelineBuiltinState(state) {
+  return {
+    ...state,
+    env: {
+      ...state.env,
+      [PIPELINE_STATE_ENV]: JSON.stringify({
+        aliases: state.aliases,
+        readonly: [...state.readonly],
+        args: state.args,
+      }),
+    },
+  };
+}
+
+function closedPipe(error) {
+  const code = error?.code ?? error?.cause?.code;
+  return code === "EPIPE" || code === "ECONNRESET" ||
+    /broken pipe|closed pipe|connection reset/i.test(error?.message ?? "");
+}
+
+async function runYes(argv) {
+  const line = `${argv.length > 1 ? argv.slice(1).join(" ") : "y"}\n`;
+  const repetitions = Math.max(1, Math.floor(8192 / Math.max(1, bytes(line).byteLength)));
+  const chunk = bytes(line.repeat(repetitions));
+  const writer = Bun.stdout.writer();
+  try {
+    while (true) {
+      writer.write(chunk);
+      await writer.flush();
+    }
+  } catch (error) {
+    if (!closedPipe(error)) throw error;
+  } finally {
+    try { writer.end(); } catch {}
+  }
+  return result();
 }
 
 function parseCommandOptions(argv) {
@@ -1351,9 +1435,26 @@ function describeCommand(name, state, verbose, defaultPath) {
   return verbose ? `${name} not found\n` : null;
 }
 
-async function runCommandArgv(argv, state, input, captureStdout, captureStderr) {
+async function runCommandArgv(
+  argv,
+  state,
+  input,
+  captureStdout,
+  captureStderr,
+  options = {},
+) {
   let commandArgv = argv;
   let commandState = state;
+  if (options.pipelineStage && runsInPipelineSubprocess(commandArgv, commandState))
+    return runExternal(
+      pipelineBuiltinArgv(commandArgv),
+      pipelineBuiltinState(commandState),
+      input,
+      captureStdout,
+      captureStderr,
+      options.stdoutSink,
+      { ...options, pipelineKillSignal: "SIGTERM" },
+    );
   while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
     if (commandArgv[0] !== "command") {
       const builtinName = commandArgv[0];
@@ -1367,7 +1468,7 @@ async function runCommandArgv(argv, state, input, captureStdout, captureStderr) 
       if (!Object.hasOwn(builtins, commandArgv[0]) &&
           !Object.hasOwn(fallbackBuiltins, commandArgv[0]))
         return result(1, "", `bunmsh: builtin: ${commandArgv[0]}: not found\n`);
-      if (!["command", "builtin", "__builtin", "time"].includes(commandArgv[0]))
+      if (!["command", "builtin", "__builtin", "time", "yes"].includes(commandArgv[0]))
         return (builtins[commandArgv[0]] ?? fallbackBuiltins[commandArgv[0]])(
           commandArgv,
           commandState,
@@ -1418,12 +1519,21 @@ async function runCommandArgv(argv, state, input, captureStdout, captureStderr) 
     ]);
     return execution;
   }
+  if (commandArgv[0] === "yes") return runYes(commandArgv);
   if (Object.hasOwn(builtins, commandArgv[0]))
     return builtins[commandArgv[0]](commandArgv, commandState, input);
   if (!commandArgv[0].includes("/") && Object.hasOwn(fallbackBuiltins, commandArgv[0]) &&
       !findExecutable(commandArgv[0], commandState))
     return fallbackBuiltins[commandArgv[0]](commandArgv, commandState, input);
-  return runExternal(commandArgv, commandState, input, captureStdout, captureStderr);
+  return runExternal(
+    commandArgv,
+    commandState,
+    input,
+    captureStdout,
+    captureStderr,
+    options.stdoutSink,
+    options,
+  );
 }
 
 async function writeRedirect(path, data, append) {
@@ -1522,6 +1632,12 @@ async function runCommand(command, state, options = {}) {
     input,
     captureStdout,
     captureStderr,
+    {
+      pipelineStage: Boolean(options.pipelineStage),
+      stdoutSink: stdoutPath === null ? options.stdoutSink ?? null : null,
+      onSpawn: options.onSpawn,
+      onExit: options.onExit,
+    },
   );
 
   if (stdoutPath !== null) {
@@ -1544,17 +1660,63 @@ async function runCommand(command, state, options = {}) {
 }
 
 async function runPipeline(pipeline, state, options = {}) {
-  let input = null;
-  let final = result();
-  for (let i = 0; i < pipeline.length; i++) {
-    const last = i === pipeline.length - 1;
-    final = await runCommand(pipeline[i], state, {
-      input,
-      captureStdout: !last || Boolean(options.capture),
+  if (pipeline.length === 1)
+    return runCommand(pipeline[0], state, {
+      captureStdout: Boolean(options.capture),
       captureStderr: Boolean(options.capture),
-      subshell: pipeline.length > 1,
     });
-    if (!last) input = final.stdout;
+
+  const links = Array.from(
+    { length: pipeline.length - 1 },
+    () => new TransformStream(),
+  );
+  const processes = Array(pipeline.length).fill(null);
+  const finished = Array(pipeline.length).fill(false);
+  const stopUpstream = (index) => {
+    if (index < 0) return;
+    const processInfo = processes[index];
+    if (processInfo) {
+      try { processInfo.proc.kill(processInfo.signal); } catch {}
+    }
+  };
+  const stages = pipeline.map((command, i) => {
+    const last = i === pipeline.length - 1;
+    return runCommand(command, state, {
+      input: i === 0 ? null : links[i - 1].readable,
+      captureStdout: last && Boolean(options.capture),
+      captureStderr: Boolean(options.capture),
+      stdoutSink: last ? null : links[i].writable,
+      pipelineStage: true,
+      subshell: true,
+      onSpawn(proc, signal) {
+        processes[i] = { proc, signal };
+        if (finished[i + 1]) stopUpstream(i);
+      },
+      onExit() {
+        finished[i] = true;
+        stopUpstream(i - 1);
+      },
+    }).then(async (execution) => {
+      // Redirected commands and any future buffered pipeline stages do not
+      // consume stdoutSink themselves. Forward their finite result and close
+      // the link here. Streaming subprocesses already closed it via pipeTo().
+      if (!last && !execution.stdoutStreamed) {
+        const writer = links[i].writable.getWriter();
+        try {
+          if (execution.stdout.byteLength) await writer.write(execution.stdout);
+          await writer.close();
+        } catch {}
+      }
+      return execution;
+    }).finally(() => {
+      finished[i] = true;
+      stopUpstream(i - 1);
+    });
+  });
+  const executions = await Promise.all(stages);
+  const final = executions.at(-1);
+  if (options.capture) {
+    final.stderr = concatBytes(executions.map((execution) => execution.stderr));
   }
   return final;
 }
@@ -1667,6 +1829,25 @@ export async function executeArgv(argv, state = createState(), io = {}) {
     if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
   }
   return execution;
+}
+
+export function pipelineChildState() {
+  const serialized = process.env[PIPELINE_STATE_ENV];
+  if (!serialized) return createState();
+  try {
+    const inherited = JSON.parse(serialized);
+    const env = { ...process.env };
+    delete env[PIPELINE_STATE_ENV];
+    return createState({
+      env,
+      cwd: process.cwd(),
+      aliases: inherited.aliases,
+      readonly: inherited.readonly,
+      args: inherited.args,
+    });
+  } catch {
+    return createState();
+  }
 }
 
 export function decode(data) {

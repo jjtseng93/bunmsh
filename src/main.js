@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createInterface } from "node:readline/promises";
-import { createState, execute, executeArgv } from "./shell.js";
+import { createState, execute, executeArgv, pipelineChildState } from "./shell.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
 import pkg from "../package.json" with { type:"json" }
@@ -153,7 +153,7 @@ async function main(argv) {
       console.error("bunmsh: -cc requires a command");
       return 2;
     }
-    const state = createState();
+    const state = pipelineChildState();
     const result = await executeArgv(forwardedArgv, state);
     return state.exitRequested ? state.exitStatus : result.status;
   }

@@ -69,6 +69,7 @@ describe("execution", () => {
   test("runs external pipelines through Bun.spawn", async () => {
     const output = await run("printf hello | tr a-z A-Z");
     expect(output.stdout).toBe("HELLO");
+    expect(output.stderr).toBe("");
     expect(output.status).toBe(0);
   });
 

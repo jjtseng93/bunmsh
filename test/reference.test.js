@@ -355,3 +355,53 @@ describe("CLI direct argv forwarding", () => {
     });
   });
 });
+
+describe("concurrent streaming pipelines", () => {
+  test("matches /bin/sh for cat piped into grep", async () => {
+    await expectLikeSh("cat test/reference-source.sh | grep BUNMSH_REFERENCE_SOURCE");
+  });
+
+  test("matches /bin/sh for a multi-stage filtering pipeline", async () => {
+    await expectLikeSh(
+      "printf 'alpha\\nbeta\\ngamma\\n' | grep 'a$' | tr a-z A-Z",
+    );
+  });
+
+  test("matches /bin/sh when redirected stdin feeds a pipeline", async () => {
+    await expectLikeSh("cat < test/reference-source.sh | grep 'sourced:'");
+  });
+
+  test("matches /bin/sh by leaving stderr outside the pipe", async () => {
+    await expectLikeSh("sh -c 'printf error >&2; printf output' | cat");
+  });
+
+  test("matches /bin/sh pipeline status from the last stage", async () => {
+    await expectLikeSh("false | true; echo $?; true | false; echo $?");
+  });
+
+  test("matches /bin/sh pipeline state isolation", async () => {
+    await expectLikeSh("before=$PWD; cd / | cat; test \"$PWD\" = \"$before\" && echo unchanged");
+  });
+
+  test("streams the builtin yes into an external early-closing consumer", async () => {
+    const output = await invoke(bunmsh, "yes streamed | head -n 3");
+    expect(output).toEqual({
+      status: 0,
+      stdout: "streamed\nstreamed\nstreamed\n",
+      stderr: "",
+    });
+  });
+
+  test("streams builtin output into an external command", async () => {
+    const output = await invoke(bunmsh, "printf hello | tr a-z A-Z");
+    expect(output).toEqual({ status: 0, stdout: "HELLO", stderr: "" });
+  });
+
+  test("does not buffer a large multi-stage external pipeline", async () => {
+    const output = await invoke(
+      bunmsh,
+      "head -c 1048576 /dev/zero | tr '\\0' x | wc -c",
+    );
+    expect(output).toEqual({ status: 0, stdout: "1048576\n", stderr: "" });
+  });
+});
