@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 
 import { createInterface } from "node:readline/promises";
-import { createState, execute, executeArgv, pipelineChildState } from "./shell.js";
+import { builtinNames, createState, execute, executeArgv, pipelineChildState } from "./shell.js";
+import {
+  CommandIndex,
+  FileIndex,
+  completionContext,
+  historyGhost,
+  nextGhostChunk,
+} from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
 import pkg from "../package.json" with { type:"json" }
@@ -66,19 +73,104 @@ function renderPrompt(state) {
 
 async function interactive(state) {
   const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const readline = createInterface({
+  const commandIndex = new CommandIndex(builtinNames());
+  const fileIndex = new FileIndex();
+  const history = [];
+  if (terminal) await commandIndex.refresh(state);
+  let readline;
+  const completer = (line) => {
+    commandIndex.refreshIfChanged(state);
+    const context = completionContext(line);
+    if (context.command) {
+      return [
+        context.prefix.includes("/")
+          ? fileIndex.matches(context.prefix, state)
+          : commandIndex.matches(context.prefix),
+        context.prefix,
+      ];
+    }
+    if (!context.prefix)
+      return [fileIndex.matches("", state), ""];
+    const fromHistory = historyGhost(history, line);
+    const fileMatch = fileIndex.first(context.prefix, state);
+    const ghost = fromHistory ?? (fileMatch ? fileMatch.slice(context.prefix.length) : null);
+    const chunk = nextGhostChunk(ghost);
+    return chunk ? [[`${line}${chunk}`], line] : [[], line];
+  };
+  readline = createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal,
+    completer,
   });
+  let refreshTimer = null;
+  let removeGhostHooks = () => {};
+  if (terminal) {
+    refreshTimer = setInterval(() => void commandIndex.refresh(state), 10_000);
+    refreshTimer.unref?.();
+
+    let ghostWidth = 0;
+    let startedAtEnd = false;
+    let renderTask = null;
+    const currentGhost = () => {
+      if (readline.cursor !== readline.line.length) return null;
+      const context = completionContext(readline.line, readline.cursor);
+      if (context.command) {
+        const match = context.prefix.includes("/")
+          ? fileIndex.first(context.prefix, state)
+          : commandIndex.first(context.prefix);
+        return match ? match.slice(context.prefix.length) : null;
+      }
+      const fromHistory = historyGhost(history, readline.line);
+      if (fromHistory) return fromHistory;
+      const match = fileIndex.first(context.prefix, state);
+      return match ? match.slice(context.prefix.length) : null;
+    };
+    const clearGhost = () => {
+      if (!ghostWidth) return;
+      process.stdout.write("\x1b[0K");
+      ghostWidth = 0;
+    };
+    const renderGhost = () => {
+      renderTask = null;
+      clearGhost();
+      const ghost = currentGhost();
+      if (!ghost) return;
+      ghostWidth = Bun.stringWidth(ghost);
+      process.stdout.write(`\x1b[2m${ghost}\x1b[0m`);
+      if (ghostWidth) process.stdout.write(`\x1b[${ghostWidth}D`);
+    };
+    const beforeKey = () => {
+      startedAtEnd = readline.cursor === readline.line.length;
+      clearGhost();
+    };
+    const afterKey = (_text, key = {}) => {
+      if (key.name === "right" && startedAtEnd) {
+        const ghost = currentGhost();
+        if (ghost) readline.write(ghost);
+      }
+      if (renderTask !== null) clearTimeout(renderTask);
+      renderTask = setTimeout(renderGhost, 0);
+    };
+    process.stdin.prependListener("keypress", beforeKey);
+    process.stdin.on("keypress", afterKey);
+    removeGhostHooks = () => {
+      if (renderTask !== null) clearTimeout(renderTask);
+      clearGhost();
+      process.stdin.off("keypress", beforeKey);
+      process.stdin.off("keypress", afterKey);
+    };
+  }
   const closed = new Promise((resolve) => readline.once("close", () => resolve(null)));
   try {
     while (!state.exitRequested) {
+      readline.setPrompt(renderPrompt(state));
       const line = await Promise.race([
         readline.question(renderPrompt(state)),
         closed,
       ]);
       if (line === null) break;
+      if (line && history.at(-1) !== line) history.push(line);
       // readline must not keep reading from the terminal while a foreground
       // program owns it.  Otherwise both processes race for input and the
       // first key (notably Ctrl-Q in full-screen editors) can be consumed by
@@ -95,6 +187,8 @@ async function interactive(state) {
       }
     }
   } finally {
+    if (refreshTimer !== null) clearInterval(refreshTimer);
+    removeGhostHooks();
     readline.close();
   }
   return state.exitRequested ? state.exitStatus : state.lastStatus;

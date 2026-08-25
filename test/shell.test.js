@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createState, decode, execute, parse, tokenize } from "../src/shell.js";
+import {
+  CommandIndex,
+  FileIndex,
+  completionContext,
+  firstPrefixMatch,
+  historyGhost,
+  nextGhostChunk,
+  prefixMatches,
+} from "../src/completion.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -25,6 +37,82 @@ describe("parser", () => {
 
   test("parses a pipeline", () => {
     expect(parse("echo hi | tr a-z A-Z")[0].pipeline).toHaveLength(2);
+  });
+});
+
+describe("completion", () => {
+  test("finds prefix ranges in a sorted command index", () => {
+    const names = ["bun", "bunx", "cat", "git"];
+    expect(prefixMatches(names, "bu")).toEqual(["bun", "bunx"]);
+    expect(firstPrefixMatch(names, "gi")).toBe("git");
+    expect(prefixMatches(names, "")).toEqual([]);
+  });
+
+  test("recognizes command positions after assignments and operators", () => {
+    expect(completionContext("bu")).toMatchObject({ command: true, prefix: "bu" });
+    expect(completionContext("X=1 bu")).toMatchObject({ command: true, prefix: "bu" });
+    expect(completionContext("echo hi | gr")).toMatchObject({ command: true, prefix: "gr" });
+    expect(completionContext("echo bu")).toMatchObject({ command: false, prefix: "bu" });
+    expect(completionContext("echo ")).toMatchObject({ command: false, prefix: "" });
+  });
+
+  test("uses recent history for ghosts and accepts one word at a time", () => {
+    const history = ["git status", "git log --oneline", "git status --short"];
+    expect(historyGhost(history, "git status")).toBe(" --short");
+    expect(nextGhostChunk(" --short branch")).toBe(" --short ");
+    expect(nextGhostChunk("branch")).toBe("branch");
+  });
+
+  test("indexes PATH names without checking executable permission", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-completion-"));
+    try {
+      await Bun.write(`${directory}/alpha`, "not executable");
+      await Bun.write(`${directory}/alpine`, "also not executable");
+      const index = new CommandIndex(["alias"]);
+      await index.refresh({ cwd: process.cwd(), env: { PATH: directory }, aliases: {} });
+      expect(index.matches("al")).toEqual(["alias", "alpha", "alpine"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the platform PATH delimiter and hides Windows executable extensions", async () => {
+    const first = mkdtempSync(join(tmpdir(), "bunmsh-win-path-a-"));
+    const second = mkdtempSync(join(tmpdir(), "bunmsh-win-path-b-"));
+    try {
+      await Bun.write(`${first}/Alpha.EXE`, "exe");
+      await Bun.write(`${first}/ignored.txt`, "text");
+      await Bun.write(`${second}/beta.cmd`, "cmd");
+      await Bun.write(`${second}/gamma.bat`, "bat");
+      const index = new CommandIndex([], { platform: "win32", pathDelimiter: ";" });
+      await index.refresh({
+        cwd: process.cwd(),
+        env: { PATH: `${first};${second}` },
+        aliases: {},
+      });
+      expect(index.matches("A")).toEqual(["Alpha"]);
+      expect(index.matches("b")).toEqual(["beta"]);
+      expect(index.matches("g")).toEqual(["gamma"]);
+      expect(index.matches("i")).toEqual([]);
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  test("suggests files and marks directories with a trailing slash", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-files-"));
+    try {
+      await Bun.write(`${directory}/alpha.txt`, "alpha");
+      mkdirSync(`${directory}/alpine`);
+      const index = new FileIndex();
+      const state = { cwd: directory, env: {} };
+      expect(index.matches("", state)).toEqual(["alpha.txt", "alpine/"]);
+      expect(index.matches("al", state)).toEqual(["alpha.txt", "alpine/"]);
+      expect(index.first("alpha", state)).toBe("alpha.txt");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -273,5 +361,49 @@ describe("CLI", () => {
       `📁 ${shown}\n$ 📁 ${shown}  📂 ${shown}\n[2]$ `,
     );
     expect(stderr).toBe("");
+  });
+
+  test("renders ghosts and accepts history words, file paths, and commands", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 100,
+      rows: 30,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "> " },
+      terminal,
+    });
+    const send = async (text) => {
+      terminal.write(text);
+      await Bun.sleep(80);
+    };
+    try {
+      await Bun.sleep(150);
+      await send("echo hello world\r");
+      await send("echo h");
+      await send("\x1b[C");
+      await send("\r");
+      await send("echo h");
+      await send("\t");
+      await send("\r");
+      await send("basename pack");
+      await send("\x1b[C");
+      await send("\r");
+      await send("pri");
+      await send("\t");
+      await send("\r");
+      await send("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally {
+      terminal.close();
+    }
+    expect(transcript).toContain("\x1b[2mello world\x1b[0m");
+    expect(transcript).toContain("\x1b[2mage.json\x1b[0m");
+    expect(transcript).toContain("package.json\r\n");
+    expect(transcript).toContain("\x1b[2mnt\x1b[0m");
+    expect(transcript).toContain("\x1b[0Knt\r");
   });
 });

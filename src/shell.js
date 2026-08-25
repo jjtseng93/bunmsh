@@ -10,7 +10,13 @@ import {
   statSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { basename as pathBasename, dirname as pathDirname, isAbsolute, resolve as resolvePath } from "node:path";
+import {
+  basename as pathBasename,
+  delimiter as pathDelimiter,
+  dirname as pathDirname,
+  isAbsolute,
+  resolve as resolvePath,
+} from "node:path";
 import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { IS_COMPILED } from "../single-exe/compiled.js";
@@ -22,10 +28,20 @@ const DEFAULT_ALIASES = {
   diff: ["diff", "--color=auto"],
   grep: ["grep", "--color=auto"],
 };
-const DEFAULT_COMMAND_PATH = "/bin:/usr/bin";
+const DEFAULT_COMMAND_PATH = process.platform === "win32"
+  ? (process.env.PATH ?? "")
+  : ["/bin", "/usr/bin"].join(pathDelimiter);
 const BUN_EXECUTABLE = Bun.which("bun") || process.argv0;
 const BUNMSH_ENTRY = resolvePath(import.meta.dirname, "main.js");
 const PIPELINE_STATE_ENV = "BUNMSH_INTERNAL_PIPELINE_STATE";
+
+function shellPath(value) {
+  return process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+}
+
+function nativePath(value) {
+  return process.platform === "win32" ? value.replaceAll("/", "\\") : value;
+}
 
 export class ShellSyntaxError extends Error {
   constructor(message, offset = -1) {
@@ -664,7 +680,8 @@ function quoteShellWord(value) {
 
 function findExecutable(name, state, defaultPath = false) {
   const path = defaultPath ? DEFAULT_COMMAND_PATH : (state.env.PATH ?? "");
-  return Bun.which(name, { PATH: path, cwd: state.cwd });
+  const found = Bun.which(name, { PATH: path, cwd: nativePath(state.cwd) });
+  return found ? shellPath(found) : null;
 }
 
 function aliasWords(value) {
@@ -707,11 +724,12 @@ function parentDirectory(path) {
 }
 
 async function changeDirectory(state, target, { print = false } = {}) {
-  const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
+  const path = isAbsolute(nativePath(target))
+    ? nativePath(target)
+    : resolvePath(nativePath(state.cwd), nativePath(target));
   try {
-    const pathname = new URL(`file://${path.replaceAll("//", "/")}`).pathname;
-    const resolved = pathname === "/" ? "/" : pathname.replace(/\/+$/, "");
-    const stat = await Bun.file(resolved).stat();
+    const resolved = shellPath(resolvePath(path));
+    const stat = await Bun.file(nativePath(resolved)).stat();
     if (!stat.isDirectory())
       return result(1, "", `bunmsh: cd: ${target}: not a directory\n`);
     const previous = state.cwd;
@@ -742,7 +760,7 @@ async function sourceFile(argv, state) {
   if (!argv[1]) return result(2, "", `bunmsh: ${argv[0]}: missing file operand\n`);
   let path = argv[1];
   if (!path.includes("/")) {
-    const found = (state.env.PATH ?? "").split(":")
+    const found = (state.env.PATH ?? "").split(pathDelimiter)
       .map((directory) => resolvePath(directory || state.cwd, path))
       .find((candidate) => {
         try { return statSync(candidate).isFile(); } catch { return false; }
@@ -863,7 +881,7 @@ const builtins = {
       return result(1, "", "bunmsh: which: missing command name\n");
     let status = 0, output = "";
     for (; i < argv.length; i++) {
-      const path = Bun.which(argv[i], { PATH: state.env.PATH ?? "", cwd: state.cwd });
+      const path = findExecutable(argv[i], state);
       if (path) output += `${path}\n`;
       else status = 1;
     }
@@ -1260,7 +1278,7 @@ const fallbackBuiltins = {
   },
 };
 
-function builtinNames() {
+export function builtinNames() {
   return [...new Set([...Object.keys(builtins), ...Object.keys(fallbackBuiltins)])].sort();
 }
 
@@ -1287,7 +1305,7 @@ function formatMilliseconds(milliseconds, color = Boolean(process.stderr.isTTY))
 
 export function createState(options = {}) {
   const env = { ...process.env, ...(options.env ?? {}) };
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = shellPath(options.cwd ?? process.cwd());
   env.PWD = cwd;
   return {
     env,
@@ -1314,9 +1332,14 @@ async function runExternal(
   stdoutSink = null,
   runtimeOptions = {},
 ) {
+  // The shell language always exposes forward slashes. Only the executable
+  // pathname needs native separators at the Windows process boundary.
+  const spawnArgv = process.platform === "win32" && argv[0].includes("/")
+    ? [nativePath(argv[0]), ...argv.slice(1)]
+    : argv;
   const options = {
-    cmd: argv,
-    cwd: state.cwd,
+    cmd: spawnArgv,
+    cwd: nativePath(state.cwd),
     env: state.env,
     stdin: input === null ? "inherit" : input,
     stdout: captureStdout || stdoutSink ? "pipe" : "inherit",
