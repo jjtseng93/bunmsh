@@ -1628,9 +1628,17 @@ async function runHeadFallback(argv, state, input) {
 async function runTextFilter(argv, state, input, kind) {
   try {
     let args = argv.slice(1), reverse = false, numeric = false, unique = false;
-    let tailCount = 10;
+    let tailCount = 10, tailFromStart = false;
     if (kind === "tail") {
-      if (args[0] === "-n") tailCount = Number(args[1]), args = args.slice(2);
+      if (args[0] === "-n") {
+        const count = args[1] ?? "";
+        tailFromStart = /^\+\d+$/.test(count);
+        tailCount = Number(count);
+        args = args.slice(2);
+      } else if (/^-n\+\d+$/.test(args[0] ?? "")) {
+        tailFromStart = true;
+        tailCount = Number(args.shift().slice(2));
+      }
       else if (/^-\d+$/.test(args[0] ?? "")) tailCount = Number(args.shift().slice(1));
       if (!Number.isInteger(tailCount) || tailCount < 0)
         return result(1, "", "bunmsh: tail: invalid line count\n");
@@ -1646,7 +1654,9 @@ async function runTextFilter(argv, state, input, kind) {
     const trailing = lines.at(-1) === "";
     if (trailing) lines.pop();
     if (kind === "tail") {
-      lines = lines.slice(-tailCount);
+      lines = tailFromStart
+        ? lines.slice(Math.max(0, tailCount - 1))
+        : lines.slice(-tailCount);
     } else {
       lines.sort((a, b) => numeric ? Number(a) - Number(b) : a.localeCompare(b));
       if (unique) lines = lines.filter((line, index) => index === 0 || line !== lines[index - 1]);

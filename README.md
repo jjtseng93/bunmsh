@@ -412,7 +412,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `dirname` | `--` |
 | `cat` | `--`; files and `-` for stdin; no other options |
 | `head` | `-n N`, `-N`, `-c N`, `-cN` |
-| `tail` | `-n N`, `-N` |
+| `tail` | `-n N`, `-N`; `-n +N` and `-n+N` output starting at line N |
 | `wc` | `-l`, `-w`, `-c`, combinable |
 | `tr` | `-d`; simple ranges such as `a-z` |
 | `tee` | `-a` |

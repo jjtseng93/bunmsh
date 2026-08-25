@@ -268,6 +268,8 @@ describe("execution", () => {
     expect(await run("printf 'abc\\n' | builtin tr a-z A-Z")).toMatchObject({ stdout: "ABC\n" });
     expect(await run("printf '1\\n2\\n3\\n' | builtin head -n 2")).toMatchObject({ stdout: "1\n2\n" });
     expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n 2")).toMatchObject({ stdout: "2\n3\n" });
+    expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n +2")).toMatchObject({ stdout: "2\n3\n" });
+    expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n+3")).toMatchObject({ stdout: "3\n" });
     expect(await run("builtin date +%F")).toMatchObject({ status: 0 });
     expect(await run("builtin sleep 1ms")).toMatchObject({ status: 0, stdout: "", stderr: "" });
   });

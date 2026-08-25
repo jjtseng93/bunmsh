@@ -315,6 +315,22 @@ printf ':%s' $?
   });
 });
 
+describe("system tail reference", () => {
+  test("supports -n +N and compact -n+N from-start modes", async () => {
+    const input = "one\ntwo\nthree\nfour\n";
+    for (const args of [["-n", "+2"], ["-n+3"], ["-n", "+1"], ["-n", "+0"]]) {
+      const [actual, reference] = await Promise.all([
+        invokeArgvWithInput(
+          [process.execPath, join(root, "src/main.js"), "-cc", "builtin", "tail", ...args],
+          input,
+        ),
+        invokeArgvWithInput([Bun.which("tail"), ...args], input),
+      ]);
+      expect(actual).toEqual(reference);
+    }
+  });
+});
+
 describe("system grep reference", () => {
   test("matches basic and extended regular-expression semantics", async () => {
     await expectBuiltinGrepLike(["a+b"], "a+b\naaab\n");
