@@ -36,6 +36,7 @@ import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
 import { saveBunmshHistory } from "./history.js";
+import { fancyLs } from "./fancy-ls.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -2093,6 +2094,10 @@ const fallbackBuiltins = {
     return result(0, `${pathDirname(argv[i])}\n`);
   },
   ls: runBunShellFallback,
+  lsfancy: async (argv, state) => {
+    const output = fancyLs(argv, state);
+    return result(output.status, output.stdout, output.stderr);
+  },
   mv: runBunShellFallback,
   rm: runBunShellFallback,
   mkdir: runBunShellFallback,

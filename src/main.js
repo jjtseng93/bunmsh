@@ -113,6 +113,7 @@ function renderPrompt(state, withRegions = false) {
 
 async function interactive(state) {
   const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const mouseTracking = terminal && /^(?:1|true|on|yes)$/i.test(state.env.BUNMSH_MOUSE ?? "");
   const commandIndex = new CommandIndex(builtinNames());
   const fileIndex = new FileIndex();
   state.history = await importedHistory(state.env);
@@ -121,9 +122,11 @@ async function interactive(state) {
   let readline;
   let promptRegions = [];
   let pendingClick = null;
-  const filteredInput = terminal ? mouseInput((mouse) => {
+  let lastTabClick = null;
+  let mouseCommandRunning = false;
+  const filteredInput = mouseTracking ? mouseInput((mouse) => {
     if (!mouse.press || (mouse.button & 3) !== 0 || (mouse.button & 32)) return;
-    pendingClick = mouse;
+    pendingClick = { ...mouse, at: Date.now() };
     process.stdout.write("\x1b[6n");
   }, ({ row }) => {
     if (!pendingClick || !readline) return;
@@ -134,13 +137,31 @@ async function interactive(state) {
     const relativeColumn = click.x - 1;
     const index = promptRegions.findIndex((cells) =>
       cells.some((cell) => cell.row === relativeRow && cell.column === relativeColumn));
-    if (index < 0 || index === state.activeTab) return;
-    state.activeTab = index;
-    state.cwd = state.tabs[index];
+    if (index < 0) return;
+    const doubleClick = lastTabClick?.index === index &&
+      click.at - lastTabClick.at <= 400;
+    lastTabClick = doubleClick ? null : { index, at: click.at };
+    if (index !== state.activeTab) {
+      state.activeTab = index;
+      state.cwd = state.tabs[index];
+      state.env.PWD = state.cwd;
+    }
     const rendered = renderPrompt(state, true);
     promptRegions = rendered.regions;
     readline.setPrompt(rendered.text);
-    readline.prompt(true);
+    if (!doubleClick || mouseCommandRunning) {
+      readline.prompt(true);
+      return;
+    }
+    mouseCommandRunning = true;
+    process.stdout.write("\r\x1b[0J\n");
+    void executeArgv(["builtin", "lsfancy"], state).finally(() => {
+      mouseCommandRunning = false;
+      const next = renderPrompt(state, true);
+      promptRegions = next.regions;
+      readline.setPrompt(next.text);
+      readline.prompt(true);
+    });
   }) : process.stdin;
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);
@@ -172,8 +193,10 @@ async function interactive(state) {
   let refreshTimer = null;
   let removeGhostHooks = () => {};
   if (terminal) {
-    process.stdin.pipe(filteredInput);
-    process.stdout.write(MOUSE_ON);
+    if (mouseTracking) {
+      process.stdin.pipe(filteredInput);
+      process.stdout.write(MOUSE_ON);
+    }
     refreshTimer = setInterval(() => void commandIndex.refresh(state), 10_000);
     refreshTimer.unref?.();
 
@@ -254,7 +277,7 @@ async function interactive(state) {
       // first key (notably Ctrl-Q in full-screen editors) can be consumed by
       // the shell.  Also give the child a sane terminal mode to start from.
       readline.pause();
-      if (terminal) {
+      if (mouseTracking) {
         process.stdout.write(MOUSE_OFF);
         process.stdin.unpipe(filteredInput);
       }
@@ -264,7 +287,7 @@ async function interactive(state) {
       } finally {
         if (!state.exitRequested) {
           if (terminal) process.stdin.setRawMode(true);
-          if (terminal) {
+          if (mouseTracking) {
             process.stdin.pipe(filteredInput);
             process.stdout.write(MOUSE_ON);
           }
@@ -273,7 +296,7 @@ async function interactive(state) {
       }
     }
   } finally {
-    if (terminal) {
+    if (mouseTracking) {
       process.stdout.write(MOUSE_OFF);
       process.stdin.unpipe(filteredInput);
     }

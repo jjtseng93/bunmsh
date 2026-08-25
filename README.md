@@ -227,8 +227,8 @@ BUNMSH_IMPORT_HISTORY=0 bunmsh
 
 bunmsh never saves history automatically. Use `tab s` or `tab save` when you
 want to persist the current interactive history. A newly opened bunmsh loads
-that file for both Up/Down arrow recall and ghost completion. The standard path is
-`$XDG_DATA_HOME/bunmsh/history`, falling back to
+that file for both Up/Down arrow recall and ghost completion. The standard path
+is `$XDG_DATA_HOME/bunmsh/history`, falling back to
 `~/.local/share/bunmsh/history`. Windows uses
 `%LOCALAPPDATA%/bunmsh/history`.
 
@@ -243,10 +243,32 @@ When more than one tab exists, the prompt displays every remembered path:
 
 ```text
 📁 ~/project  📂 ~/project/src
-$
+[2]$
 ```
 
-`📂` marks the active tab and `📁` marks inactive tabs.
+`📂` marks the active tab and `📁` marks inactive tabs. The complete active
+entry (icon and path) is highlighted in cyan-blue. The default prompt includes
+the active tab's 1-based number when multiple tabs exist; no number is shown
+when there is only one tab.
+
+Mouse support is opt-in because application mouse tracking prevents normal
+scrollback gestures in terminals such as Termux and xterm. Enable it before
+starting bunmsh with:
+
+```sh
+BUNMSH_MOUSE=1 bunmsh
+```
+
+`true`, `on` and `yes` are also accepted, case-insensitively. In terminals
+supporting SGR mouse reporting, left-click anywhere on a tab's icon or path to
+activate it. The spaces between tabs are not clickable. Long tab lists use the
+terminal's normal line wrapping, and wrapped portions remain clickable as part
+of their original tab. Double-clicking the same tab within 400 ms switches to
+it and runs `builtin lsfancy`, immediately rereading and displaying that
+directory without using the completion cache. Mouse reporting is disabled
+while a foreground command owns the terminal, so full-screen editors and other
+TUI programs receive their own mouse input normally; bunmsh restores it on
+return.
 
 The shell starts with one tab. With no argument, `tab` creates a second tab
 when only one exists; after that it cycles to the tab on the right:
@@ -356,6 +378,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, combinable |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
+| `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
 | `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |
 | `rm` | Bun Shell currently implements `-f`, `-r`, `-R`, `-v`, `-d`, `-i`, `-I`, `--recursive`, `--verbose`, `--dir`, and `--interactive=never|once|always`; `--preserve-root` and `--no-preserve-root` are accepted but currently have no effect |

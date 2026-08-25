@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +29,7 @@ import {
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
-import { mouseInput } from "../src/mouse.js";
+import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -248,6 +248,43 @@ describe("execution", () => {
     expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n 2")).toMatchObject({ stdout: "2\n3\n" });
     expect(await run("builtin date +%F")).toMatchObject({ status: 0 });
     expect(await run("builtin sleep 1ms")).toMatchObject({ status: 0, stdout: "", stderr: "" });
+  });
+
+  test("lsfancy classifies files by extension and always reads the directory", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-lsfancy-"));
+    try {
+      mkdirSync(join(cwd, "package"));
+      await Bun.write(join(cwd, "photo.png"), "image");
+      await Bun.write(join(cwd, "song.mp3"), "music");
+      await Bun.write(join(cwd, "app.mjs"), "js");
+      await Bun.write(join(cwd, "types.mts"), "ts");
+      await Bun.write(join(cwd, "page.html"), "html");
+      await Bun.write(join(cwd, "style.css"), "css");
+      const first = await run("builtin lsfancy", { cwd });
+      expect(first.status).toBe(0);
+      expect(first.stdout).toContain("📦 package/");
+      expect(first.stdout).toContain("🖼️ photo.png");
+      expect(first.stdout).toContain("🎵 song.mp3");
+      expect(first.stdout).toContain("🟨 app.mjs");
+      expect(first.stdout).toContain("🟦 types.mts");
+      expect(first.stdout).toContain("🌐 page.html");
+      expect(first.stdout).toContain("🎨 style.css");
+      await Bun.write(join(cwd, "new.py"), "pass\n");
+      expect((await run("builtin lsfancy", { cwd })).stdout).toContain("🐍 new.py");
+      await Bun.write(join(cwd, "large.bin"), "x".repeat(1536));
+      const long = await run("builtin lsfancy -lh large.bin", { cwd });
+      expect(long.status).toBe(0);
+      expect(long.stdout).toContain("1.5K");
+      expect(long.stdout).toContain("📄 large.bin");
+      await Bun.write(join(cwd, "time-old.txt"), "old");
+      await Bun.write(join(cwd, "time-new.txt"), "new");
+      utimesSync(join(cwd, "time-old.txt"), new Date(1000), new Date(1000));
+      utimesSync(join(cwd, "time-new.txt"), new Date(2000), new Date(2000));
+      const timed = await run("builtin lsfancy -ltr", { cwd });
+      expect(timed.status).toBe(0);
+      expect(timed.stdout.indexOf("time-old.txt"))
+        .toBeLessThan(timed.stdout.indexOf("time-new.txt"));
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
   test("fallback grep supports matching, output modes, quiet, and recursion", async () => {
@@ -662,6 +699,28 @@ describe("CLI", () => {
     }
   });
 
+  test("enables terminal mouse reporting only through BUNMSH_MOUSE", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "> ", BUNMSH_MOUSE: "1" },
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain(MOUSE_ON);
+    expect(transcript).toContain(MOUSE_OFF);
+  });
+
   test("renders ghosts and accepts history words, file paths, and commands", async () => {
     let transcript = "";
     const terminal = new Bun.Terminal({
@@ -704,5 +763,6 @@ describe("CLI", () => {
     expect(transcript).toContain("package.json\r\n");
     expect(transcript).toContain("\x1b[2mnt\x1b[0m");
     expect(transcript).toContain("\x1b[0Knt\r");
+    expect(transcript).not.toContain(MOUSE_ON);
   });
 });
