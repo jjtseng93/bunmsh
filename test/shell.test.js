@@ -29,6 +29,7 @@ import {
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
+import { mouseInput } from "../src/mouse.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -68,6 +69,22 @@ describe("parser", () => {
 });
 
 describe("completion", () => {
+  test("removes split SGR mouse and cursor reports from readline input", async () => {
+    const mice = [];
+    const cursors = [];
+    let forwarded = "";
+    const input = mouseInput((event) => mice.push(event), (position) => cursors.push(position));
+    input.on("data", (chunk) => { forwarded += chunk.toString(); });
+    input.write("echo ");
+    input.write("\x1b[<0;12");
+    input.write(";3M\x1b[4;9Rok");
+    input.end();
+    await new Promise((resolve) => input.once("end", resolve));
+    expect(forwarded).toBe("echo ok");
+    expect(mice).toEqual([{ button: 0, x: 12, y: 3, press: true }]);
+    expect(cursors).toEqual([{ row: 4, column: 9 }]);
+  });
+
   test("imports Bash and Fish history by default and can be disabled", async () => {
     expect(parseBashHistory("#1720000000\necho bash\n\nshared\n"))
       .toEqual(["echo bash", "shared"]);
