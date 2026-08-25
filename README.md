@@ -328,10 +328,6 @@ tab path on     # enable PATH lookup (same as tab path true)
 tab path off    # builtin-only mode (same as tab path false)
 ```
 
-Interactive keyboard shortcuts call the same builtins without adding a command
-to history: Ctrl-T is equivalent to `builtin tab`, while Alt-T is equivalent to
-`builtin tab l`. Any command text currently being edited is preserved.
-
 Left and right movement wrap at the ends. Closing a tab selects the tab that
 moves into the same position, or the previous tab when closing the rightmost
 one. The final remaining tab cannot be closed.
@@ -345,6 +341,21 @@ cd src
 tab l      # back to ~/project
 tab r      # back to ~/project/src
 ```
+
+## Special Interactions
+
+- `Ctrl-T`: Calls `builtin tab` without adding a command to history. It creates
+  a tab when only one exists, or switches to the next tab otherwise. Any
+  command text currently being edited is preserved.
+
+- `Alt-T`: Calls `builtin tab l` without adding a command to history, switching
+  to the tab on the left while preserving the command currently being edited.
+
+- `?`: When the entire command is exactly this single character, prints the
+  previous exit status. It is equivalent to `echo $?` and prints `0` after a
+  successful command. After a command fails, only the `$` in the next prompt
+  is shown in red. For Fish users, the corresponding expression is
+  `echo $status` because Fish uses `$status` where POSIX-style shells use `$?`.
 
 ## Built-in commands and supported flags
 
