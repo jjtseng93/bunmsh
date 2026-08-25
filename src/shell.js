@@ -2177,11 +2177,55 @@ export function createState(options = {}) {
 }
 
 function hasCompoundSyntax(source) {
-  return /(^|\n)\s*(?:\(|if\s|(?:while|until|for|case)\s|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{)/.test(source);
+  if (/(^|\n)\s*(?:\(|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{)/.test(source)) return true;
+  let commandStart = true;
+  for (const token of tokenize(source)) {
+    if (token.type === "op") {
+      if ([";", "&&", "||", "|"].includes(token.value)) commandStart = true;
+      continue;
+    }
+    const word = token.fragments.length === 1 && token.fragments[0].quote === "none"
+      ? token.fragments[0].text : null;
+    if (commandStart && ["if", "while", "until", "for", "case"].includes(word)) return true;
+    if (!(commandStart && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word ?? ""))) commandStart = false;
+  }
+  return false;
+}
+
+function compoundLogicalSource(source) {
+  const tokens = tokenize(source);
+  const breaks = new Set();
+  let commandStart = true;
+  const literal = (token) => token.type === "word" && token.fragments.length === 1 &&
+    token.fragments[0].quote === "none" ? token.fragments[0].text : null;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type === "op") {
+      if ([";", "&&", "||", "|"].includes(token.value)) commandStart = true;
+      continue;
+    }
+    const word = literal(token);
+    if (!commandStart) continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word ?? "")) continue;
+    // Like mksh's KEYWORD lexer mode, these words are special only where a
+    // command may begin. Physical newlines are not required around them.
+    if (["if", "while", "until", "for", "case"].includes(word) && token.offset > 0)
+      breaks.add(token.offset);
+    if (["elif", "else", "fi", "done", "esac"].includes(word))
+      breaks.add(token.offset);
+    if (["then", "do", "else"].includes(word) && tokens[index + 1])
+      breaks.add(tokens[index + 1].offset);
+    commandStart = ["if", "while", "until", "elif", "then", "do", "else"].includes(word);
+  }
+  let logical = source;
+  for (const offset of [...breaks].sort((a, b) => b - a))
+    if (offset > 0 && source[offset - 1] !== "\n")
+      logical = `${logical.slice(0, offset)}\n${logical.slice(offset)}`;
+  return logical;
 }
 
 function parseCompoundScript(source) {
-  const lines = source.replace(/\\\r?\n/g, "").split(/\r?\n/);
+  const lines = compoundLogicalSource(source.replace(/\\\r?\n/g, "")).split(/\r?\n/);
   const parseSequence = (start, stops = []) => {
     const nodes = [];
     let i = start;
@@ -2349,6 +2393,7 @@ async function executeNodeList(nodes, state) {
     }
     if (node.type === "loop") {
       const previousReadLines = state.readLines;
+      let ranBody = false;
       try {
         if (node.input !== null) {
           const parsed = parse(`__input ${node.input}`)[0]?.pipeline[0];
@@ -2362,8 +2407,12 @@ async function executeNodeList(nodes, state) {
           const checked = await execute(node.condition, state, { capture: true, simple: true });
           append(checked);
           const proceed = node.kind === "until" ? checked.status !== 0 : checked.status === 0;
-          if (!proceed || state.exitRequested) { execution = checked; break; }
+          if (!proceed || state.exitRequested) {
+            if (!ranBody) execution = result();
+            break;
+          }
           execution = await executeNodeList(node.body, state);
+          ranBody = true;
           append(execution);
           if (state.exitRequested) break;
         }

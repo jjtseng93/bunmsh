@@ -193,6 +193,24 @@ trigger JavaScript mode independently:
 echo "Bun version: $(Bun.version)"
 ```
 
+#### Flow control with JavaScript values
+
+JavaScript command substitution can feed ordinary shell tests and flow
+control. For example, these complete one-line `if` commands compare a
+JavaScript result as a shell string:
+
+```console
+📁 ~/bunmsh
+$ if [ $(Bun.e, Math.PI<3 ) = true ] ; then echo right ; else echo wrong ; fi
+wrong
+📁 ~/bunmsh
+$ if [ $(Bun.e, Math.PI>3 ) = true ] ; then echo right ; else echo wrong ; fi
+right
+```
+
+The outer `if`, `[`, `then`, `else` and `fi` are parsed by bunmsh. Only the
+contents of each `$(...)` enter the JavaScript evaluator.
+
 Errors are printed to standard error with a stack trace and set the shell
 status to `1`. Successful evaluation sets it to `0`; an `undefined` result
 prints nothing.

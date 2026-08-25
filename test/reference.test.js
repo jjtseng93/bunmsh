@@ -225,6 +225,14 @@ done
 `);
     });
 
+    test("executes a complete if command on one physical line", async () => {
+      await expectLikeSh("if true ; then echo hello ; fi");
+      await expectLikeSh("if false; then echo wrong; elif true; then echo elif; else echo wrong; fi");
+      await expectLikeSh("if true; then echo then fi else; fi");
+      await expectLikeSh("i=0; while [ \"$i\" -lt 2 ]; do echo loop:$i; i=$((i + 1)); done");
+      await expectLikeSh("for item in one two; do echo item:$item; done");
+    });
+
     test("redirects a file into a while-read loop", async () => {
       const directory = mkdtempSync(join(tmpdir(), "bunmsh-read-loop-"));
       try {
