@@ -20,6 +20,15 @@ On other platforms, follow the
 
 No project dependencies need to be installed with `npm install` or `bun install`.
 
+#### Prompt note for frequent SSH users
+
+- By default bunmsh prompts don't show user@host
+- Show them by a custom `PS1`:
+
+```sh
+PS1=$(printf "$(id -un)@$(hostname):\\w\n%s" '$ ') npx bunmsh
+```
+
 ### Option 1: Run with npx
 
 ```sh
