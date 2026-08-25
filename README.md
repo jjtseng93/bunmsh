@@ -67,75 +67,117 @@ bun ./bunmsh -cc echo 'hello world' '*.txt' '$HOME'
 already-quoted word, without another round of bunmsh parsing or expansion. The
 example calls the `echo` builtin and prints `hello world *.txt $HOME` literally.
 
+### Useful CLI options
+
+| Option | Effect |
+| --- | --- |
+| `-c SCRIPT_TEXT [argv...]` | Treat command text as a shell script, then parse and execute it |
+| `-cc COMMAND [argv...]` | Call a command with argv as-is; no shell parsing or shell expansions |
+| `-i` | Enter interactive mode, including after running a script |
+| `--mouse` | Start with terminal mouse tracking enabled |
+| `--builtin-only` | Skip direct command-name lookup through `PATH` |
+
+`-c` treats its command text as a shell script and performs the normal parse
+and execute flow. Arguments after the script text become its argv array:
+
+```sh
+bunmsh -c 'echo "$0" "$1"' Hello world
+# Hello world
+```
+
+`-cc` means **Call Command**. It can call an alias, builtin, or command from
+`PATH`. Every following argument is passed as-is, without shell parsing or
+shell expansions:
+
+```sh
+bunmsh -cc echo '$HOME' '*.js'
+# $HOME *.js
+
+bunmsh -cc lsfancy -lh
+# List cwd with emojis
+```
+
+In other words, the argv following `-cc` is already quoted. Metacharacters,
+variables, and glob patterns remain literal instead of being interpreted by
+bunmsh.
+
+Mouse tracking can alternatively be enabled with `BUNMSH_MOUSE=1`; `true`,
+`on`, and `yes` are also accepted case-insensitively. It is opt-in because
+application mouse tracking prevents normal scrollback gestures in terminals
+such as Termux and xterm.
+
+In `--builtin-only` mode, regular and fallback builtins, aliases, and functions
+remain available. An explicit executable path containing `/` can still run.
+The `which` builtin always searches the current `PATH`, so `$(which COMMAND)`
+can explicitly select a PATH executable while this mode is active. Use
+`tab path` interactively to toggle this setting; `tab path on`/`true` enables
+direct PATH lookup and `tab path off`/`false` disables it.
+
 ### Highest-priority JavaScript mode
 
-bunmsh can evaluate Bun JavaScript directly. Before tokenising, quoting or
+```console
+# Read a Bun value; non-undefined results are printed automatically
+📁 ~/bunmsh
+$ Bun.version
+
+# Promises are awaited automatically
+📁 ~/bunmsh
+$ Bun.file("package.json").text()
+📁 ~/bunmsh
+$ Bun.sleep(500).then(() => "finished")
+
+# Run arbitrary JavaScript statements or an expression
+📁 ~/bunmsh
+$ Bun.e; const numbers = [1, 2, 3]; numbers.reduce((a, b) => a + b, 0)
+6
+📁 ~/bunmsh
+$ Bun.e, ({ cwd: process.cwd(), pid: process.pid })
+
+# Share a value across later commands and cwd tabs in this bunmsh process
+📁 ~/bunmsh
+$ Bun.sha.var_name = { value: 123 }
+{ value: 123 }
+📁 ~/bunmsh
+$ Bun.sha.var_name.value
+123
+
+# JavaScript inside ordinary shell command substitution
+📁 ~/bunmsh
+$ echo "Bun version: $(Bun.version)"
+
+# Feed a JavaScript result into ordinary shell flow control
+📁 ~/bunmsh
+$ if [ $(Bun.e, Math.PI<3 ) = true ] ; then echo right ; else echo wrong ; fi
+wrong
+📁 ~/bunmsh
+$ if [ $(Bun.e, Math.PI>3 ) = true ] ; then echo right ; else echo wrong ; fi
+right
+```
+
+bunmsh can evaluate Bun JavaScript directly. Before tokenising, quoting, or
 performing any shell expansion, it removes leading whitespace and checks the
 first four characters of the original input. If they are exactly `Bun.`, the
 entire input is passed directly to JavaScript `eval` instead of the shell
-parser:
-
-```text
-raw input beginning with Bun.  -> JavaScript eval
-everything else                -> normal shell parser
-```
-
-The simplest example returns the current Bun version:
-
-```js
-Bun.version
-```
+parser. Everything else continues through the normal shell parser.
 
 A non-`undefined` result is printed automatically. Promises are awaited, so
-asynchronous Bun APIs can be used without adding top-level `await`:
-
-```js
-Bun.file("package.json").text()
-Bun.sleep(500).then(() => "finished")
-Bun.hash("hello")
-```
-
-Because the check applies only to the beginning of the input, a `Bun.`
-expression can be followed by arbitrary JavaScript statements:
-
-```js
-Bun.version; const numbers = [1, 2, 3]; numbers.reduce((a, b) => a + b, 0)
-Bun.version; console.log(process.cwd()); console.log(process.platform)
-```
+asynchronous Bun APIs do not need explicit top-level `await`. Errors are
+printed to standard error with a stack trace and set the shell status to `1`;
+successful evaluation sets it to `0`, and an `undefined` result prints nothing.
 
 #### Use `Bun.e;` or `Bun.e,` to run arbitrary JavaScript
 
-The `Bun.` prefix is only the switch that selects JavaScript mode. The code
-does not otherwise have to call a Bun API. `Bun.e` can be evaluated and
-discarded as a convenient no-op prefix, allowing arbitrary JavaScript to
-follow while the raw input still begins with the required four characters.
-The `e` property does not need to exist: reading a missing JavaScript property
-simply produces `undefined`.
+The `Bun.` prefix is only the switch that selects JavaScript mode; the code
+does not otherwise have to call a Bun API. `Bun.e` is a convenient no-op prefix
+that permits arbitrary JavaScript while keeping the required first four
+characters. The `e` property does not need to exist because reading a missing
+JavaScript property simply produces `undefined`.
 
 Technically, any property name works because only the leading `Bun.` is
 checked; for example, `Bun.x;` and `Bun.anything,` also enter JavaScript mode.
-This README uses `e` as the conventional spelling because it stands for
-**eval** (or **evaluate**), is short, and makes the intent recognisable:
-
-```js
-Bun.e; arbitraryJavaScriptStatement()
-Bun.e, arbitraryJavaScriptExpression()
-```
-
-Use `Bun.e;` before one or more JavaScript statements:
-
-```js
-Bun.e; const numbers = [1, 2, 3]; numbers.reduce((a, b) => a + b, 0)
-Bun.e; const message = "arbitrary JavaScript"; console.log(message)
-```
-
-Use the comma operator form `Bun.e,` before a single expression:
-
-```js
-Bun.e, 1 + 2
-Bun.e, process.platform
-Bun.e, ({ cwd: process.cwd(), pid: process.pid })
-```
+This README uses `e` conventionally because it stands for **eval** (or
+**evaluate**), is short, and makes the intent recognisable. Use `Bun.e;` before
+one or more statements and `Bun.e,` before a single expression.
 
 `Bun.e;` discards the `Bun.e` value and starts a new statement. `Bun.e,`
 discards it through JavaScript's comma operator and returns the expression on
@@ -146,14 +188,8 @@ JavaScript.
 #### Use `Bun.sha` as a shared area (hack)
 
 `Bun.sha` is normally Bun's SHA hashing function. JavaScript functions are
-objects, and the function is extensible in current Bun versions, so custom
-properties can be attached to it as a lightweight process-wide shared area:
-
-```js
-Bun.sha.var_name = { value: 123 }
-Bun.sha.var_name.value
-Bun.sha.counter = (Bun.sha.counter ?? 0) + 1
-```
+objects, and the function is extensible in current Bun versions, so properties
+such as `Bun.sha.var_name` can serve as a lightweight process-wide shared area.
 
 These lines already begin with `Bun.`, so they enter the highest-priority
 JavaScript evaluator directly. Values remain available to later commands,
@@ -166,54 +202,20 @@ property names. A function already has reserved or behaviour-sensitive names
 such as `name`, `length`, `call`, `apply`, `bind`, `caller`, `arguments`,
 `constructor` and `toString`. In the tested Bun version, `name` and `length`
 are read-only and assignment throws a `TypeError`; shadowing other Function
-properties can break normal function behaviour.
-
-For a lower collision risk, keep all shared values below one uniquely named
-namespace:
-
-```js
-Bun.sha.bunmsh ??= Object.create(null)
-Bun.sha.bunmsh.var_name = { value: 123 }
-Bun.sha.bunmsh.var_name
-```
-
-Before choosing a direct property name, it can be checked explicitly:
-
-```js
-Bun.e, Object.hasOwn(Bun.sha, "var_name")
-```
+properties can break normal function behaviour. Before choosing a direct
+property name, check it with `Bun.e, Object.hasOwn(Bun.sha, "var_name")`.
 
 #### JavaScript inside shell command substitution
 
 This mode also composes with shell command substitution. The outer command is
 parsed as shell, while the contents of `$(...)` are evaluated again and can
-trigger JavaScript mode independently:
-
-```sh
-echo "Bun version: $(Bun.version)"
-```
+trigger JavaScript mode independently.
 
 #### Flow control with JavaScript values
 
 JavaScript command substitution can feed ordinary shell tests and flow
-control. For example, these complete one-line `if` commands compare a
-JavaScript result as a shell string:
-
-```console
-📁 ~/bunmsh
-$ if [ $(Bun.e, Math.PI<3 ) = true ] ; then echo right ; else echo wrong ; fi
-wrong
-📁 ~/bunmsh
-$ if [ $(Bun.e, Math.PI>3 ) = true ] ; then echo right ; else echo wrong ; fi
-right
-```
-
-The outer `if`, `[`, `then`, `else` and `fi` are parsed by bunmsh. Only the
-contents of each `$(...)` enter the JavaScript evaluator.
-
-Errors are printed to standard error with a stack trace and set the shell
-status to `1`. Successful evaluation sets it to `0`; an `undefined` result
-prints nothing.
+control. The outer `if`, `[`, `then`, `else`, and `fi` remain shell syntax;
+only the contents of each `$(...)` enter the JavaScript evaluator.
 
 > **Security:** this is unrestricted JavaScript execution with the same file,
 > process, environment and network permissions as bunmsh. Never pass untrusted
@@ -252,10 +254,19 @@ is `$XDG_DATA_HOME/bunmsh/history`, falling back to
 
 ### Tab system
 
-bunmsh includes lightweight cwd tabs. A tab stores only its working directory;
-variables, environment, aliases, readonly names, positional arguments, command
-status and other shell state remain shared. Switching tabs changes `cwd` and
-updates `PWD` without changing `OLDPWD`.
+| Command | Effect |
+| --- | --- |
+| `tab` | Create a second tab when only one exists; otherwise cycle right |
+| `tab n` | Create and activate a new tab at the current cwd |
+| `tab NUMBER` | Activate a tab by its 1-based number |
+| `tab l` | Cycle left |
+| `tab r` | Cycle right |
+| `tab x`, `tab c` | Close the active tab |
+
+bunmsh includes lightweight cwd tabs and starts with one tab. A tab stores only
+its working directory; variables, environment, aliases, readonly names,
+positional arguments, command status, and other shell state remain shared.
+Switching tabs changes `cwd` and updates `PWD` without changing `OLDPWD`.
 
 When more than one tab exists, the prompt displays every remembered path:
 
@@ -265,68 +276,8 @@ When more than one tab exists, the prompt displays every remembered path:
 ```
 
 `📂` marks the active tab and `📁` marks inactive tabs. The complete active
-entry (icon and path) is highlighted in cyan-blue. The default prompt includes
-the active tab's 1-based number when multiple tabs exist; no number is shown
-when there is only one tab.
-
-Mouse support is opt-in because application mouse tracking prevents normal
-scrollback gestures in terminals such as Termux and xterm. Enable it at
-startup with either form:
-
-```sh
-bunmsh --mouse
-BUNMSH_MOUSE=1 bunmsh
-```
-
-`true`, `on` and `yes` are also accepted, case-insensitively. In terminals
-supporting SGR mouse reporting, left-click anywhere on a tab's icon or path to
-activate it. The spaces between tabs are not clickable. Long tab lists use the
-terminal's normal line wrapping, and wrapped portions remain clickable as part
-of their original tab. Double-clicking the same tab within 400 ms switches to
-it and runs `builtin lsfancy`, immediately rereading and displaying that
-directory without using the completion cache. Mouse reporting is disabled
-while a foreground command owns the terminal, so full-screen editors and other
-TUI programs receive their own mouse input normally; bunmsh restores it on
-return.
-
-To start without searching `PATH` for command names, use:
-
-```sh
-bunmsh --builtin-only
-```
-
-Regular and fallback builtins, aliases and functions remain available. An
-explicit executable path containing `/` can still run. Use `tab path` while
-the shell is running to toggle this mode or select it explicitly with
-`tab path on`, `tab path off`, `tab path true`, or `tab path false`. The
-`which` builtin always searches the current `PATH`, so `$(which COMMAND)` can
-be used to explicitly select a PATH executable while this mode is active.
-
-The shell starts with one tab. With no argument, `tab` creates a second tab
-when only one exists; after that it cycles to the tab on the right:
-
-```sh
-tab
-```
-
-The explicit operations are:
-
-```sh
-tab n      # create and activate a new tab at the current cwd
-tab 1      # activate tab 1 (numbers are 1-based)
-tab 2      # activate tab 2
-tab l      # cycle left
-tab r      # cycle right
-tab x      # close the active tab
-tab s      # save interactive history (same as tab save)
-tab save   # save interactive history; never done automatically
-tab mouse       # toggle terminal mouse tracking
-tab mouse on    # explicitly enable (same as tab mouse true)
-tab mouse off   # explicitly disable (same as tab mouse false)
-tab path        # toggle command lookup through PATH
-tab path on     # enable PATH lookup (same as tab path true)
-tab path off    # builtin-only mode (same as tab path false)
-```
+entry is highlighted in cyan-blue. The default prompt includes the active
+tab's 1-based number only when multiple tabs exist.
 
 Left and right movement wrap at the ends. Closing a tab selects the tab that
 moves into the same position, or the previous tab when closing the rightmost
@@ -353,12 +304,33 @@ tab r      # back to ~/project/src
 
 - `Alt-L`: Calls `builtin lsfancy` without adding a command to history. It
   immediately rereads and lists the active tab's cwd while preserving the
-  command currently being edited. Double-clicking a tab while mouse tracking
-  is enabled calls this same builtin.
+  command currently being edited.
 
 - `Alt-U`: Calls `builtin lsfancy ..` to list the Upper (parent) folder without
   changing cwd, adding a command to history, or discarding the command
   currently being edited.
+
+- `Alt-C`: Calls `builtin tab x` to close the active tab without adding a
+  command to history. `tab c` is an equivalent command form.
+
+- Mouse tab click: With mouse tracking enabled, left-clicking a tab's icon or
+  path activates it. Spaces between tabs are not clickable. Wrapped tab paths
+  remain clickable.
+
+- Mouse tracking control: `tab mouse` toggles tracking. `tab mouse on`/`true`
+  explicitly enables it, while `tab mouse off`/`false` disables it.
+
+- Mouse tab double-click: Double-clicking the same tab within 400 ms activates
+  it and calls `builtin lsfancy`, immediately rereading the directory without
+  using the completion cache.
+
+- Mouse prompt-number click: When multiple tabs exist, clicking the number at
+  the start of the `$` prompt calls `builtin tab n` to create and activate a
+  new tab.
+
+- Mouse foreground behavior: Mouse reporting is disabled while a foreground
+  command owns the terminal, so full-screen editors and other TUI programs
+  receive their own mouse input. bunmsh restores it when the command returns.
 
 - `?`: When the entire command is exactly this single character, prints the
   previous exit status. It is equivalent to `echo $?` and prints `0` after a
@@ -394,7 +366,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `read` | `-r`, `--`; defaults to `REPLY` when no name is given |
 | `pwd` | No flags |
 | `cd`, `chdir` | `cd`, `cd DIR`, `cd -`, `cd //` |
-| `tab` | `n`, `x`, `l`, `r`, `s`, `save`, `mouse [on\|off\|true\|false]`, `path [on\|off\|true\|false]`, or a 1-based tab number |
+| `tab` | `n`, `x`, `c`, `l`, `r`, `s`, `save`, `mouse [on\|off\|true\|false]`, `path [on\|off\|true\|false]`, or a 1-based tab number |
 | `-`, `~`, `..`, `//` | Directory-navigation shortcuts |
 | `export` | `NAME`, `NAME=VALUE` |
 | `unset` | `-v`, `--` |
