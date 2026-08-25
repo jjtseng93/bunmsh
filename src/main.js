@@ -161,6 +161,18 @@ async function interactive(state) {
       readline.prompt(true);
     });
   };
+  const runFancyShortcut = (args = []) => {
+    if (!readline || mouseCommandRunning) return;
+    mouseCommandRunning = true;
+    process.stdout.write("\r\x1b[0J\n");
+    void executeArgv(["builtin", "lsfancy", ...args], state).finally(() => {
+      mouseCommandRunning = false;
+      const next = renderPrompt(state, true);
+      promptRegions = next.regions;
+      readline.setPrompt(next.text);
+      readline.prompt(true);
+    });
+  };
   const filteredInput = terminal ? mouseInput((mouse) => {
     if (!mouse.press || (mouse.button & 3) !== 0 || (mouse.button & 32)) return;
     pendingClick = { ...mouse, at: Date.now() };
@@ -190,18 +202,12 @@ async function interactive(state) {
       readline.prompt(true);
       return;
     }
-    mouseCommandRunning = true;
-    process.stdout.write("\r\x1b[0J\n");
-    void executeArgv(["builtin", "lsfancy"], state).finally(() => {
-      mouseCommandRunning = false;
-      const next = renderPrompt(state, true);
-      promptRegions = next.regions;
-      readline.setPrompt(next.text);
-      readline.prompt(true);
-    });
+    runFancyShortcut();
   }, (shortcut) => {
     if (shortcut === "tab") runTabShortcut([]);
     else if (shortcut === "tab-left") runTabShortcut(["l"]);
+    else if (shortcut === "lsfancy") runFancyShortcut();
+    else if (shortcut === "lsfancy-parent") runFancyShortcut([".."]); 
   }) : process.stdin;
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);

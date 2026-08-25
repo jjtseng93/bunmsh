@@ -96,13 +96,13 @@ describe("completion", () => {
     input.on("data", (chunk) => { forwarded += chunk.toString(); });
     input.write("echo ");
     input.write("\x1b[<0;12");
-    input.write(";3M\x1b[4;9Rok\x14\x1bt");
+    input.write(";3M\x1b[4;9Rok\x14\x1bt\x1bl\x1bu");
     input.end();
     await new Promise((resolve) => input.once("end", resolve));
     expect(forwarded).toBe("echo ok");
     expect(mice).toEqual([{ button: 0, x: 12, y: 3, press: true }]);
     expect(cursors).toEqual([{ row: 4, column: 9 }]);
-    expect(shortcuts).toEqual(["tab", "tab-left"]);
+    expect(shortcuts).toEqual(["tab", "tab-left", "lsfancy", "lsfancy-parent"]);
   });
 
   test("imports Bash and Fish history by default and can be disabled", async () => {
@@ -964,6 +964,46 @@ describe("CLI", () => {
     expect(transcript).toContain("shortcut-preserved\r\n");
     expect(transcript).toContain("[2]$ ");
     expect(transcript).toContain("[1]$ ");
+  });
+
+  test("Alt-L and Alt-U list the cwd and parent without discarding the edited line", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-alt-l-"));
+    const child = join(cwd, "child");
+    mkdirSync(child);
+    await Bun.write(join(child, "alt-l-marker.txt"), "marker");
+    await Bun.write(join(cwd, "alt-u-parent-marker.txt"), "marker");
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 100,
+      rows: 30,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "> " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write(`cd ${child}\r`);
+      await Bun.sleep(80);
+      terminal.write("echo alt-l-preserved");
+      terminal.write("\x1bl");
+      await Bun.sleep(100);
+      terminal.write("\x1bu");
+      await Bun.sleep(100);
+      terminal.write("\r");
+      await Bun.sleep(80);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally {
+      terminal.close();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+    expect(transcript).toContain("alt-l-marker.txt");
+    expect(transcript).toContain("alt-u-parent-marker.txt");
+    expect(transcript).toContain("alt-l-preserved\r\n");
   });
 
   test("renders ghosts and accepts history words, file paths, and commands", async () => {

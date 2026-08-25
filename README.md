@@ -351,6 +351,15 @@ tab r      # back to ~/project/src
 - `Alt-T`: Calls `builtin tab l` without adding a command to history, switching
   to the tab on the left while preserving the command currently being edited.
 
+- `Alt-L`: Calls `builtin lsfancy` without adding a command to history. It
+  immediately rereads and lists the active tab's cwd while preserving the
+  command currently being edited. Double-clicking a tab while mouse tracking
+  is enabled calls this same builtin.
+
+- `Alt-U`: Calls `builtin lsfancy ..` to list the Upper (parent) folder without
+  changing cwd, adding a command to history, or discarding the command
+  currently being edited.
+
 - `?`: When the entire command is exactly this single character, prints the
   previous exit status. It is equivalent to `echo $?` and prints `0` after a
   successful command. After a command fails, only the `$` in the next prompt
