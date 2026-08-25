@@ -340,6 +340,15 @@ describe("execution", () => {
       .toMatchObject({ status: 0, stdout: "keep\n" });
     expect(await run("printf 'found\\n' | builtin grep -q found"))
       .toMatchObject({ status: 0, stdout: "" });
+    expect(await run("printf 'red red\\n' | builtin grep --color=always red"))
+      .toMatchObject({
+        status: 0,
+        stdout: "\x1b[01;31mred\x1b[m \x1b[01;31mred\x1b[m\n",
+      });
+    expect(await run("printf 'red\\n' | builtin grep --color=never red"))
+      .toMatchObject({ status: 0, stdout: "red\n" });
+    expect(await run("printf 'red\\n' | builtin grep --color=always -o red"))
+      .toMatchObject({ status: 0, stdout: "\x1b[01;31mred\x1b[m\n" });
     const directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-"));
     try {
       mkdirSync(`${directory}/nested`);

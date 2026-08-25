@@ -412,7 +412,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `sort` | `-r`, `-n`, `-u`, combinable |
 | `date` | `+FORMAT`; `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%s`, `%F`, `%T`, `%%` |
 | `md5sum`, `sha256sum` | Files or stdin; no flags |
-| `grep` | `-E`, `-F`, `-i`, `-q`, `-v`, `-n`, `-o`, `-r`, `-x`, combinable; accepts `--color=auto` |
+| `grep` | `-E`, `-F`, `-i`, `-q`, `-v`, `-n`, `-o`, `-r`, `-x`, combinable; `--color[=always\|auto\|never]` (`--colour` also accepted) |
 | `sed` | `-n`, `-e SCRIPT`, `-eSCRIPT`, `-E`, `-r`, `-i`; numeric `p`; `s///` with `g` and `p` |
 | `cut` | `-c LIST`, `-cLIST` |
 | `ln` | `-s`, `-f`, `-T`, combinable (including `-sfT`) |

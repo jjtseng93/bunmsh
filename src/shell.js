@@ -1827,11 +1827,16 @@ function grepPosixClasses(pattern) {
     (_match, name) => `[${classes[name]}]`);
 }
 
-async function runGrepFallback(argv, state, input) {
-  let flags = "", i = 1;
+async function runGrepFallback(argv, state, input, context = {}) {
+  let flags = "", colorMode = "never", i = 1;
   while (argv[i]?.startsWith("-") && argv[i] !== "-") {
     if (argv[i] === "--") { i++; break; }
-    if (argv[i] === "--color=auto") { i++; continue; }
+    const colorOption = /^--colou?r(?:=(always|auto|never))?$/.exec(argv[i]);
+    if (colorOption) {
+      colorMode = colorOption[1] ?? "always";
+      i++;
+      continue;
+    }
     if (!/^-[EFiqvnorx]+$/.test(argv[i]))
       return result(2, "", `bunmsh: grep: unsupported option: ${argv[i]}\n`);
     flags += argv[i++].slice(1);
@@ -1845,6 +1850,13 @@ async function runGrepFallback(argv, state, input) {
   try { regex = new RegExp(flags.includes("x") ? `^(?:${regexSource})$` : regexSource, `${flags.includes("i") ? "i" : ""}${flags.includes("o") ? "g" : ""}`); }
   catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
   const invert = flags.includes("v"), quiet = flags.includes("q"), numbers = flags.includes("n"), only = flags.includes("o");
+  const color = colorMode === "always" ||
+    (colorMode === "auto" && !context.captureStdout && Boolean(process.stdout.isTTY));
+  const red = "\x1b[01;31m", reset = "\x1b[m";
+  const colored = (value) => color && value.length ? `${red}${value}${reset}` : value;
+  const highlightRegex = color && !only
+    ? new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`)
+    : null;
   let matched = false;
   const output = [];
   const processLine = (line, lineNumber, label, showLabel) => {
@@ -1858,8 +1870,13 @@ async function runGrepFallback(argv, state, input) {
     if (only) {
       if (invert) return false;
       for (const match of line.matchAll(regex))
-        if (match[0].length) output.push(`${prefix}${match[0]}\n`);
-    } else output.push(`${prefix}${line}\n`);
+        if (match[0].length) output.push(`${prefix}${colored(match[0])}\n`);
+    } else {
+      const rendered = !invert && highlightRegex
+        ? line.replace(highlightRegex, (match) => colored(match))
+        : line;
+      output.push(`${prefix}${rendered}\n`);
+    }
     return false;
   };
 
@@ -2779,7 +2796,12 @@ async function runCommandArgv(
     );
   if (!commandArgv[0].includes("/") && Object.hasOwn(fallbackBuiltins, commandArgv[0]) &&
       !findExecutable(commandArgv[0], commandState))
-    return fallbackBuiltins[commandArgv[0]](commandArgv, commandState, input);
+    return fallbackBuiltins[commandArgv[0]](
+      commandArgv,
+      commandState,
+      input,
+      { captureStdout, captureStderr, options },
+    );
   if (!commandState.pathSearch && !commandArgv[0].includes("/"))
     return result(127, "", `bunmsh: ${commandArgv[0]}: not found\n`);
   return runExternal(
