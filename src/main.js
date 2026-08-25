@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 
 import { createInterface } from "node:readline/promises";
-import { builtinNames, createState, execute, executeArgv, pipelineChildState } from "./shell.js";
+import {
+  builtinNames,
+  createState,
+  execute,
+  executeArgv,
+  executeBunShellFallback,
+  pipelineChildState,
+} from "./shell.js";
 import {
   CommandIndex,
   FileIndex,
@@ -195,6 +202,8 @@ async function interactive(state) {
 }
 
 async function main(argv) {
+  if (argv[0] === "--bun-shell-fallback")
+    return executeBunShellFallback(argv.slice(1));
   let command = null;
   let forwardedArgv = null;
   let forceInteractive = false;

@@ -1260,6 +1260,98 @@ const builtins = {
 
 // These are used only when PATH does not provide an executable of the same
 // name. `builtin name` can still select them explicitly.
+export function bunShellFallbackArgv(argv) {
+  let commandArgv = argv;
+  if (argv[0] === "ls")
+    commandArgv = commandArgv.filter((value, index) => index === 0 || value !== "--color=auto");
+  if (argv[0] === "cp")
+    commandArgv = commandArgv.map((value, index) =>
+      index > 0 && /^-[^-]/.test(value) ? `-${value.slice(1).replaceAll("r", "R")}` : value);
+  return commandArgv;
+}
+
+async function runBunShellFallback(argv, state) {
+  const shell = Bun.$`${bunShellFallbackArgv(argv)}`
+    .cwd(nativePath(state.cwd))
+    .env(state.env)
+    .nothrow();
+  if (state.pipelineChild) {
+    const output = await shell;
+    return result(output.exitCode);
+  }
+  const output = await shell.quiet();
+  return result(output.exitCode, output.stdout, output.stderr);
+}
+
+async function runBunShellCpFallback(argv, state) {
+  const cmd = IS_COMPILED
+    ? [process.execPath, "--bun-shell-fallback", ...bunShellFallbackArgv(argv)]
+    : [BUN_EXECUTABLE, BUNMSH_ENTRY, "--bun-shell-fallback", ...bunShellFallbackArgv(argv)];
+  const proc = Bun.spawn({
+    cmd,
+    cwd: nativePath(state.cwd),
+    env: {
+      ...state.env,
+      BUN_ENABLE_EXPERIMENTAL_SHELL_BUILTINS: "1",
+    },
+    stdin: "inherit",
+    stdout: state.pipelineChild ? "inherit" : "pipe",
+    stderr: state.pipelineChild ? "inherit" : "pipe",
+  });
+  if (state.pipelineChild) return result(await proc.exited);
+  const [status, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).arrayBuffer(),
+  ]);
+  return result(status, new Uint8Array(stdout), new Uint8Array(stderr));
+}
+
+export async function executeBunShellFallback(argv) {
+  const output = await Bun.$`${argv}`.nothrow();
+  return output.exitCode;
+}
+
+async function runCatFallback(argv, state, input) {
+  let operands = argv.slice(1);
+  if (operands[0] === "--") operands = operands.slice(1);
+  if (operands.some((value) => value.startsWith("-") && value !== "-"))
+    return result(1, "", "bunmsh: cat: options are not supported\n");
+  if (operands.length === 0) operands = ["-"];
+
+  const chunks = [];
+  let status = 0;
+  let stderr = "";
+  const writer = state.pipelineChild ? Bun.stdout.writer() : null;
+  const emit = async (chunk) => {
+    if (writer) {
+      writer.write(chunk);
+      await writer.flush();
+    } else chunks.push(bytes(chunk));
+  };
+
+  try {
+    for (const operand of operands) {
+      try {
+        const stream = operand === "-"
+          ? (input instanceof ReadableStream ? input : Bun.stdin.stream())
+          : Bun.file(nativePath(isAbsolute(nativePath(operand))
+            ? operand
+            : resolvePath(nativePath(state.cwd), nativePath(operand)))).stream();
+        for await (const chunk of stream) await emit(chunk);
+      } catch (error) {
+        status = 1;
+        stderr += `bunmsh: cat: ${operand}: ${error.message}\n`;
+      }
+    }
+  } finally {
+    if (writer) {
+      try { writer.end(); } catch {}
+    }
+  }
+  return result(status, writer ? "" : concatBytes(chunks), stderr);
+}
+
 const fallbackBuiltins = {
   basename: async (argv) => {
     const i = argv[1] === "--" ? 2 : 1;
@@ -1276,6 +1368,14 @@ const fallbackBuiltins = {
       return result(1, "", "bunmsh: dirname: usage: dirname string\n");
     return result(0, `${pathDirname(argv[i])}\n`);
   },
+  ls: runBunShellFallback,
+  mv: runBunShellFallback,
+  rm: runBunShellFallback,
+  mkdir: runBunShellFallback,
+  seq: runBunShellFallback,
+  touch: runBunShellFallback,
+  cat: runCatFallback,
+  cp: runBunShellCpFallback,
 };
 
 export function builtinNames() {
@@ -1320,6 +1420,7 @@ export function createState(options = {}) {
     lastStatus: 0,
     exitRequested: false,
     exitStatus: 0,
+    pipelineChild: options.pipelineChild ?? false,
   };
 }
 
@@ -1896,6 +1997,7 @@ export function pipelineChildState() {
       aliases: inherited.aliases,
       readonly: inherited.readonly,
       args: inherited.args,
+      pipelineChild: true,
     });
   } catch {
     return createState();

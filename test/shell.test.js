@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createState, decode, execute, parse, tokenize } from "../src/shell.js";
+import {
+  bunShellFallbackArgv,
+  createState,
+  decode,
+  execute,
+  parse,
+  tokenize,
+} from "../src/shell.js";
 import {
   CommandIndex,
   FileIndex,
@@ -117,6 +124,31 @@ describe("completion", () => {
 });
 
 describe("execution", () => {
+  test("normalizes Bun Shell cp recursion and provides a PATH-independent cat", async () => {
+    expect(bunShellFallbackArgv(["cp", "-rv", "a", "b"]))
+      .toEqual(["cp", "-Rv", "a", "b"]);
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-cat-"));
+    try {
+      await Bun.write(`${directory}/a.txt`, "alpha");
+      await Bun.write(`${directory}/b.txt`, "beta");
+      const output = await run("cat a.txt b.txt", {
+        cwd: directory,
+        env: { PATH: "/no/such/path" },
+      });
+      expect(output).toMatchObject({ status: 0, stdout: "alphabeta", stderr: "" });
+      mkdirSync(`${directory}/source`);
+      await Bun.write(`${directory}/source/item.txt`, "copied");
+      const copied = await run("cp -r source target", {
+        cwd: directory,
+        env: { PATH: "/no/such/path" },
+      });
+      expect(copied).toMatchObject({ status: 0, stdout: "", stderr: "" });
+      expect(await Bun.file(`${directory}/target/item.txt`).text()).toBe("copied");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("evaluates raw Bun. lines before shell parsing and expansion", async () => {
     const output = await run(`  Bun.version + " $HOME * ; raw"`);
     expect(output.status).toBe(0);
