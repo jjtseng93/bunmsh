@@ -295,6 +295,8 @@ tab r      # back to ~/project/src
 
 ## Special Interactions
 
+### Keyboard shortcuts
+
 - `Ctrl-T`: Calls `builtin tab` without adding a command to history. It creates
   a tab when only one exists, or switches to the next tab otherwise. Any
   command text currently being edited is preserved.
@@ -312,6 +314,8 @@ tab r      # back to ~/project/src
 
 - `Alt-C`: Calls `builtin tab x` to close the active tab without adding a
   command to history. `tab c` is an equivalent command form.
+
+### Mouse interactions
 
 - Mouse tab click: With mouse tracking enabled, left-clicking a tab's icon or
   path activates it. Spaces between tabs are not clickable. Wrapped tab paths
@@ -332,11 +336,24 @@ tab r      # back to ~/project/src
   command owns the terminal, so full-screen editors and other TUI programs
   receive their own mouse input. bunmsh restores it when the command returns.
 
+### Very short aliases
+
 - `?`: When the entire command is exactly this single character, prints the
   previous exit status. It is equivalent to `echo $?` and prints `0` after a
   successful command. After a command fails, only the `$` in the next prompt
   is shown in red. For Fish users, the corresponding expression is
   `echo $status` because Fish uses `$status` where POSIX-style shells use `$?`.
+
+- `..`: As a standalone command, changes to the parent directory. Equivalent
+  to `cd ..`.
+
+- `//`: As a standalone command, returns to the most recently visited child
+  directory below the current cwd. Equivalent to `cd //`.
+
+- `~`: As a standalone command, changes to `$HOME`. Equivalent to `cd`.
+
+- `-`: As a standalone command, changes to `$OLDPWD` and prints the selected
+  path. Equivalent to `cd -`.
 
 ## Built-in commands and supported flags
 
