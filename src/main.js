@@ -108,7 +108,7 @@ function renderPrompt(state, withRegions = false) {
     ? template
     : template.replaceAll("$", "\x1b[31m$\x1b[0m");
   const text = styledTemplate.replaceAll("\\w", cwd);
-  if (!withRegions || !tabParts) return { text, regions: [] };
+  if (!withRegions || !tabParts) return { text, regions: [], newTabRegion: [] };
   const prefix = styledTemplate.slice(0, styledTemplate.indexOf("\\w"));
   const columns = process.stdout.columns ?? 80;
   let row = 0, column = 0;
@@ -134,7 +134,16 @@ function renderPrompt(state, withRegions = false) {
     if (index + 1 < tabParts.length) advance("  ");
     return cells;
   });
-  return { text, regions };
+  const newTabRegion = [];
+  const marker = `[${state.activeTab + 1}]$`;
+  const markerIndex = text.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    row = 0;
+    column = 0;
+    advance(text.slice(0, markerIndex + 1));
+    advance(String(state.activeTab + 1), newTabRegion);
+  }
+  return { text, regions, newTabRegion };
 }
 
 async function interactive(state) {
@@ -147,6 +156,7 @@ async function interactive(state) {
   if (terminal) await commandIndex.refresh(state);
   let readline;
   let promptRegions = [];
+  let newTabRegion = [];
   let pendingClick = null;
   let lastTabClick = null;
   let mouseCommandRunning = false;
@@ -157,6 +167,7 @@ async function interactive(state) {
       mouseCommandRunning = false;
       const next = renderPrompt(state, true);
       promptRegions = next.regions;
+      newTabRegion = next.newTabRegion;
       readline.setPrompt(next.text);
       readline.prompt(true);
     });
@@ -169,6 +180,7 @@ async function interactive(state) {
       mouseCommandRunning = false;
       const next = renderPrompt(state, true);
       promptRegions = next.regions;
+      newTabRegion = next.newTabRegion;
       readline.setPrompt(next.text);
       readline.prompt(true);
     });
@@ -184,6 +196,12 @@ async function interactive(state) {
     const cursor = readline.getCursorPos();
     const relativeRow = click.y - (row - cursor.rows);
     const relativeColumn = click.x - 1;
+    if (newTabRegion.some((cell) =>
+      cell.row === relativeRow && cell.column === relativeColumn)) {
+      lastTabClick = null;
+      runTabShortcut(["n"]);
+      return;
+    }
     const index = promptRegions.findIndex((cells) =>
       cells.some((cell) => cell.row === relativeRow && cell.column === relativeColumn));
     if (index < 0) return;
@@ -197,6 +215,7 @@ async function interactive(state) {
     }
     const rendered = renderPrompt(state, true);
     promptRegions = rendered.regions;
+    newTabRegion = rendered.newTabRegion;
     readline.setPrompt(rendered.text);
     if (!doubleClick || mouseCommandRunning) {
       readline.prompt(true);
@@ -208,6 +227,7 @@ async function interactive(state) {
     else if (shortcut === "tab-left") runTabShortcut(["l"]);
     else if (shortcut === "lsfancy") runFancyShortcut();
     else if (shortcut === "lsfancy-parent") runFancyShortcut([".."]); 
+    else if (shortcut === "tab-close") runTabShortcut(["x"]);
   }) : process.stdin;
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);
@@ -309,6 +329,7 @@ async function interactive(state) {
     while (!state.exitRequested) {
       const rendered = renderPrompt(state, true);
       promptRegions = rendered.regions;
+      newTabRegion = rendered.newTabRegion;
       readline.setPrompt(rendered.text);
       const line = await Promise.race([
         readline.question(rendered.text),

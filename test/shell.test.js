@@ -96,13 +96,15 @@ describe("completion", () => {
     input.on("data", (chunk) => { forwarded += chunk.toString(); });
     input.write("echo ");
     input.write("\x1b[<0;12");
-    input.write(";3M\x1b[4;9Rok\x14\x1bt\x1bl\x1bu");
+    input.write(";3M\x1b[4;9Rok\x14\x1bt\x1bl\x1bu\x1bc");
     input.end();
     await new Promise((resolve) => input.once("end", resolve));
     expect(forwarded).toBe("echo ok");
     expect(mice).toEqual([{ button: 0, x: 12, y: 3, press: true }]);
     expect(cursors).toEqual([{ row: 4, column: 9 }]);
-    expect(shortcuts).toEqual(["tab", "tab-left", "lsfancy", "lsfancy-parent"]);
+    expect(shortcuts).toEqual([
+      "tab", "tab-left", "lsfancy", "lsfancy-parent", "tab-close",
+    ]);
   });
 
   test("imports Bash and Fish history by default and can be disabled", async () => {
@@ -597,6 +599,13 @@ fi
     expect(output.state.cwd).toBe(`${cwd}/src`);
   });
 
+  test("tab c closes the active tab like tab x", async () => {
+    const output = await run("tab n; tab c");
+    expect(output.status).toBe(0);
+    expect(output.state.tabs).toHaveLength(1);
+    expect(output.state.activeTab).toBe(0);
+  });
+
   test("tab mouse toggles and explicitly sets mouse tracking", async () => {
     let output = await run("tab mouse", { mouseTracking: false });
     expect(output.state.mouseTracking).toBe(true);
@@ -964,6 +973,40 @@ describe("CLI", () => {
     expect(transcript).toContain("shortcut-preserved\r\n");
     expect(transcript).toContain("[2]$ ");
     expect(transcript).toContain("[1]$ ");
+  });
+
+  test("clicking the prompt tab number creates a tab and Alt-C closes it", async () => {
+    let transcript = "";
+    let terminal;
+    terminal = new Bun.Terminal({
+      cols: 100,
+      rows: 30,
+      data(_terminal, data) {
+        const text = data.toString();
+        transcript += text;
+        if (text.includes("\x1b[6n")) terminal.write("\x1b[10;6R");
+      },
+    });
+    const env = { ...process.env };
+    delete env.PS1;
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "--mouse", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env,
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("\x14");
+      await Bun.sleep(100);
+      terminal.write("\x1b[<0;2;10M");
+      await Bun.sleep(120);
+      terminal.write("\x1bc");
+      await Bun.sleep(100);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("[3]$ ");
   });
 
   test("Alt-L and Alt-U list the cwd and parent without discarding the edited line", async () => {

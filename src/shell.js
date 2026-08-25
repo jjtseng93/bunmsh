@@ -1143,7 +1143,7 @@ const builtins = {
   chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
   tab: async (argv, state) => {
     if (argv.length > 3 || (argv.length > 2 && !["mouse", "path"].includes(argv[1])))
-      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
+      return result(1, "", "bunmsh: tab: usage: tab [n|x|c|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
     const action = argv[1];
     const activate = (index) => {
       state.activeTab = index;
@@ -1163,7 +1163,7 @@ const builtins = {
       activate((state.activeTab - 1 + state.tabs.length) % state.tabs.length);
       return result();
     }
-    if (action === "x") {
+    if (action === "x" || action === "c") {
       if (state.tabs.length === 1)
         return result(1, "", "bunmsh: tab: cannot close the last tab\n");
       state.tabs.splice(state.activeTab, 1);
@@ -1201,7 +1201,7 @@ const builtins = {
       activate(index);
       return result();
     }
-    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
+    return result(1, "", "bunmsh: tab: usage: tab [n|x|c|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
   },
   "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
   "~": async (_argv, state) => builtins.cd(["cd"], state),
