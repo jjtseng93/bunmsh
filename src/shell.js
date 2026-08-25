@@ -2,9 +2,11 @@ import {
   constants as fsConstants,
   accessSync,
   closeSync,
+  chmodSync,
   createReadStream,
   createWriteStream,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -12,9 +14,17 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { constants as osConstants } from "node:os";
+import {
+  arch as osArch,
+  constants as osConstants,
+  hostname as osHostname,
+  release as osRelease,
+  type as osType,
+} from "node:os";
 import {
   basename as pathBasename,
   delimiter as pathDelimiter,
@@ -25,6 +35,7 @@ import {
 import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
+import { saveBunmshHistory } from "./history.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -157,13 +168,24 @@ export function tokenize(source) {
     }
 
     const two = source.slice(i, i + 2);
+    const fdDup = source.slice(i, i + 4);
     const operatorAhead =
       ["|", ";", "<", ">"].includes(ch) ||
       two === "&&" ||
       two === "||" ||
-      two === "2>";
+      two === "2>" ||
+      fdDup === "1>&2" ||
+      fdDup === "2>&1";
     if (current && operatorAhead) {
       finishWord();
+      continue;
+    }
+    // A descriptor duplication begins with the shorter `2>` redirect token,
+    // so it must win before ordinary file redirects are considered.
+    if (!current && (fdDup === "1>&2" || fdDup === "2>&1")) {
+      tokens.push({ type: "op", value: fdDup, offset: i });
+      i += 4;
+      atWordBoundary = true;
       continue;
     }
     if (!current && ["&&", "||", ">>", "2>", "2>>"].includes(
@@ -253,7 +275,9 @@ export function tokenize(source) {
         ["|", ";", "<", ">"].includes(c) ||
         source.slice(i, i + 2) === "&&" ||
         source.slice(i, i + 2) === "||" ||
-        source.slice(i, i + 2) === "2>";
+        source.slice(i, i + 2) === "2>" ||
+        source.slice(i, i + 4) === "1>&2" ||
+        source.slice(i, i + 4) === "2>&1";
       if (isSpace(c) || c === "\n" || c === "'" || c === '"' || c === "\\" || maybeOp)
         break;
       text += c;
@@ -289,6 +313,11 @@ export function parse(source) {
         const token = tokens[i];
         if (token.type === "op" && ["|", ";", "&&", "||"].includes(token.value))
           break;
+        if (token.type === "op" && ["1>&2", "2>&1"].includes(token.value)) {
+          command.redirects.push({ op: token.value, target: null });
+          i++;
+          continue;
+        }
         if (token.type === "op" && ["<", ">", ">>", "2>", "2>>"].includes(token.value)) {
           const target = tokens[i + 1];
           if (!target || target.type !== "word")
@@ -315,7 +344,16 @@ export function parse(source) {
       break;
     }
 
-    jobs.push({ connector, pipeline });
+    let negate = false;
+    const firstWord = pipeline[0]?.words[0];
+    if (firstWord?.fragments.length === 1 && firstWord.fragments[0].quote === "none" &&
+        firstWord.fragments[0].text === "!") {
+      pipeline[0].words.shift();
+      if (pipeline[0].words.length === 0)
+        throw new ShellSyntaxError("! requires a command", firstWord.offset);
+      negate = true;
+    }
+    jobs.push({ connector, pipeline, negate });
     const separator = tokens[i]?.value;
     if (!separator) break;
     if (![";", "&&", "||"].includes(separator))
@@ -1043,6 +1081,46 @@ const builtins = {
     }
     return result(0, output);
   },
+  read: async (argv, state, input) => {
+    let raw = false, i = 1;
+    if (argv[i] === "-r") { raw = true; i++; }
+    if (argv[i] === "--") i++;
+    const names = argv.slice(i);
+    if (!names.length) names.push("REPLY");
+    if (names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)))
+      return result(2, "", "bunmsh: read: invalid variable name\n");
+    let line, gotInput;
+    if (state.readLines) {
+      gotInput = state.readLines.length > 0;
+      line = state.readLines.shift() ?? "";
+    } else {
+      const reader = fallbackInput(input).getReader();
+      const chunks = [];
+      let foundNewline = false;
+      try {
+        while (!foundNewline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const newline = value.indexOf(10);
+          chunks.push(newline < 0 ? value : value.slice(0, newline));
+          foundNewline = newline >= 0;
+        }
+        if (foundNewline) try { await reader.cancel(); } catch {}
+      } finally { try { reader.releaseLock(); } catch {} }
+      line = decoder.decode(concatBytes(chunks));
+      gotInput = foundNewline || chunks.length > 0;
+    }
+    line = line.replace(/\r$/, "");
+    if (!raw) line = line.replace(/\\(.)/gs, "$1");
+    const ifs = state.env.IFS ?? " \t\n";
+    const escaped = ifs.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    const fields = ifs ? line.trim().split(new RegExp(`[${escaped}]+`)) : [line];
+    for (let n = 0; n < names.length; n++) {
+      if (state.readonly.has(names[n])) return readonlyError(names[n]);
+      state.env[names[n]] = n === names.length - 1 ? fields.slice(n).join(" ") : (fields[n] ?? "");
+    }
+    return result(gotInput ? 0 : 1);
+  },
   pwd: async (_argv, state) => result(0, `${state.cwd}\n`),
   cd: async (argv, state) => {
     if (argv[1] === "//") return previousChildDirectory(state);
@@ -1058,7 +1136,7 @@ const builtins = {
   chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
   tab: async (argv, state) => {
     if (argv.length > 2)
-      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|number]\n");
+      return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|number]\n");
     const action = argv[1];
     const activate = (index) => {
       state.activeTab = index;
@@ -1085,6 +1163,14 @@ const builtins = {
       activate(Math.min(state.activeTab, state.tabs.length - 1));
       return result();
     }
+    if (action === "s" || action === "save") {
+      try {
+        const path = await saveBunmshHistory(state.history ?? [], state.env);
+        return result(0, `${shellPath(path)}\n`);
+      } catch (error) {
+        return result(1, "", `bunmsh: tab: cannot save history: ${error.message}\n`);
+      }
+    }
     if (/^[1-9][0-9]*$/.test(action ?? "")) {
       const index = Number(action) - 1;
       if (index >= state.tabs.length)
@@ -1092,7 +1178,7 @@ const builtins = {
       activate(index);
       return result();
     }
-    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|number]\n");
+    return result(1, "", "bunmsh: tab: usage: tab [n|x|l|r|s|save|number]\n");
   },
   "-": async (_argv, state) => builtins.cd(["cd", "-"], state),
   "~": async (_argv, state) => builtins.cd(["cd"], state),
@@ -1185,6 +1271,18 @@ const builtins = {
       context.captureStderr ?? true,
       context.options ?? {},
     );
+  },
+  exec: async (argv, state, input, context = {}) => {
+    if (argv.length === 1) return result();
+    const execution = await runCommandArgv(
+      argv.slice(1), state, input,
+      context.captureStdout ?? true,
+      context.captureStderr ?? true,
+      context.options ?? {},
+    );
+    state.exitRequested = true;
+    state.exitStatus = execution.status;
+    return execution;
   },
   exit: async (argv, state) => {
     const status = argv[1] === undefined ? state.lastStatus : Number(argv[1]);
@@ -1293,6 +1391,10 @@ const builtins = {
   set: async (argv, state) => {
     if (argv.length === 1)
       return result(0, Object.entries(state.env).sort().map(([k, v]) => `${k}=${JSON.stringify(v)}\n`).join(""));
+    if (argv[1] === "--") {
+      state.args = [state.args[0], ...argv.slice(2)];
+      return result();
+    }
     return result(2, "", "bunmsh: set: option handling is not implemented yet\n");
   },
 };
@@ -1455,30 +1557,35 @@ async function readFallbackFiles(operands, state, input) {
 }
 
 async function runHeadFallback(argv, state, input) {
-  let count = 10, i = 1;
+  let count = 10, i = 1, bytesMode = false;
   if (argv[i] === "-n") count = Number(argv[++i]), i++;
+  else if (argv[i] === "-c") bytesMode = true, count = Number(argv[++i]), i++;
+  else if (/^-c\d+$/.test(argv[i] ?? "")) bytesMode = true, count = Number(argv[i++].slice(2));
   else if (/^-\d+$/.test(argv[i] ?? "")) count = Number(argv[i++].slice(1));
   if (!Number.isInteger(count) || count < 0)
     return result(1, "", "bunmsh: head: invalid line count\n");
   const operands = argv.slice(i);
   if (operands.length) {
     try {
-      const data = decoder.decode(await readFallbackFiles(operands, state, input));
-      return result(0, data.split(/(?<=\n)/).slice(0, count).join(""));
+      const data = await readFallbackFiles(operands, state, input);
+      if (bytesMode) return result(0, data.slice(0, count));
+      return result(0, decoder.decode(data).split(/(?<=\n)/).slice(0, count).join(""));
     } catch (error) { return result(1, "", `bunmsh: head: ${error.message}\n`); }
   }
   const reader = fallbackInput(input).getReader();
   const output = [];
   let lines = 0;
   try {
-    while (lines < count) {
+    let totalBytes = 0;
+    while (bytesMode ? totalBytes < count : lines < count) {
       const { value, done } = await reader.read();
       if (done) break;
-      let end = value.byteLength;
-      for (let j = 0; j < value.byteLength; j++) {
+      let end = bytesMode ? Math.min(value.byteLength, count - totalBytes) : value.byteLength;
+      if (!bytesMode) for (let j = 0; j < value.byteLength; j++) {
         if (value[j] === 10 && ++lines >= count) { end = j + 1; break; }
       }
       output.push(value.slice(0, end));
+      totalBytes += end;
       if (end < value.byteLength) break;
     }
   } finally {
@@ -1663,19 +1770,48 @@ function grepFiles(operands, state, recursive) {
   return output;
 }
 
+function grepBasicRegex(pattern) {
+  let output = "", inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "[") inClass = true;
+    if (ch === "]" && inClass) inClass = false;
+    if (!inClass && ch === "\\" && i + 1 < pattern.length && "+?|(){}".includes(pattern[i + 1])) {
+      output += pattern[++i];
+      continue;
+    }
+    if (!inClass && "+?|(){}".includes(ch)) output += `\\${ch}`;
+    else output += ch;
+  }
+  return output;
+}
+
+function grepPosixClasses(pattern) {
+  const classes = {
+    alnum: "A-Za-z0-9", alpha: "A-Za-z", blank: " \\t", digit: "0-9",
+    lower: "a-z", space: "\\s", upper: "A-Z", word: "A-Za-z0-9_",
+    xdigit: "A-Fa-f0-9",
+  };
+  return pattern.replace(/\[\[:(alnum|alpha|blank|digit|lower|space|upper|word|xdigit):\]\]/g,
+    (_match, name) => `[${classes[name]}]`);
+}
+
 async function runGrepFallback(argv, state, input) {
   let flags = "", i = 1;
   while (argv[i]?.startsWith("-") && argv[i] !== "-") {
     if (argv[i] === "--") { i++; break; }
     if (argv[i] === "--color=auto") { i++; continue; }
-    if (!/^-[Eiqvnor]+$/.test(argv[i]))
+    if (!/^-[EFiqvnorx]+$/.test(argv[i]))
       return result(2, "", `bunmsh: grep: unsupported option: ${argv[i]}\n`);
     flags += argv[i++].slice(1);
   }
   const pattern = argv[i++];
   if (pattern === undefined) return result(2, "", "bunmsh: grep: missing pattern\n");
   let regex;
-  try { regex = new RegExp(pattern, `${flags.includes("i") ? "i" : ""}${flags.includes("o") ? "g" : ""}`); }
+  const regexSource = flags.includes("F")
+    ? pattern.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")
+    : grepPosixClasses(flags.includes("E") ? pattern : grepBasicRegex(pattern));
+  try { regex = new RegExp(flags.includes("x") ? `^(?:${regexSource})$` : regexSource, `${flags.includes("i") ? "i" : ""}${flags.includes("o") ? "g" : ""}`); }
   catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
   const invert = flags.includes("v"), quiet = flags.includes("q"), numbers = flags.includes("n"), only = flags.includes("o");
   let matched = false;
@@ -1688,8 +1824,10 @@ async function runGrepFallback(argv, state, input) {
     matched = true;
     if (quiet) return true;
     const prefix = `${showLabel ? `${label}:` : ""}${numbers ? `${lineNumber}:` : ""}`;
-    if (only && !invert) {
-      for (const match of line.matchAll(regex)) output.push(`${prefix}${match[0]}\n`);
+    if (only) {
+      if (invert) return false;
+      for (const match of line.matchAll(regex))
+        if (match[0].length) output.push(`${prefix}${match[0]}\n`);
     } else output.push(`${prefix}${line}\n`);
     return false;
   };
@@ -1724,6 +1862,218 @@ async function runGrepFallback(argv, state, input) {
     } finally { try { reader.releaseLock(); } catch {} }
   }
   return result(matched ? 0 : 1, output.join(""));
+}
+
+function splitSedCommands(script) {
+  const commands = [];
+  let start = 0, escaped = false;
+  for (let i = 0; i < script.length; i++) {
+    if (escaped) { escaped = false; continue; }
+    if (script[i] === "\\") { escaped = true; continue; }
+    if (script[i] === ";") {
+      commands.push(script.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  commands.push(script.slice(start).trim());
+  return commands.filter(Boolean);
+}
+
+function readSedField(command, start, delimiter) {
+  let value = "";
+  for (let i = start; i < command.length; i++) {
+    if (command[i] === "\\" && i + 1 < command.length) {
+      if (command[i + 1] === delimiter) value += command[++i];
+      else value += command[i] + command[++i];
+    } else if (command[i] === delimiter) return [value, i + 1];
+    else value += command[i];
+  }
+  throw new Error("unterminated substitute command");
+}
+
+function sedReplacement(value) {
+  let output = "";
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "\\" && /[1-9]/.test(value[i + 1] ?? "")) output += `$${value[++i]}`;
+    else if (value[i] === "\\" && i + 1 < value.length) output += value[++i];
+    else if (value[i] === "&") output += "$&";
+    else if (value[i] === "$") output += "$$";
+    else output += value[i];
+  }
+  return output;
+}
+
+function compileSedCommand(source, extended) {
+  const numberedPrint = /^(\d+)p$/.exec(source);
+  if (numberedPrint) return { type: "print", line: Number(numberedPrint[1]) };
+  if (!source.startsWith("s") || source.length < 2)
+    throw new Error(`unsupported command: ${source}`);
+  const delimiter = source[1];
+  const [pattern, replacementStart] = readSedField(source, 2, delimiter);
+  const [replacement, flagsStart] = readSedField(source, replacementStart, delimiter);
+  const flags = source.slice(flagsStart);
+  if (!/^[gp]*$/.test(flags)) throw new Error(`unsupported substitute flags: ${flags}`);
+  const regexSource = grepPosixClasses(extended ? pattern : grepBasicRegex(pattern));
+  return {
+    type: "substitute",
+    regex: new RegExp(regexSource, flags.includes("g") ? "g" : ""),
+    replacement: sedReplacement(replacement),
+    print: flags.includes("p"),
+  };
+}
+
+function applySed(text, commands, quiet) {
+  const trailingNewline = text.endsWith("\n");
+  const lines = text.split("\n");
+  if (trailingNewline) lines.pop();
+  const output = [];
+  for (let index = 0; index < lines.length; index++) {
+    let line = lines[index];
+    for (const command of commands) {
+      if (command.type === "print") {
+        if (command.line === index + 1) output.push(line);
+        continue;
+      }
+      command.regex.lastIndex = 0;
+      const matched = command.regex.test(line);
+      command.regex.lastIndex = 0;
+      if (matched) {
+        line = line.replace(command.regex, command.replacement);
+        if (command.print) output.push(line);
+      }
+    }
+    if (!quiet) output.push(line);
+  }
+  if (!output.length) return "";
+  return output.join("\n") + (trailingNewline ? "\n" : "");
+}
+
+async function runSedFallback(argv, state, input) {
+  let quiet = false, extended = false, inPlace = false, i = 1;
+  const scripts = [];
+  while (i < argv.length && argv[i].startsWith("-") && argv[i] !== "-") {
+    const option = argv[i++];
+    if (option === "--") break;
+    if (option === "-e") {
+      if (i >= argv.length) return result(1, "", "bunmsh: sed: option requires an argument: -e\n");
+      scripts.push(argv[i++]);
+      continue;
+    }
+    if (option.startsWith("-e")) { scripts.push(option.slice(2)); continue; }
+    if (!/^-[nEri]+$/.test(option))
+      return result(1, "", `bunmsh: sed: unsupported option: ${option}\n`);
+    quiet ||= option.includes("n");
+    extended ||= option.includes("E") || option.includes("r");
+    inPlace ||= option.includes("i");
+  }
+  if (!scripts.length && i < argv.length) scripts.push(argv[i++]);
+  if (!scripts.length) return result(1, "", "bunmsh: sed: missing script\n");
+  let commands;
+  try { commands = scripts.flatMap(splitSedCommands).map((script) => compileSedCommand(script, extended)); }
+  catch (error) { return result(1, "", `bunmsh: sed: ${error.message}\n`); }
+  const operands = argv.slice(i);
+  if (inPlace && !operands.length) return result(1, "", "bunmsh: sed: -i requires a file operand\n");
+  try {
+    if (!operands.length) {
+      const text = decoder.decode(await readFallbackInput(input));
+      return result(0, applySed(text, commands, quiet));
+    }
+    let stdout = "";
+    for (const operand of operands) {
+      const file = isAbsolute(nativePath(operand)) ? nativePath(operand) : resolvePath(nativePath(state.cwd), nativePath(operand));
+      const changed = applySed(await Bun.file(file).text(), commands, quiet);
+      if (inPlace) await Bun.write(file, changed);
+      else stdout += changed;
+    }
+    return result(0, stdout);
+  } catch (error) { return result(1, "", `bunmsh: sed: ${error.message}\n`); }
+}
+
+function cutCharacterRanges(spec) {
+  const ranges = [];
+  for (const part of spec.split(",")) {
+    const match = /^(\d+)?(?:-(\d+)?)?$/.exec(part);
+    if (!match || (!match[1] && !match[2])) throw new Error(`invalid range: ${part}`);
+    const start = Number(match[1] ?? 1);
+    const end = match[0].includes("-") ? Number(match[2] ?? Number.MAX_SAFE_INTEGER) : start;
+    ranges.push([start, end]);
+  }
+  return ranges;
+}
+
+async function runCutFallback(argv, _state, input) {
+  let spec, i = 1;
+  if (argv[i] === "-c") spec = argv[++i], i++;
+  else if (argv[i]?.startsWith("-c")) spec = argv[i++].slice(2);
+  if (!spec || i !== argv.length) return result(1, "", "bunmsh: cut: usage: cut -c LIST\n");
+  try {
+    const ranges = cutCharacterRanges(spec);
+    const text = decoder.decode(await readFallbackInput(input));
+    const trailing = text.endsWith("\n");
+    const lines = text.split("\n");
+    if (trailing) lines.pop();
+    const output = lines.map((line) => [...line].filter((_ch, index) =>
+      ranges.some(([start, end]) => index + 1 >= start && index + 1 <= end)).join("")).join("\n");
+    return result(0, output + (trailing ? "\n" : ""));
+  } catch (error) { return result(1, "", `bunmsh: cut: ${error.message}\n`); }
+}
+
+function runLnFallback(argv, state) {
+  let symbolic = false, force = false, noTargetDirectory = false, i = 1;
+  while (/^-[sfT]+$/.test(argv[i] ?? "")) {
+    symbolic ||= argv[i].includes("s");
+    force ||= argv[i].includes("f");
+    noTargetDirectory ||= argv[i].includes("T");
+    i++;
+  }
+  if (argv.length - i !== 2) return result(1, "", "bunmsh: ln: usage: ln [-sf] target link_name\n");
+  const target = nativePath(argv[i]);
+  let link = isAbsolute(nativePath(argv[i + 1]))
+    ? nativePath(argv[i + 1])
+    : resolvePath(nativePath(state.cwd), nativePath(argv[i + 1]));
+  try {
+    if (!noTargetDirectory) {
+      try {
+        if (statSync(link).isDirectory()) link = resolvePath(link, pathBasename(target));
+      } catch {}
+    }
+    if (force) try { unlinkSync(link); } catch {}
+    if (symbolic) symlinkSync(target, link); else {
+      const source = isAbsolute(target) ? target : resolvePath(nativePath(state.cwd), target);
+      linkSync(source, link);
+    }
+    return result();
+  } catch (error) { return result(1, "", `bunmsh: ln: ${error.message}\n`); }
+}
+
+function runChmodFallback(argv, state) {
+  if (argv.length < 3) return result(1, "", "bunmsh: chmod: usage: chmod MODE FILE...\n");
+  const mode = argv[1];
+  let status = 0, stderr = "";
+  for (const operand of argv.slice(2)) {
+    const path = isAbsolute(nativePath(operand)) ? nativePath(operand) : resolvePath(nativePath(state.cwd), nativePath(operand));
+    try {
+      if (/^[0-7]{3,4}$/.test(mode)) chmodSync(path, Number.parseInt(mode, 8));
+      else if (mode === "+x" || mode === "a+x") chmodSync(path, statSync(path).mode | 0o111);
+      else throw new Error(`unsupported mode: ${mode}`);
+    } catch (error) { status = 1; stderr += `bunmsh: chmod: ${operand}: ${error.message}\n`; }
+  }
+  return result(status, "", stderr);
+}
+
+function runUnameFallback(argv) {
+  const machine = ({ arm64: "aarch64", x64: "x86_64" })[osArch()] ?? osArch();
+  const values = {
+    s: osType(), n: osHostname(), r: osRelease(), v: osRelease(), m: machine,
+  };
+  if (argv.length === 1) return result(0, `${values.s}\n`);
+  let flags = "";
+  for (const arg of argv.slice(1)) {
+    if (arg === "-a") flags += "snrvm";
+    else if (/^-[snrvm]+$/.test(arg)) flags += arg.slice(1);
+    else return result(1, "", `bunmsh: uname: unsupported option: ${arg}\n`);
+  }
+  return result(0, `${[...new Set(flags)].map((flag) => values[flag]).join(" ")}\n`);
 }
 
 const fallbackBuiltins = {
@@ -1764,6 +2114,11 @@ const fallbackBuiltins = {
   md5sum: (argv, state, input) => runHashFallback(argv, state, input, "md5"),
   sha256sum: (argv, state, input) => runHashFallback(argv, state, input, "sha256"),
   grep: runGrepFallback,
+  sed: runSedFallback,
+  cut: runCutFallback,
+  ln: async (argv, state) => runLnFallback(argv, state),
+  chmod: async (argv, state) => runChmodFallback(argv, state),
+  uname: async (argv) => runUnameFallback(argv),
   bunmsh: runBunmshFallback,
   bun: runBunFallback,
 };
@@ -1804,6 +2159,8 @@ export function createState(options = {}) {
     tabs: [...(options.tabs ?? [cwd])],
     activeTab: options.activeTab ?? 0,
     aliases: { ...DEFAULT_ALIASES, ...(options.aliases ?? {}) },
+    functions: { ...(options.functions ?? {}) },
+    history: [...(options.history ?? [])],
     readonly: new Set(options.readonly ?? []),
     getoptsOffset: 1,
     args: options.args ?? ["bunmsh"],
@@ -1812,6 +2169,269 @@ export function createState(options = {}) {
     exitStatus: 0,
     pipelineChild: options.pipelineChild ?? false,
   };
+}
+
+function hasCompoundSyntax(source) {
+  return /(^|\n)\s*(?:\(|if\s|(?:while|until|for|case)\s|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{)/.test(source);
+}
+
+function parseCompoundScript(source) {
+  const lines = source.replace(/\\\r?\n/g, "").split(/\r?\n/);
+  const parseSequence = (start, stops = []) => {
+    const nodes = [];
+    let i = start;
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (stops.some((stop) => stop.test(trimmed))) break;
+      if (!trimmed || trimmed.startsWith("#")) { i++; continue; }
+
+      const functionMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{\s*$/.exec(trimmed);
+      if (functionMatch) {
+        const body = parseSequence(i + 1, [/^}\s*;?$/]);
+        if (body.index >= lines.length) throw new ShellSyntaxError(`unterminated function ${functionMatch[1]}`);
+        nodes.push({ type: "function", name: functionMatch[1], body: body.nodes });
+        i = body.index + 1;
+        continue;
+      }
+
+      const subshellMatch = /^\((.*)\)\s*;?$/.exec(trimmed);
+      if (subshellMatch) {
+        nodes.push({ type: "subshell", source: subshellMatch[1] });
+        i++;
+        continue;
+      }
+
+      if (/^if(?:\s|$)/.test(trimmed)) {
+        const branches = [];
+        let header = trimmed;
+        while (!/;\s*then\s*$/.test(header) && ++i < lines.length)
+          header += ` ${lines[i].trim()}`;
+        if (!/;\s*then\s*$/.test(header)) throw new ShellSyntaxError("if requires then");
+        let condition = header.replace(/^if\s*/, "").replace(/;\s*then\s*$/, "");
+        i++;
+        while (true) {
+          const body = parseSequence(i, [/^elif(?:\s|$)/, /^else\s*;?$/, /^fi\s*;?$/]);
+          branches.push({ condition, body: body.nodes });
+          i = body.index;
+          const stop = lines[i]?.trim() ?? "";
+          if (/^elif(?:\s|$)/.test(stop)) {
+            header = stop;
+            while (!/;\s*then\s*$/.test(header) && ++i < lines.length)
+              header += ` ${lines[i].trim()}`;
+            if (!/;\s*then\s*$/.test(header)) throw new ShellSyntaxError("elif requires then");
+            condition = header.replace(/^elif\s*/, "").replace(/;\s*then\s*$/, "");
+            i++;
+            continue;
+          }
+          let otherwise = [];
+          if (/^else\s*;?$/.test(stop)) {
+            const body = parseSequence(i + 1, [/^fi\s*;?$/]);
+            otherwise = body.nodes;
+            i = body.index;
+          }
+          if (!/^fi\s*;?$/.test(lines[i]?.trim() ?? ""))
+            throw new ShellSyntaxError("unterminated if");
+          nodes.push({ type: "if", branches, otherwise });
+          i++;
+          break;
+        }
+        continue;
+      }
+      if (/^(?:while|until)(?:\s|$)/.test(trimmed)) {
+        const kind = trimmed.startsWith("until") ? "until" : "while";
+        let header = trimmed;
+        while (!/;\s*do\s*$/.test(header) && ++i < lines.length)
+          header += ` ${lines[i].trim()}`;
+        if (!/;\s*do\s*$/.test(header)) throw new ShellSyntaxError(`${kind} requires do`);
+        const condition = header.replace(new RegExp(`^${kind}\\s*`), "").replace(/;\s*do\s*$/, "");
+        const body = parseSequence(i + 1, [/^done(?:\s*<\s*.+)?\s*;?$/]);
+        const done = /^done(?:\s*<\s*(.+?))?\s*;?$/.exec(lines[body.index]?.trim() ?? "");
+        if (!done)
+          throw new ShellSyntaxError(`unterminated ${kind}`);
+        nodes.push({ type: "loop", kind, condition, body: body.nodes, input: done[1] ?? null });
+        i = body.index + 1;
+        continue;
+      }
+      if (/^for(?:\s|$)/.test(trimmed)) {
+        let header = trimmed;
+        while (!/;\s*do\s*$/.test(header) && ++i < lines.length)
+          header += ` ${lines[i].trim()}`;
+        const match = /^for\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in\s+(.*?))?\s*;\s*do\s*$/.exec(header);
+        if (!match) throw new ShellSyntaxError("invalid for command");
+        const body = parseSequence(i + 1, [/^done\s*;?$/]);
+        if (!/^done\s*;?$/.test(lines[body.index]?.trim() ?? ""))
+          throw new ShellSyntaxError("unterminated for");
+        nodes.push({ type: "for", name: match[1], words: match[2] ?? null, body: body.nodes });
+        i = body.index + 1;
+        continue;
+      }
+      if (/^case(?:\s|$)/.test(trimmed)) {
+        let header = trimmed;
+        while (!/\s+in\s*$/.test(header) && ++i < lines.length)
+          header += ` ${lines[i].trim()}`;
+        const match = /^case\s+(.+?)\s+in\s*$/.exec(header);
+        if (!match) throw new ShellSyntaxError("case requires in");
+        const arms = [];
+        i++;
+        while (i < lines.length && !/^esac\s*;?$/.test(lines[i].trim())) {
+          if (!lines[i].trim() || lines[i].trim().startsWith("#")) { i++; continue; }
+          const arm = /^(.+?)\)\s*$/.exec(lines[i].trim());
+          if (!arm) throw new ShellSyntaxError("case pattern requires )");
+          const bodyLines = [];
+          i++;
+          while (i < lines.length && !/^esac\s*;?$/.test(lines[i].trim())) {
+            const current = lines[i];
+            const terminator = current.indexOf(";;");
+            if (terminator >= 0) {
+              if (current.slice(0, terminator).trim()) bodyLines.push(current.slice(0, terminator));
+              i++;
+              break;
+            }
+            bodyLines.push(current);
+            i++;
+          }
+          arms.push({ patterns: arm[1].split("|").map((pattern) => pattern.trim()), body: parseCompoundScript(bodyLines.join("\n")) });
+        }
+        if (!/^esac\s*;?$/.test(lines[i]?.trim() ?? "")) throw new ShellSyntaxError("unterminated case");
+        nodes.push({ type: "case", word: match[1], arms });
+        i++;
+        continue;
+      }
+      nodes.push({ type: "command", source: line });
+      i++;
+    }
+    return { nodes, index: i };
+  };
+  const parsed = parseSequence(0);
+  return parsed.nodes;
+}
+
+async function executeNodeList(nodes, state) {
+  const stdout = [], stderr = [];
+  let execution = result(state.lastStatus);
+  const append = (value) => {
+    if (value.stdout.byteLength) stdout.push(value.stdout);
+    if (value.stderr.byteLength) stderr.push(value.stderr);
+  };
+  for (const node of nodes) {
+    if (state.exitRequested) break;
+    if (node.type === "function") {
+      state.functions[node.name] = node.body;
+      continue;
+    }
+    if (node.type === "command") {
+      execution = await execute(node.source, state, { capture: true, simple: true });
+      append(execution);
+      continue;
+    }
+    if (node.type === "subshell") {
+      const child = {
+        ...state,
+        env: { ...state.env },
+        aliases: { ...state.aliases },
+        functions: { ...state.functions },
+        readonly: new Set(state.readonly),
+        directoryHistory: [...state.directoryHistory],
+        tabs: [...state.tabs],
+        exitRequested: false,
+        exitStatus: 0,
+      };
+      execution = await execute(node.source, child, { capture: true });
+      append(execution);
+      state.lastStatus = execution.status;
+      continue;
+    }
+    if (node.type === "loop") {
+      const previousReadLines = state.readLines;
+      try {
+        if (node.input !== null) {
+          const parsed = parse(`__input ${node.input}`)[0]?.pipeline[0];
+          const operand = (await expandWord(parsed.words[1], state, { single: true }))[0];
+          const path = isAbsolute(nativePath(operand)) ? nativePath(operand) : resolvePath(nativePath(state.cwd), nativePath(operand));
+          const text = await Bun.file(path).text();
+          state.readLines = text.split("\n");
+          if (state.readLines.at(-1) === "") state.readLines.pop();
+        }
+        while (true) {
+          const checked = await execute(node.condition, state, { capture: true, simple: true });
+          append(checked);
+          const proceed = node.kind === "until" ? checked.status !== 0 : checked.status === 0;
+          if (!proceed || state.exitRequested) { execution = checked; break; }
+          execution = await executeNodeList(node.body, state);
+          append(execution);
+          if (state.exitRequested) break;
+        }
+      } catch (error) {
+        execution = result(1, "", `bunmsh: ${error.message}\n`);
+        append(execution);
+      } finally {
+        state.readLines = previousReadLines;
+      }
+      state.lastStatus = execution.status;
+      continue;
+    }
+    if (node.type === "for") {
+      let values;
+      if (node.words === null) values = state.args.slice(1);
+      else {
+        const parsed = parse(`__for ${node.words}`)[0]?.pipeline[0];
+        values = [];
+        for (const word of parsed?.words.slice(1) ?? []) values.push(...await expandWord(word, state));
+      }
+      execution = result();
+      for (const value of values) {
+        if (state.readonly.has(node.name)) { execution = readonlyError(node.name); break; }
+        state.env[node.name] = value;
+        execution = await executeNodeList(node.body, state);
+        append(execution);
+        if (state.exitRequested) break;
+      }
+      state.lastStatus = execution.status;
+      continue;
+    }
+    if (node.type === "case") {
+      const parsed = parse(`__case ${node.word}`)[0]?.pipeline[0];
+      const value = (await expandWord(parsed.words[1], state, { single: true }))[0] ?? "";
+      execution = result();
+      for (const arm of node.arms) {
+        let matches = false;
+        for (let pattern of arm.patterns) {
+          pattern = pattern.replace(/^(['"])(.*)\1$/, "$2");
+          pattern = stripExpansionMarkers(await expandText(pattern, state));
+          if (globPatternRegex(pattern, true, true, true).test(value)) { matches = true; break; }
+        }
+        if (!matches) continue;
+        execution = await executeNodeList(arm.body, state);
+        append(execution);
+        break;
+      }
+      state.lastStatus = execution.status;
+      continue;
+    }
+    let selected = null;
+    for (const branch of node.branches) {
+      let condition = branch.condition.trim();
+      let negate = false;
+      while (/^!\s+/.test(condition)) { negate = !negate; condition = condition.replace(/^!\s+/, ""); }
+      const checked = await execute(condition, state, { capture: true, simple: true });
+      append(checked);
+      if ((checked.status === 0) !== negate) { selected = branch.body; break; }
+    }
+    execution = selected
+      ? await executeNodeList(selected, state)
+      : await executeNodeList(node.otherwise, state);
+    append(execution);
+    state.lastStatus = execution.status;
+  }
+  return result(execution.status, concatBytes(stdout), concatBytes(stderr));
+}
+
+async function executeFunction(name, argv, state) {
+  const previousArgs = state.args;
+  state.args = [previousArgs[0], ...argv.slice(1)];
+  try { return await executeNodeList(state.functions[name], state); }
+  finally { state.args = previousArgs; }
 }
 
 async function runExternal(
@@ -1879,6 +2499,7 @@ async function runExternal(
 function runsInPipelineSubprocess(argv, state) {
   if (["command", "builtin", "__builtin", "time"].includes(argv[0])) return true;
   if (Object.hasOwn(builtins, argv[0])) return true;
+  if (Object.hasOwn(state.functions, argv[0])) return true;
   return !argv[0].includes("/") &&
     Object.hasOwn(fallbackBuiltins, argv[0]) &&
     !findExecutable(argv[0], state);
@@ -1897,6 +2518,7 @@ function pipelineBuiltinState(state) {
       ...state.env,
       [PIPELINE_STATE_ENV]: JSON.stringify({
         aliases: state.aliases,
+        functions: state.functions,
         readonly: [...state.readonly],
         args: state.args,
       }),
@@ -2051,6 +2673,8 @@ async function runCommandArgv(
     return execution;
   }
   if (commandArgv[0] === "yes") return runYes(commandArgv);
+  if (Object.hasOwn(commandState.functions, commandArgv[0]))
+    return executeFunction(commandArgv[0], commandArgv, commandState);
   if (Object.hasOwn(builtins, commandArgv[0]))
     return builtins[commandArgv[0]](
       commandArgv,
@@ -2126,7 +2750,11 @@ async function runCommand(command, state, options = {}) {
   let stdoutAppend = false;
   let stderrPath = null;
   let stderrAppend = false;
+  let stdoutToStderr = false;
+  let stderrToStdout = false;
   for (const redirect of command.redirects) {
+    if (redirect.op === "1>&2") { stdoutToStderr = true; continue; }
+    if (redirect.op === "2>&1") { stderrToStdout = true; continue; }
     const targets = await expandWord(redirect.target, state, { single: true });
     const target = targets[0];
     const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
@@ -2181,8 +2809,8 @@ async function runCommand(command, state, options = {}) {
     Object.assign(commandState.env, localEnv);
   }
 
-  const captureStdout = options.captureStdout && stdoutRedirect === null;
-  const captureStderr = options.captureStderr && stderrRedirect === null;
+  const captureStdout = (options.captureStdout || stdoutToStderr) && stdoutRedirect === null;
+  const captureStderr = (options.captureStderr || stderrToStdout) && stderrRedirect === null;
   const execution = await runCommandArgv(
     expanded,
     commandState,
@@ -2197,6 +2825,15 @@ async function runCommand(command, state, options = {}) {
       onExit: options.onExit,
     },
   );
+
+  if (stdoutToStderr && execution.stdout.byteLength) {
+    execution.stderr = concatBytes([execution.stderr, execution.stdout]);
+    execution.stdout = bytes();
+  }
+  if (stderrToStdout && execution.stderr.byteLength) {
+    execution.stdout = concatBytes([execution.stdout, execution.stderr]);
+    execution.stderr = bytes();
+  }
 
   return execution;
 }
@@ -2326,6 +2963,21 @@ export async function execute(source, state = createState(), io = {}) {
         : execution;
     }
   }
+  if (!io.simple && hasCompoundSyntax(source)) {
+    let execution;
+    try { execution = await executeNodeList(parseCompoundScript(source), state); }
+    catch (error) {
+      const message = error instanceof ShellSyntaxError ? error.message : String(error);
+      execution = result(2, "", `bunmsh: syntax error: ${message}\n`);
+    }
+    state.lastStatus = execution.status;
+    if (!io.capture) {
+      if (execution.stdout.byteLength) await writeStream(process.stdout, execution.stdout);
+      if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
+    }
+    return execution;
+  }
+
   let jobs;
   try {
     jobs = parse(source);
@@ -2345,6 +2997,7 @@ export async function execute(source, state = createState(), io = {}) {
     if (job.connector === "&&" && execution.status !== 0) continue;
     if (job.connector === "||" && execution.status === 0) continue;
     execution = await runPipeline(job.pipeline, state, { capture: io.capture });
+    if (job.negate) execution.status = execution.status === 0 ? 1 : 0;
     state.lastStatus = execution.status;
     if (execution.stdout.byteLength) {
       if (io.capture) capturedStdout.push(execution.stdout);
@@ -2391,6 +3044,7 @@ export function pipelineChildState() {
       env,
       cwd: process.cwd(),
       aliases: inherited.aliases,
+      functions: inherited.functions,
       readonly: inherited.readonly,
       args: inherited.args,
       pipelineChild: true,

@@ -187,6 +187,35 @@ prints nothing.
 > process, environment and network permissions as bunmsh. Never pass untrusted
 > input to this mode or expose it as a remote command interface.
 
+### Imported history
+
+Interactive bunmsh loads its own saved history and imports both Bash and Fish
+history once at startup. Imported commands immediately participate in
+history-based ghost completion, but the Bash and Fish source files are
+read-only and are never modified by bunmsh:
+
+```text
+~/.bash_history
+~/.local/share/fish/fish_history
+```
+
+Fish history is parsed with `Bun.YAML`. Empty entries, Bash timestamp records
+and duplicate commands are removed while keeping the most recent occurrence.
+`BUNMSH_IMPORT_HISTORY` controls only the Bash and Fish imports; saved bunmsh
+history is still loaded. Set it to disable external startup imports:
+
+```sh
+BUNMSH_IMPORT_HISTORY=0 bunmsh
+```
+
+`false`, `off` and `no` are also accepted, case-insensitively.
+
+bunmsh never saves history automatically. Use `tab s` or `tab save` when you
+want to persist the current interactive history. The standard path is
+`$XDG_DATA_HOME/bunmsh/history`, falling back to
+`~/.local/share/bunmsh/history`. Windows uses
+`%LOCALAPPDATA%/bunmsh/history`.
+
 ### Tab system
 
 bunmsh includes lightweight cwd tabs. A tab stores only its working directory;
@@ -219,6 +248,8 @@ tab 2      # activate tab 2
 tab l      # cycle left
 tab r      # cycle right
 tab x      # close the active tab
+tab s      # save interactive history (same as tab save)
+tab save   # save interactive history; never done automatically
 ```
 
 Left and right movement wrap at the ends. Closing a tab selects the tab that

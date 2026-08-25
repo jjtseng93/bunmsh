@@ -13,11 +13,13 @@ import {
   CommandIndex,
   FileIndex,
   completionContext,
+  fitGhost,
   historyGhost,
   nextGhostChunk,
 } from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
+import { importedHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
 
 const VERSION = `
@@ -82,7 +84,8 @@ async function interactive(state) {
   const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const commandIndex = new CommandIndex(builtinNames());
   const fileIndex = new FileIndex();
-  const history = [];
+  state.history = await importedHistory(state.env);
+  const history = state.history;
   if (terminal) await commandIndex.refresh(state);
   let readline;
   const completer = (line) => {
@@ -138,13 +141,21 @@ async function interactive(state) {
       process.stdout.write("\x1b[0K");
       ghostWidth = 0;
     };
+    const visibleGhost = (ghost) => {
+      const columns = process.stdout.columns ?? 80;
+      const cursor = readline.getCursorPos?.();
+      const available = Math.max(0, columns - (cursor?.cols ?? 0) - 1);
+      return fitGhost(ghost, available);
+    };
     const renderGhost = () => {
       renderTask = null;
       clearGhost();
       const ghost = currentGhost();
       if (!ghost) return;
-      ghostWidth = Bun.stringWidth(ghost);
-      process.stdout.write(`\x1b[2m${ghost}\x1b[0m`);
+      const visible = visibleGhost(ghost);
+      ghostWidth = visible.width;
+      if (!ghostWidth) return;
+      process.stdout.write(`\x1b[2m${visible.output}\x1b[0m`);
       if (ghostWidth) process.stdout.write(`\x1b[${ghostWidth}D`);
     };
     const beforeKey = () => {

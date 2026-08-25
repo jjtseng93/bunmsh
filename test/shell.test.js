@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,11 +14,19 @@ import {
   CommandIndex,
   FileIndex,
   completionContext,
+  fitGhost,
   firstPrefixMatch,
   historyGhost,
   nextGhostChunk,
   prefixMatches,
 } from "../src/completion.js";
+import {
+  bunmshHistoryPath,
+  importedHistory,
+  parseBashHistory,
+  parseFishHistory,
+  safeHistoryEntry,
+} from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
 
 async function run(source, options = {}) {
@@ -26,6 +34,7 @@ async function run(source, options = {}) {
     env: { HOME: "/tmp", ...options.env },
     cwd: options.cwd ?? process.cwd(),
     args: options.args ?? ["bunmsh"],
+    history: options.history ?? [],
   });
   const output = await execute(source, state, { capture: true });
   return {
@@ -58,6 +67,44 @@ describe("parser", () => {
 });
 
 describe("completion", () => {
+  test("imports Bash and Fish history by default and can be disabled", async () => {
+    expect(parseBashHistory("#1720000000\necho bash\n\nshared\n"))
+      .toEqual(["echo bash", "shared"]);
+    expect(parseFishHistory("- cmd: echo fish\n  when: 1720000001\n- cmd: shared\n"))
+      .toEqual(["echo fish", "shared"]);
+
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-history-"));
+    try {
+      mkdirSync(join(home, ".local", "share", "fish"), { recursive: true });
+      await Bun.write(join(home, ".bash_history"), "echo bash\nshared\n");
+      await Bun.write(join(home, ".local", "share", "fish", "fish_history"),
+        "- cmd: echo fish\n  when: 1720000001\n- cmd: shared\n");
+      expect(await importedHistory({ HOME: home }))
+        .toEqual(["echo bash", "echo fish", "shared"]);
+      expect(await importedHistory({ HOME: home, BUNMSH_IMPORT_HISTORY: "off" })).toEqual([]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test("rejects terminal controls from every history source and ghost lookup", () => {
+    const dangerous = "cp file\x1b[2D";
+    expect(safeHistoryEntry(dangerous)).toBe(false);
+    expect(safeHistoryEntry("cp file\nrm file")).toBe(false);
+    expect(parseBashHistory(`cp safe\n${dangerous}\n`)).toEqual(["cp safe"]);
+    expect(parseFishHistory(`- cmd: cp safe\n- cmd: "cp file\\u001b[2D"\n`))
+      .toEqual(["cp safe"]);
+    expect(historyGhost([dangerous, "cp safe-file"], "cp ")).toBe("safe-file");
+    expect(historyGhost([dangerous], "cp ")).toBeNull();
+  });
+
+  test("uses platform-standard bunmsh history paths", () => {
+    expect(bunmshHistoryPath({ HOME: "/home/user" }, "linux"))
+      .toBe("/home/user/.local/share/bunmsh/history");
+    expect(bunmshHistoryPath({ HOME: "/home/user", XDG_DATA_HOME: "/data" }, "linux"))
+      .toBe("/data/bunmsh/history");
+    expect(bunmshHistoryPath({ LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" }, "win32"))
+      .toBe("C:\\Users\\me\\AppData\\Local/bunmsh/history");
+  });
+
   test("finds prefix ranges in a sorted command index", () => {
     const names = ["bun", "bunx", "cat", "git"];
     expect(prefixMatches(names, "bu")).toEqual(["bun", "bunx"]);
@@ -78,6 +125,13 @@ describe("completion", () => {
     expect(historyGhost(history, "git status")).toBe(" --short");
     expect(nextGhostChunk(" --short branch")).toBe(" --short ");
     expect(nextGhostChunk("branch")).toBe("branch");
+  });
+
+  test("clips long ghosts before they wrap and disturb the cursor", () => {
+    const ghost = "src/proot packed/proot; PROOT_PORT_ADD=3000 bun packed/srpr.mjs";
+    expect(fitGhost(ghost, 20)).toEqual({ output: "src/proot packed/pro", width: 20 });
+    expect(fitGhost(ghost, 0)).toEqual({ output: "", width: 0 });
+    expect(fitGhost("檔案-name", 5)).toEqual({ output: "檔案-", width: 5 });
   });
 
   test("indexes PATH names without checking executable permission", async () => {
@@ -226,6 +280,62 @@ describe("execution", () => {
     expect(clean.stdout.split("\n").filter(Boolean).sort()).toEqual(["a=1", "b=2"]);
   });
 
+  test("supports if, elif, negation, functions, and set --", async () => {
+    const script = `
+show_value() {
+  if [ "$1" = "yes" ] ; then
+    printf 'fn:%s' "$2"
+  else
+    printf bad
+  fi
+}
+set -- alpha beta
+if ! [ "$1" = "wrong" ] && [ "$2" = "beta" ] ; then
+  show_value yes nested
+elif [ "$1" = "alpha" ] ; then
+  printf elif
+else
+  printf else
+fi
+`;
+    expect(await run(script)).toMatchObject({ status: 0, stdout: "fn:nested", stderr: "" });
+    expect(await run("! false; printf $?")).toMatchObject({ status: 0, stdout: "0" });
+  });
+
+  test("exec stops the current shell flow and fd duplication redirects output", async () => {
+    const execution = await run("printf before; exec printf after; printf never");
+    expect(execution).toMatchObject({ status: 0, stdout: "beforeafter", stderr: "" });
+    expect(execution.state.exitRequested).toBe(true);
+    expect(await run("printf error 1>&2")).toMatchObject({ status: 0, stdout: "", stderr: "error" });
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-fd-dup-"));
+    try {
+      const merged = await run("builtin cat missing-file 2>&1", { cwd: directory });
+      expect(merged).toMatchObject({ status: 1, stderr: "" });
+      expect(merged.stdout).toContain("bunmsh: cat: missing-file:");
+      expect(await Bun.file(join(directory, "&1")).exists()).toBe(false);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test("fallback script utilities cover required head grep cut ln chmod and uname forms", async () => {
+    expect(await run("printf abcdef | builtin head -c 3")).toMatchObject({ stdout: "abc" });
+    expect(await run("printf 'exact\\nextra\\n' | builtin grep -qFx exact")).toMatchObject({ status: 0, stdout: "" });
+    expect(await run("printf '123456789\\n' | builtin cut -c6-")).toMatchObject({ stdout: "6789\n" });
+    expect(await run("builtin uname -m")).toMatchObject({ status: 0 });
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-script-tools-"));
+    try {
+      await Bun.write(`${directory}/source`, "one");
+      await Bun.write(`${directory}/other`, "two");
+      expect(await run("builtin ln -sfT source link", { cwd: directory })).toMatchObject({ status: 0 });
+      expect(readlinkSync(`${directory}/link`)).toBe("source");
+      expect(await run("builtin ln -sfT other link", { cwd: directory })).toMatchObject({ status: 0 });
+      expect(readlinkSync(`${directory}/link`)).toBe("other");
+      expect(await run("builtin chmod 777 source; builtin chmod +x other", { cwd: directory }))
+        .toMatchObject({ status: 0 });
+      expect(statSync(`${directory}/source`).mode & 0o777).toBe(0o777);
+      expect(statSync(`${directory}/other`).mode & 0o111).toBe(0o111);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
   test("evaluates raw Bun. lines before shell parsing and expansion", async () => {
     const output = await run(`  Bun.version + " $HOME * ; raw"`);
     expect(output.status).toBe(0);
@@ -357,6 +467,22 @@ describe("execution", () => {
     const last = await run("tab x");
     expect(last.status).toBe(1);
     expect(last.stderr).toBe("bunmsh: tab: cannot close the last tab\n");
+  });
+
+  test("tab save persists bunmsh history only when requested", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-own-history-"));
+    try {
+      const env = { HOME: home, BUNMSH_IMPORT_HISTORY: "off" };
+      const saved = await run("tab save", {
+        env,
+        history: ["echo first", "echo duplicate", "echo duplicate", "echo last"],
+      });
+      const path = join(home, ".local", "share", "bunmsh", "history");
+      expect(saved).toMatchObject({ status: 0, stdout: `${path}\n`, stderr: "" });
+      expect(JSON.parse(await Bun.file(path).text()))
+        .toEqual(["echo first", "echo duplicate", "echo last"]);
+      expect(await importedHistory(env)).toEqual(["echo first", "echo duplicate", "echo last"]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 });
 

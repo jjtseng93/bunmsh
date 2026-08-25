@@ -1,6 +1,7 @@
 import { readdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, resolve } from "node:path";
+import { safeHistoryEntry } from "./history.js";
 
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".com", ".cmd", ".bat"];
 
@@ -101,6 +102,7 @@ export function historyGhost(history, line) {
   if (!line) return null;
   for (let i = history.length - 1; i >= 0; i--) {
     const entry = history[i];
+    if (!safeHistoryEntry(entry)) continue;
     if (entry !== line && entry.startsWith(line)) return entry.slice(line.length);
   }
   return null;
@@ -113,6 +115,17 @@ export function nextGhostChunk(ghost) {
   while (i < ghost.length && !/\s/.test(ghost[i])) i++;
   while (i < ghost.length && /\s/.test(ghost[i])) i++;
   return ghost.slice(0, i || ghost.length);
+}
+
+export function fitGhost(ghost, available) {
+  let output = "", width = 0;
+  for (const character of ghost ?? "") {
+    const characterWidth = Bun.stringWidth(character);
+    if (width + characterWidth > Math.max(0, available)) break;
+    output += character;
+    width += characterWidth;
+  }
+  return { output, width };
 }
 
 export class CommandIndex {

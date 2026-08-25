@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createState, decode, execute } from "../src/shell.js";
@@ -39,6 +39,39 @@ async function invokeInternal(source, options = {}) {
     stdout: decode(output.stdout),
     stderr: decode(output.stderr),
   };
+}
+
+async function invokeArgvWithInput(argv, input, cwd = root) {
+  const proc = Bun.spawn({
+    cmd: argv,
+    cwd,
+    env: process.env,
+    stdin: Buffer.from(input),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [status, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { status, stdout, stderr };
+}
+
+async function expectBuiltinGrepLike(args, input, cwd = root) {
+  const [actual, reference] = await Promise.all([
+    invokeArgvWithInput([process.execPath, join(root, "src/main.js"), "-cc", "builtin", "grep", ...args], input, cwd),
+    invokeArgvWithInput(["/usr/bin/grep", ...args], input, cwd),
+  ]);
+  expect(actual).toEqual(reference);
+}
+
+async function expectBuiltinSedLike(args, input, cwd = root) {
+  const [actual, reference] = await Promise.all([
+    invokeArgvWithInput([process.execPath, join(root, "src/main.js"), "-cc", "builtin", "sed", ...args], input, cwd),
+    invokeArgvWithInput(["/usr/bin/sed", ...args], input, cwd),
+  ]);
+  expect(actual).toEqual(reference);
 }
 
 describe("/bin/sh reference", () => {
@@ -161,6 +194,64 @@ describe("/bin/sh reference", () => {
     test("shift updates positional parameters", async () => {
       await expectLikeSh("shift 2; echo $#:$1", process.env, ["reference", "a", "b", "c"]);
     });
+
+    test("read assigns fields, with the last name receiving the remainder", async () => {
+      await expectLikeSh("IFS=' '; read first rest < test/reference-source.sh; printf '<%s>|<%s>\\n' \"$first\" \"$rest\"");
+    });
+
+    test("executes case, while, until, and for compound commands", async () => {
+      await expectLikeSh(`
+value=archive.tgz
+case "$value" in
+  *.zip)
+    printf wrong
+    ;;
+  *.tgz|*.tar)
+    printf case
+    ;;
+esac
+i=0
+while [ "$i" -lt 2 ]; do
+  printf w%s "$i"
+  i=$((i + 1))
+done
+until [ "$i" -ge 4 ]; do
+  printf u%s "$i"
+  i=$((i + 1))
+done
+for item in alpha "two words"; do
+  printf 'f<%s>' "$item"
+done
+`);
+    });
+
+    test("redirects a file into a while-read loop", async () => {
+      const directory = mkdtempSync(join(tmpdir(), "bunmsh-read-loop-"));
+      try {
+        const file = join(directory, "items.txt");
+        await Bun.write(file, "one\ntwo words\nthree\n");
+        await expectLikeSh(`
+set --
+while IFS= read -r item; do
+  set -- "$@" "$item"
+done < "${file}"
+for value in "$@"; do
+  printf '<%s>\\n' "$value"
+done
+`);
+      } finally { rmSync(directory, { recursive: true, force: true }); }
+    });
+
+    test("runs parenthesized commands in an isolated subshell", async () => {
+      await expectLikeSh(`
+(cd test && basename "$PWD")
+basename "$PWD"
+`);
+      await expectLikeSh(`
+(printf left && printf right)
+printf ':%s' $?
+`);
+    });
   });
 
   describe("query and system builtins", () => {
@@ -213,6 +304,58 @@ describe("/bin/sh reference", () => {
     test("kill -0 checks the current process without sending a signal", async () => {
       await expectLikeSh("kill -0 $$; echo $?");
     });
+  });
+});
+
+describe("system grep reference", () => {
+  test("matches basic and extended regular-expression semantics", async () => {
+    await expectBuiltinGrepLike(["a+b"], "a+b\naaab\n");
+    await expectBuiltinGrepLike(["a\\+b"], "a+b\naaab\n");
+    await expectBuiltinGrepLike(["-E", "a+b"], "a+b\naaab\n");
+    await expectBuiltinGrepLike(["-E", "[[:digit:]]+"], "word\nnumber42\n");
+  });
+
+  test("matches fixed, whole-line, case, number, invert, and quiet modes", async () => {
+    await expectBuiltinGrepLike(["-Finx", "alpha.beta"], "Alpha.Beta\nalphaXbeta\n");
+    await expectBuiltinGrepLike(["-v", "drop"], "keep\ndrop\n");
+    await expectBuiltinGrepLike(["-q", "found"], "found\nlater\n");
+    await expectBuiltinGrepLike(["-q", "missing"], "found\nlater\n");
+  });
+
+  test("suppresses zero-length -o matches and output for -v -o", async () => {
+    await expectBuiltinGrepLike(["-oE", "[0-9]*"], "uid=10234(name)\nnone\n");
+    await expectBuiltinGrepLike(["-oE", "[0-9a-zA-Z.]*"], "package:com.example 10234\n");
+    await expectBuiltinGrepLike(["-vo", "drop"], "keep\ndrop\n");
+    await expectBuiltinGrepLike(["-onE", "[0-9]+"], "a12b34\nnone\n");
+  });
+
+  test("matches recursive filename and line-number output", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-reference-"));
+    try {
+      mkdirSync(join(directory, "tree", "nested"), { recursive: true });
+      await Bun.write(join(directory, "tree", "a.txt"), "needle one\nnone\n");
+      await Bun.write(join(directory, "tree", "nested", "b.txt"), "needle two\n");
+      await expectBuiltinGrepLike(["-rn", "needle", "tree"], "", directory);
+      await expectBuiltinGrepLike(["-n", "needle", "tree/a.txt", "tree/nested/b.txt"], "", directory);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+});
+
+describe("system sed reference", () => {
+  test("selects the package path fields used by tmpk", async () => {
+    await expectBuiltinSedLike(["-n", "3p"], "data\ndata\ncom.example\n");
+    await expectBuiltinSedLike(["-n", "4p"], "data\nuser\n0\ncom.example\n");
+  });
+
+  test("trims whitespace and applies build.sh substitutions", async () => {
+    await expectBuiltinSedLike(["s/^[[:space:]]*//;s/[[:space:]]*$//"], "  package.name \t\n");
+    await expectBuiltinSedLike(["-e", "s/com.drjohn.test1/com.example.app/"], "package=com.drjohn.test1\n");
+    await expectBuiltinSedLike(["s/Hello1/My App/"], "<string>Hello1</string>\n");
+  });
+
+  test("supports global replacements, extended expressions, and backreferences", async () => {
+    await expectBuiltinSedLike(["s/a/A/g"], "banana\n");
+    await expectBuiltinSedLike(["-E", "s/(name)=([^ ]+)/\\1:[\\2]/"], "name=value rest\n");
   });
 });
 
