@@ -19,7 +19,7 @@ import {
 } from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
-import { importedHistory } from "./history.js";
+import { importedHistory, readlineHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
 
 const VERSION = `
@@ -112,6 +112,8 @@ async function interactive(state) {
     output: process.stdout,
     terminal,
     completer,
+    history: readlineHistory(history),
+    historySize: Math.max(1000, history.length + 1000),
   });
   let refreshTimer = null;
   let removeGhostHooks = () => {};

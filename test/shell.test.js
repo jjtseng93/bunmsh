@@ -25,6 +25,7 @@ import {
   importedHistory,
   parseBashHistory,
   parseFishHistory,
+  readlineHistory,
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
@@ -96,6 +97,13 @@ describe("completion", () => {
       .toEqual(["cp safe"]);
     expect(historyGhost([dangerous, "cp safe-file"], "cp ")).toBe("safe-file");
     expect(historyGhost([dangerous], "cp ")).toBeNull();
+  });
+
+  test("feeds saved history to readline in newest-first order", () => {
+    expect(readlineHistory(["echo first", "ls", "pwd"]))
+      .toEqual(["pwd", "ls", "echo first"]);
+    expect(readlineHistory(["safe", "bad\x1b[2D"]))
+      .toEqual(["safe"]);
   });
 
   test("uses platform-standard bunmsh history paths", () => {
@@ -598,6 +606,41 @@ describe("CLI", () => {
       `📁 ${shown}\n$ 📁 ${shown}  📂 ${shown}\n[2]$ `,
     );
     expect(stderr).toBe("");
+  });
+
+  test("recalls saved bunmsh history with the Up arrow after startup", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-readline-history-"));
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 100,
+      rows: 30,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    try {
+      const historyPath = join(home, ".local", "share", "bunmsh", "history");
+      mkdirSync(join(home, ".local", "share", "bunmsh"), { recursive: true });
+      await Bun.write(historyPath, `${JSON.stringify(["echo recalled-marker"])}\n`);
+      const proc = Bun.spawn({
+        cmd: [Bun.which("bun") || process.argv0, "src/main.js", "-i"],
+        cwd: new URL("..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          HOME: home,
+          PS1: "> ",
+          BUNMSH_IMPORT_HISTORY: "off",
+        },
+        terminal,
+      });
+      await Bun.sleep(150);
+      terminal.write("\x1b[A\r");
+      await Bun.sleep(100);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+      expect(transcript).toContain("recalled-marker\r\n");
+    } finally {
+      terminal.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("renders ghosts and accepts history words, file paths, and commands", async () => {

@@ -226,7 +226,8 @@ BUNMSH_IMPORT_HISTORY=0 bunmsh
 `false`, `off` and `no` are also accepted, case-insensitively.
 
 bunmsh never saves history automatically. Use `tab s` or `tab save` when you
-want to persist the current interactive history. The standard path is
+want to persist the current interactive history. A newly opened bunmsh loads
+that file for both Up/Down arrow recall and ghost completion. The standard path is
 `$XDG_DATA_HOME/bunmsh/history`, falling back to
 `~/.local/share/bunmsh/history`. Windows uses
 `%LOCALAPPDATA%/bunmsh/history`.

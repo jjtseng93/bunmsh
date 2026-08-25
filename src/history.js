@@ -12,6 +12,12 @@ export function safeHistoryEntry(entry) {
     !/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/u.test(entry);
 }
 
+// node:readline stores its history newest-first, while bunmsh keeps history in
+// chronological order for saving and ghost completion.
+export function readlineHistory(history) {
+  return history.filter(safeHistoryEntry).toReversed();
+}
+
 export function bunmshHistoryPath(env = process.env, platform = process.platform) {
   const trim = (value) => value?.replace(/[\\/]+$/, "");
   if (platform === "win32") {
