@@ -42,6 +42,35 @@ export function getDirnameFromUrl(importMetaUrl) {
   return dirname(fileURLToPath(importMetaUrl));
 }
 
+
+// Linker-preserving self-launch helpers. Kept together and separate from the
+// original compiled-path API above so existing behavior remains untouched.
+export function isLinkerPath(execPath) {
+  const bn = basename(execPath);
+  return bn.startsWith("ld-linux") || bn.startsWith("ld-musl") ||
+    bn.startsWith("libld") || /^linker(?:32|64)?$/.test(bn) ||
+    bn === "ld.so";
+}
+
+export function getExecutablePath(execPath = process.execPath, argv0 = process.argv0) {
+  if (!isLinkerPath(execPath)) return execPath;
+  let invoked = argv0;
+  try {
+    const realArgv = readFileSync("/proc/self/cmdline", "utf8").match(/[^\0]+/g);
+    invoked = realArgv?.[1] ?? invoked;
+  } catch {}
+  if (!invoked) return execPath;
+  return resolve(invoked);
+}
+
+export function getExecutableCommand(execPath = process.execPath, argv0 = process.argv0) {
+  const executable = getExecutablePath(execPath, argv0);
+  return isLinkerPath(execPath) ? [execPath, executable] : [executable];
+}
+
+export const EXECUTABLE_PATH = getExecutablePath();
+export const EXECUTABLE_COMMAND = getExecutableCommand();
+
 export function stringifyNonPrimitiveDefineValues(argv, name) {
   const definePrefix = `${name}=`;
   const numberLiteral = /^[+-]?(?:(?:0[xX][\dA-Fa-f](?:_?[\dA-Fa-f])*)|(?:0[bB][01](?:_?[01])*)|(?:0[oO][0-7](?:_?[0-7])*)|(?:(?:\d(?:_?\d)*)(?:\.(?:\d(?:_?\d)*)?)?|\.(?:\d(?:_?\d)*))(?:[eE][+-]?\d(?:_?\d)*)?)$/;

@@ -19,6 +19,7 @@ import {
   nextGhostChunk,
   prefixMatches,
 } from "../src/completion.js";
+import { isLinkerPath } from "../single-exe/compiled.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -36,6 +37,15 @@ async function run(source, options = {}) {
 }
 
 describe("parser", () => {
+  test("recognizes supported ELF and Android dynamic linker names", () => {
+    expect(isLinkerPath("/lib/ld-linux-aarch64.so.1")).toBe(true);
+    expect(isLinkerPath("/lib/ld-musl-x86_64.so.1")).toBe(true);
+    expect(isLinkerPath("/system/bin/linker64")).toBe(true);
+    expect(isLinkerPath("/system/bin/linker")).toBe(true);
+    expect(isLinkerPath("/usr/bin/ld")).toBe(false);
+    expect(isLinkerPath("/usr/bin/bun")).toBe(false);
+  });
+
   test("tokenizes quotes and operators", () => {
     const tokens = tokenize(`echo "a b" | cat && print ok`);
     expect(tokens.filter((token) => token.type === "op").map((token) => token.value))
@@ -147,6 +157,73 @@ describe("execution", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  test("provides basic fallback text and utility commands", async () => {
+    expect(await run("printf 'c\\na\\nb\\n' | builtin sort")).toMatchObject({ stdout: "a\nb\nc\n" });
+    expect(await run("printf 'one two\\nthree\\n' | builtin wc -lwc")).toMatchObject({ stdout: "2 3 14\n" });
+    expect(await run("printf 'abc\\n' | builtin tr a-z A-Z")).toMatchObject({ stdout: "ABC\n" });
+    expect(await run("printf '1\\n2\\n3\\n' | builtin head -n 2")).toMatchObject({ stdout: "1\n2\n" });
+    expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n 2")).toMatchObject({ stdout: "2\n3\n" });
+    expect(await run("builtin date +%F")).toMatchObject({ status: 0 });
+    expect(await run("builtin sleep 1ms")).toMatchObject({ status: 0, stdout: "", stderr: "" });
+  });
+
+  test("fallback grep supports matching, output modes, quiet, and recursion", async () => {
+    expect(await run("printf 'Alpha beta\\nnone\\nBETA\\n' | builtin grep -Ein 'beta'"))
+      .toMatchObject({ status: 0, stdout: "1:Alpha beta\n3:BETA\n" });
+    expect(await run("printf 'abc123\\n' | builtin grep -Eo '[0-9]+'"))
+      .toMatchObject({ status: 0, stdout: "123\n" });
+    expect(await run("printf 'keep\\ndrop\\n' | builtin grep -v drop"))
+      .toMatchObject({ status: 0, stdout: "keep\n" });
+    expect(await run("printf 'found\\n' | builtin grep -q found"))
+      .toMatchObject({ status: 0, stdout: "" });
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-"));
+    try {
+      mkdirSync(`${directory}/nested`);
+      await Bun.write(`${directory}/nested/a.txt`, "needle\n");
+      const recursive = await run("builtin grep -rn needle nested", { cwd: directory });
+      expect(recursive).toMatchObject({ status: 0, stdout: "nested/a.txt:1:needle\n" });
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test("fallback head closes an infinite upstream and file utilities work", async () => {
+    expect(await run("yes | builtin head -n 2")).toMatchObject({ status: 0, stdout: "y\ny\n" });
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-utils-"));
+    try {
+      const tee = await run("printf data | builtin tee saved.txt", { cwd: directory });
+      expect(tee).toMatchObject({ status: 0, stdout: "data" });
+      expect(await Bun.file(`${directory}/saved.txt`).text()).toBe("data");
+      const md5 = await run("builtin md5sum saved.txt", { cwd: directory });
+      expect(md5.stdout).toBe("8d777f385d3dfec8815d20f7496026dc  saved.txt\n");
+      const sha = await run("builtin sha256sum saved.txt", { cwd: directory });
+      expect(sha.stdout).toBe("3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7  saved.txt\n");
+      const temporary = await run("builtin mktemp -d sample.XXXXXX", { cwd: directory });
+      const created = temporary.stdout.trim();
+      expect(created.startsWith(`${directory}/sample.`)).toBe(true);
+      expect(await run(`builtin rmdir ${created}`, { cwd: directory })).toMatchObject({ status: 0 });
+      expect(await Bun.file(created).exists()).toBe(false);
+      expect(await run("builtin clear")).toMatchObject({ stdout: "\x1b[2J\x1b[H" });
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test("reflects bunmsh and process.argv0 through fallback commands", async () => {
+    const nested = await run("bunmsh -cc printf nested", { env: { PATH: "/no/such/path" } });
+    expect(nested).toMatchObject({ status: 0, stdout: "nested", stderr: "" });
+    const runtime = await run("bun --version", { env: { PATH: "/no/such/path" } });
+    expect(runtime).toMatchObject({ status: 0, stdout: `${Bun.version}\n`, stderr: "" });
+  });
+
+  test("env recursively dispatches env commands with isolated assignments", async () => {
+    const chained = await run("env env a=1 env b=2");
+    expect(chained.status).toBe(0);
+    expect(chained.stdout.split("\n")).toContain("a=1");
+    expect(chained.stdout.split("\n")).toContain("b=2");
+    expect(chained.state.env.a).toBeUndefined();
+    expect(chained.state.env.b).toBeUndefined();
+
+    const clean = await run("env -i a=1 env b=2");
+    expect(clean.stdout.split("\n").filter(Boolean).sort()).toEqual(["a=1", "b=2"]);
   });
 
   test("evaluates raw Bun. lines before shell parsing and expansion", async () => {
