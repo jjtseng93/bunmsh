@@ -29,7 +29,14 @@ npx bunmsh
 
 ```sh
 npx bunmsh -c 'print $PATH'
+
+# Call cmd; this can call bunmsh builtins too
+npx bunmsh -cc echo 'hello world' '*.txt' '$HOME'
 ```
+
+`-cc` means **call cmd**. Every argument after it is forwarded as an
+already-quoted word, without another round of bunmsh parsing or expansion. The
+example calls the `echo` builtin and prints `hello world *.txt $HOME` literally.
 
 `npx` installs and launches the package, but the `bunmsh` executable itself
 uses Bun. Bun must therefore already be available on `PATH`.
@@ -50,8 +57,15 @@ bun ./bunmsh
 ```sh
 bun ./bunmsh -c 'print $PATH'
 
+# Call cmd; this can call bunmsh builtins too
+bun ./bunmsh -cc echo 'hello world' '*.txt' '$HOME'
+
 # bun ./bunmsh script.sh arg1 arg2
 ```
+
+`-cc` means **call cmd**. Every argument after it is forwarded as an
+already-quoted word, without another round of bunmsh parsing or expansion. The
+example calls the `echo` builtin and prints `hello world *.txt $HOME` literally.
 
 ### Highest-priority JavaScript mode
 
@@ -266,6 +280,97 @@ cd src
 tab l      # back to ~/project
 tab r      # back to ~/project/src
 ```
+
+## Built-in commands and supported flags
+
+This section documents the options implemented by bunmsh itself. It is not a
+claim of complete POSIX, mksh or GNU compatibility. Shell builtins are resolved
+before `PATH`. Fallback builtins are used only when no executable with the same
+name is found in `PATH`; use `builtin NAME ...` to select either kind explicitly.
+
+Run `builtin` with no arguments to print the registered names at runtime.
+
+### Shell builtins (before PATH)
+
+| Command | Supported flags/forms |
+| --- | --- |
+| `:`, `true`, `false` | No flags |
+| `command` | `-p`, `-v`, `-V`, `--` |
+| `builtin`, `__builtin` | `--`; no operand lists all builtins (`builtin` only) |
+| `whence` | `-p`, `-v`, `--` |
+| `which` | `--` |
+| `type` | Names only |
+| `alias` | `alias`, `alias NAME`, `alias NAME=VALUE` |
+| `unalias` | `-a`, `--` |
+| `test`, `[` | `!`, `-n`, `-z`, `-e`, `-f`, `-d`, `-b`, `-c`, `-p`, `-S`, `-L`, `-h`, `-s`, `-r`, `-w`, `-x`; string `=`, `==`, `!=`; integer `-eq`, `-ne`, `-gt`, `-ge`, `-lt`, `-le`; file `-nt`, `-ot`, `-ef`; `-a`, `-o` |
+| `echo` | `-n` |
+| `print` | `-r`, `-R`, `-n`, `-l`, `-N`, `-u1`, `-u2`, `--` |
+| `printf` | `%s`, `%d`, `%i`, `%%`, numeric field width and zero padding; basic backslash escapes |
+| `read` | `-r`, `--`; defaults to `REPLY` when no name is given |
+| `pwd` | No flags |
+| `cd`, `chdir` | `cd`, `cd DIR`, `cd -`, `cd //` |
+| `tab` | `n`, `x`, `l`, `r`, `s`, `save`, or a 1-based tab number |
+| `-`, `~`, `..`, `//` | Directory-navigation shortcuts |
+| `export` | `NAME`, `NAME=VALUE` |
+| `unset` | `-v`, `--` |
+| `readonly` | `-p`, `--`, `NAME`, `NAME=VALUE` |
+| `env` | `-i`, `--ignore-environment`, `-u NAME`, `--unset NAME`, `--unset=NAME`, `--` |
+| `exec` | Command and arguments; no command is a no-op |
+| `exit` | Optional numeric status |
+| `shift` | Optional non-negative count |
+| `getopts` | `getopts OPTSTRING NAME [ARG ...]` |
+| `eval` | Arguments are joined and evaluated as shell source |
+| `.`, `source` | `FILE [ARG ...]` |
+| `realpath` | One or more paths |
+| `umask` | No operand to display, or an octal mask |
+| `kill` | `-l`, `-SIGNAL`, `-NUMBER` |
+| `set` | No operand to list variables; `-- ARG ...` sets positional arguments |
+| `time` | Command and arguments; reports milliseconds |
+| `yes` | Optional output words; no flags |
+
+### PATH-fallback builtins
+
+| Command | Supported flags/forms |
+| --- | --- |
+| `basename` | `--`, optional suffix |
+| `dirname` | `--` |
+| `cat` | `--`; files and `-` for stdin; no other options |
+| `head` | `-n N`, `-N`, `-c N`, `-cN` |
+| `tail` | `-n N`, `-N` |
+| `wc` | `-l`, `-w`, `-c`, combinable |
+| `tr` | `-d`; simple ranges such as `a-z` |
+| `tee` | `-a` |
+| `sleep` | Durations with `ms`, `s`, `m`, `h` suffixes; seconds by default |
+| `clear` | No flags |
+| `rmdir` | `-p`, `--parents` |
+| `mktemp` | `-d`; template must end in `XXXXXX` |
+| `sort` | `-r`, `-n`, `-u`, combinable |
+| `date` | `+FORMAT`; `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%s`, `%F`, `%T`, `%%` |
+| `md5sum`, `sha256sum` | Files or stdin; no flags |
+| `grep` | `-E`, `-F`, `-i`, `-q`, `-v`, `-n`, `-o`, `-r`, `-x`, combinable; accepts `--color=auto` |
+| `sed` | `-n`, `-e SCRIPT`, `-eSCRIPT`, `-E`, `-r`, `-i`; numeric `p`; `s///` with `g` and `p` |
+| `cut` | `-c LIST`, `-cLIST` |
+| `ln` | `-s`, `-f`, `-T`, combinable (including `-sfT`) |
+| `chmod` | Octal modes, `+x`, `a+x` |
+| `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, combinable |
+| `bunmsh` | Forwards all following arguments to this bunmsh entry point |
+| `bun` | Forwards all following arguments to the active Bun runtime |
+| `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
+| `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |
+| `rm` | Bun Shell currently implements `-f`, `-r`, `-R`, `-v`, `-d`, `-i`, `-I`, `--recursive`, `--verbose`, `--dir`, and `--interactive=never|once|always`; `--preserve-root` and `--no-preserve-root` are accepted but currently have no effect |
+| `mkdir` | Bun Shell currently implements `-p`, `-v`, `--parents`, and `--vebose` (Bun's currently accepted spelling) |
+| `seq` | Bun Shell currently accepts `-s`/`--separator`, `-t`/`--terminator`, and `-w`/`--fixed-width`; its formatting differs from GNU `seq` (`-w` does not currently pad, and a custom separator may also be emitted after the final item) |
+| `touch` | Bun Shell fallback currently supports no flags |
+| `cp` | `-r`, `-R`, `-v`; bunmsh converts `-r` to Bun Shell's `-R`. Bun Shell also accepts `-n`, but it currently has no effect |
+
+Fallback commands preserve the system-command-first rule. For example, if
+`/bin/grep` exists it runs instead of the fallback; `builtin grep ...` forces
+the implementation described above.
+
+The Bun Shell rows above describe the currently tested Bun implementation, not
+a permanent compatibility guarantee. Their supported flags and exact behaviour
+may change with later Bun releases; see [bunshell.md](bunshell.md) for the
+detailed compatibility snapshot.
 
 ## What's implemented
 
