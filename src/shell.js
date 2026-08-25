@@ -3027,6 +3027,12 @@ async function runPipeline(pipeline, state, options = {}) {
 }
 
 export async function execute(source, state = createState(), io = {}) {
+  if (source === "?") {
+    const execution = result(0, `${state.lastStatus}\n`);
+    state.lastStatus = 0;
+    if (!io.capture) await writeStream(process.stdout, execution.stdout);
+    return execution;
+  }
   const rawSource = source.trimStart();
   if (rawSource.startsWith("Bun.")) {
     let execution;

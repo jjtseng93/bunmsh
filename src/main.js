@@ -104,9 +104,12 @@ function renderPrompt(state, withRegions = false) {
     ? `\\w\n[${state.activeTab + 1}]$ `
     : "📁 \\w\n$ ";
   const template = state.env.PS1 ?? defaultPrompt;
-  const text = template.replaceAll("\\w", cwd);
+  const styledTemplate = state.lastStatus === 0
+    ? template
+    : template.replaceAll("$", "\x1b[31m$\x1b[0m");
+  const text = styledTemplate.replaceAll("\\w", cwd);
   if (!withRegions || !tabParts) return { text, regions: [] };
-  const prefix = template.slice(0, template.indexOf("\\w"));
+  const prefix = styledTemplate.slice(0, styledTemplate.indexOf("\\w"));
   const columns = process.stdout.columns ?? 80;
   let row = 0, column = 0;
   const advance = (source, cells = null) => {

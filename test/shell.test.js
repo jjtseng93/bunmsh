@@ -561,6 +561,19 @@ fi
     expect(output.stdout).toBe("script arg 1 1\n");
   });
 
+  test("a single question mark prints the previous status and succeeds", async () => {
+    const failed = await run("false");
+    const execution = await execute("?", failed.state, { capture: true });
+    const output = {
+      ...execution,
+      stdout: decode(execution.stdout),
+      stderr: decode(execution.stderr),
+    };
+    expect(output).toMatchObject({ status: 0, stdout: "1\n", stderr: "" });
+    expect(failed.state.lastStatus).toBe(0);
+    expect(await run("?")).toMatchObject({ status: 0, stdout: "0\n", stderr: "" });
+  });
+
   test("tab creates cwd-only workspaces and cycles between them", async () => {
     const cwd = process.cwd();
     const output = await run("tab; cd src; tab; pwd; tab; pwd", { cwd });
@@ -714,6 +727,32 @@ describe("CLI", () => {
     expect(status).toBe(0);
     expect(stdout).toBe(`[~${cwd.slice(home.length)}] `);
     expect(stderr).toBe("");
+  });
+
+  test("colors only the prompt dollar red after an error and ? reports it", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(120);
+      terminal.write("false\r");
+      await Bun.sleep(80);
+      terminal.write("?\r");
+      await Bun.sleep(80);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("\x1b[31m$\x1b[0m ");
+    expect(transcript).toContain("1\r\n");
   });
 
   test("shows all tab paths and marks the active tab", async () => {
