@@ -482,6 +482,19 @@ fi
     expect(failure.stderr).toContain("TypeError");
   });
 
+  test("runs Bun. eval with the active shell cwd and restores the process cwd", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-js-cwd-"));
+    const previousCwd = process.cwd();
+    try {
+      await Bun.write(join(cwd, "relative-marker.txt"), "cwd-marker");
+      const shown = await run("Bun.e, process.cwd()", { cwd });
+      expect(shown).toMatchObject({ status: 0, stdout: `${cwd}\n`, stderr: "" });
+      const relative = await run('Bun.file("relative-marker.txt").text()', { cwd });
+      expect(relative).toMatchObject({ status: 0, stdout: "cwd-marker\n", stderr: "" });
+      expect(process.cwd()).toBe(previousCwd);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
   test("provides color aliases for common commands", () => {
     const state = createState();
     expect(state.aliases).toEqual({

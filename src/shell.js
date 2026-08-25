@@ -3046,9 +3046,15 @@ export async function execute(source, state = createState(), io = {}) {
   const rawSource = source.trimStart();
   if (rawSource.startsWith("Bun.")) {
     let execution;
+    const previousCwd = process.cwd();
     try {
-      const value = await eval(rawSource);
-      execution = result(0, value === undefined ? "" : `${formatValue(value)}\n`);
+      try {
+        process.chdir(nativePath(state.cwd));
+        const value = await eval(rawSource);
+        execution = result(0, value === undefined ? "" : `${formatValue(value)}\n`);
+      } finally {
+        process.chdir(previousCwd);
+      }
     } catch (error) {
       execution = result(1, "", `${error?.stack ?? formatValue(error)}\n`);
     }
