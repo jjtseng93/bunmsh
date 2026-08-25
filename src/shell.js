@@ -39,6 +39,7 @@ import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
 import { saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
+import { findIsRegularBuiltin, runFind } from "./find.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1402,6 +1403,14 @@ const builtins = {
   },
 };
 
+const runFindBuiltin = async (argv, state) => {
+  const output = await runFind(argv, state, process.platform, (command) =>
+    runCommandArgv(command, state, null, true, true));
+  return result(output.status, output.stdout, output.stderr);
+};
+
+if (findIsRegularBuiltin()) builtins.find = runFindBuiltin;
+
 // These are used only when PATH does not provide an executable of the same
 // name. `builtin name` can still select them explicitly.
 export function bunShellFallbackArgv(argv) {
@@ -2135,6 +2144,8 @@ const fallbackBuiltins = {
   bunmsh: runBunmshFallback,
   bun: runBunFallback,
 };
+
+if (!findIsRegularBuiltin()) fallbackBuiltins.find = runFindBuiltin;
 
 export function builtinNames() {
   return [...new Set([...Object.keys(builtins), ...Object.keys(fallbackBuiltins)])].sort();

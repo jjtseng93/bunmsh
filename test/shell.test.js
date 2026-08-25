@@ -32,6 +32,7 @@ import {
 import { isLinkerPath } from "../single-exe/compiled.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
 import { canonicalEnvironment, environmentValue } from "../src/environment.js";
+import { findIsRegularBuiltin } from "../src/find.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -76,6 +77,8 @@ describe("completion", () => {
     expect(env.PATH).toBe("C:\\Windows;C:\\Tools");
     expect(env.Path).toBeUndefined();
     expect(environmentValue({ path: "C:\\Bin" }, "PATH", "win32")).toBe("C:\\Bin");
+    expect(findIsRegularBuiltin("win32")).toBe(true);
+    expect(findIsRegularBuiltin("linux")).toBe(false);
   });
 
   test("removes split SGR mouse and cursor reports from readline input", async () => {
@@ -293,6 +296,30 @@ describe("execution", () => {
       expect(timed.status).toBe(0);
       expect(timed.stdout.indexOf("time-old.txt"))
         .toBeLessThan(timed.stdout.indexOf("time-new.txt"));
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  test("fallback find filters paths and supports both -exec modes", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-find-"));
+    try {
+      mkdirSync(join(cwd, "sub"));
+      await Bun.write(join(cwd, "a.txt"), "a");
+      await Bun.write(join(cwd, "skip.js"), "js");
+      await Bun.write(join(cwd, "sub", "b.txt"), "b");
+      const filtered = await run("builtin find . -type f -name '*.txt'", { cwd });
+      expect(filtered).toMatchObject({
+        status: 0,
+        stdout: "./a.txt\n./sub/b.txt\n",
+        stderr: "",
+      });
+      const each = await run("builtin find . -type f -name '*.txt' -exec basename {} \\;", { cwd });
+      expect(each).toMatchObject({ status: 0, stdout: "a.txt\nb.txt\n", stderr: "" });
+      const batch = await run("builtin find . -type f -name '*.txt' -exec echo batch {} +", { cwd });
+      expect(batch).toMatchObject({
+        status: 0,
+        stdout: "batch ./a.txt ./sub/b.txt\n",
+        stderr: "",
+      });
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
