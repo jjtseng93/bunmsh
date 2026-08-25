@@ -319,9 +319,9 @@ tab r      # back to ~/project/src
   immediately rereads and lists the active tab's cwd while preserving the
   command currently being edited.
 
-- `Alt-U`: Calls `builtin lsfancy ..` to list the Upper (parent) folder without
-  changing cwd, adding a command to history, or discarding the command
-  currently being edited.
+- `Alt-U` / `Alt-P`: Calls `builtin lsfancy ..` to list the Parent (upper)
+  folder without changing cwd, adding a command to history, or discarding the
+  command currently being edited.
 
 - `Alt-C`: Calls `builtin tab x` to close the active tab without adding a
   command to history. `tab c` is an equivalent command form.

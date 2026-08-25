@@ -96,14 +96,15 @@ describe("completion", () => {
     input.on("data", (chunk) => { forwarded += chunk.toString(); });
     input.write("echo ");
     input.write("\x1b[<0;12");
-    input.write(";3M\x1b[4;9Rok\x14\x1bt\x1bl\x1bu\x1bc");
+    input.write(";3M\x1b[4;9Rok\x14\x1bt\x1bl\x1bu\x1bp\x1bc");
     input.end();
     await new Promise((resolve) => input.once("end", resolve));
     expect(forwarded).toBe("echo ok");
     expect(mice).toEqual([{ button: 0, x: 12, y: 3, press: true }]);
     expect(cursors).toEqual([{ row: 4, column: 9 }]);
     expect(shortcuts).toEqual([
-      "tab", "tab-left", "lsfancy", "lsfancy-parent", "tab-close",
+      "tab", "tab-left", "lsfancy", "lsfancy-parent", "lsfancy-parent",
+      "tab-close",
     ]);
   });
 
@@ -1024,7 +1025,7 @@ describe("CLI", () => {
     expect(transcript).toContain("[3]$ ");
   });
 
-  test("Alt-L and Alt-U list the cwd and parent without discarding the edited line", async () => {
+  test("Alt-L, Alt-U, and Alt-P list cwd or parent without discarding the edited line", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bunmsh-alt-l-"));
     const child = join(cwd, "child");
     mkdirSync(child);
@@ -1050,6 +1051,8 @@ describe("CLI", () => {
       terminal.write("\x1bl");
       await Bun.sleep(100);
       terminal.write("\x1bu");
+      await Bun.sleep(100);
+      terminal.write("\x1bp");
       await Bun.sleep(100);
       terminal.write("\r");
       await Bun.sleep(80);

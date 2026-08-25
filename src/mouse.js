@@ -15,6 +15,7 @@ export function mouseInput(onMouse, onCursorPosition, onShortcut = () => {}) {
       source = source.replace(/\x1bt/g, () => { onShortcut("tab-left"); return ""; });
       source = source.replace(/\x1bl/g, () => { onShortcut("lsfancy"); return ""; });
       source = source.replace(/\x1bu/g, () => { onShortcut("lsfancy-parent"); return ""; });
+      source = source.replace(/\x1bp/g, () => { onShortcut("lsfancy-parent"); return ""; });
       source = source.replace(/\x1bc/g, () => { onShortcut("tab-close"); return ""; });
       let output = "";
       while (source) {
