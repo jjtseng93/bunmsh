@@ -1,6 +1,17 @@
-import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  constants as fsConstants,
+  accessSync,
+  createReadStream,
+  createWriteStream,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename as pathBasename, dirname as pathDirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { IS_COMPILED } from "../single-exe/compiled.js";
 
@@ -1309,7 +1320,7 @@ async function runExternal(
     env: state.env,
     stdin: input === null ? "inherit" : input,
     stdout: captureStdout || stdoutSink ? "pipe" : "inherit",
-    stderr: captureStderr ? "pipe" : "inherit",
+    stderr: captureStderr || runtimeOptions.stderrSink ? "pipe" : "inherit",
     onExit(proc, exitCode, signalCode, error) {
       runtimeOptions.onExit?.(proc, exitCode, signalCode, error);
     },
@@ -1329,6 +1340,9 @@ async function runExternal(
           try { proc.kill(pipelineKillSignal); } catch {}
         })
       : Promise.resolve();
+    const errorStreamPromise = runtimeOptions.stderrSink
+      ? proc.stderr.pipeTo(runtimeOptions.stderrSink).catch(() => {})
+      : Promise.resolve();
     const errorPromise = captureStderr
       ? new Response(proc.stderr).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
@@ -1337,9 +1351,11 @@ async function runExternal(
       outputPromise,
       errorPromise,
       streamPromise,
+      errorStreamPromise,
     ]);
     const execution = result(status, new Uint8Array(output), new Uint8Array(error));
     execution.stdoutStreamed = Boolean(stdoutSink);
+    execution.stderrStreamed = Boolean(runtimeOptions.stderrSink);
     return execution;
   } catch (error) {
     return result(127, "", `bunmsh: ${argv[0]}: ${error.message}\n`);
@@ -1536,14 +1552,14 @@ async function runCommandArgv(
   );
 }
 
-async function writeRedirect(path, data, append) {
-  if (!append) {
-    await Bun.write(path, data);
-    return;
-  }
-  const file = Bun.file(path);
-  const previous = await file.exists() ? new Uint8Array(await file.arrayBuffer()) : new Uint8Array();
-  await Bun.write(path, concatBytes([previous, data]));
+function redirectInput(path) {
+  const fd = openSync(path, "r");
+  return Readable.toWeb(createReadStream(path, { fd, autoClose: true }));
+}
+
+function redirectOutput(path, append) {
+  const fd = openSync(path, append ? "a" : "w");
+  return Writable.toWeb(createWriteStream(path, { fd, autoClose: true }));
 }
 
 async function runCommand(command, state, options = {}) {
@@ -1596,7 +1612,10 @@ async function runCommand(command, state, options = {}) {
     const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
     if (redirect.op === "<") {
       try {
-        input = new Uint8Array(await Bun.file(path).arrayBuffer());
+        if (input instanceof ReadableStream) {
+          try { await input.cancel(); } catch {}
+        }
+        input = redirectInput(path);
       } catch (error) {
         return result(1, "", `bunmsh: ${target}: ${error.message}\n`);
       }
@@ -1607,6 +1626,24 @@ async function runCommand(command, state, options = {}) {
       stderrPath = path;
       stderrAppend = redirect.op === "2>>";
     }
+  }
+
+
+  let stdoutRedirect = null;
+  let stderrRedirect = null;
+  try {
+    if (stdoutPath !== null) {
+      // A command-level redirect replaces the pipeline's stdout connection.
+      // Close that unused connection now so the next stage observes EOF.
+      if (options.stdoutSink) {
+        try { await options.stdoutSink.getWriter().close(); } catch {}
+      }
+      stdoutRedirect = redirectOutput(stdoutPath, stdoutAppend);
+    }
+    if (stderrPath !== null)
+      stderrRedirect = redirectOutput(stderrPath, stderrAppend);
+  } catch (error) {
+    return result(1, "", `bunmsh: ${stdoutPath ?? stderrPath}: ${error.message}\n`);
   }
 
   const commandState = options.subshell
@@ -1624,8 +1661,8 @@ async function runCommand(command, state, options = {}) {
     Object.assign(commandState.env, localEnv);
   }
 
-  const captureStdout = options.captureStdout || stdoutPath !== null;
-  const captureStderr = options.captureStderr || stderrPath !== null;
+  const captureStdout = options.captureStdout && stdoutRedirect === null;
+  const captureStderr = options.captureStderr && stderrRedirect === null;
   const execution = await runCommandArgv(
     expanded,
     commandState,
@@ -1633,29 +1670,14 @@ async function runCommand(command, state, options = {}) {
     captureStdout,
     captureStderr,
     {
-      pipelineStage: Boolean(options.pipelineStage),
-      stdoutSink: stdoutPath === null ? options.stdoutSink ?? null : null,
+      pipelineStage: Boolean(options.pipelineStage || stdoutRedirect || stderrRedirect),
+      stdoutSink: stdoutRedirect ?? options.stdoutSink ?? null,
+      stderrSink: stderrRedirect,
       onSpawn: options.onSpawn,
       onExit: options.onExit,
     },
   );
 
-  if (stdoutPath !== null) {
-    try {
-      await writeRedirect(stdoutPath, execution.stdout, stdoutAppend);
-      execution.stdout = new Uint8Array();
-    } catch (error) {
-      return result(1, "", `bunmsh: ${stdoutPath}: ${error.message}\n`);
-    }
-  }
-  if (stderrPath !== null) {
-    try {
-      await writeRedirect(stderrPath, execution.stderr, stderrAppend);
-      execution.stderr = new Uint8Array();
-    } catch (error) {
-      return result(1, "", `bunmsh: ${stderrPath}: ${error.message}\n`);
-    }
-  }
   return execution;
 }
 
@@ -1670,10 +1692,17 @@ async function runPipeline(pipeline, state, options = {}) {
     { length: pipeline.length - 1 },
     () => new TransformStream(),
   );
+  const linksConnected = links.map((_, i) => {
+    const stdoutRedirected = pipeline[i].redirects.some((redirect) =>
+      redirect.op === ">" || redirect.op === ">>");
+    const stdinRedirected = pipeline[i + 1].redirects.some((redirect) =>
+      redirect.op === "<");
+    return !stdoutRedirected && !stdinRedirected;
+  });
   const processes = Array(pipeline.length).fill(null);
   const finished = Array(pipeline.length).fill(false);
   const stopUpstream = (index) => {
-    if (index < 0) return;
+    if (index < 0 || !linksConnected[index]) return;
     const processInfo = processes[index];
     if (processInfo) {
       try { processInfo.proc.kill(processInfo.signal); } catch {}

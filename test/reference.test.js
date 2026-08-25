@@ -371,6 +371,34 @@ describe("concurrent streaming pipelines", () => {
     await expectLikeSh("cat < test/reference-source.sh | grep 'sourced:'");
   });
 
+  test("matches /bin/sh for streamed stdout overwrite and append redirects", async () => {
+    await expectLikeSh(
+      "out=/tmp/bunmsh-redirect-$$; printf first > \"$out\"; " +
+        "printf second >> \"$out\"; cat \"$out\"; rm \"$out\"",
+    );
+  });
+
+  test("matches /bin/sh for a streamed stderr redirect", async () => {
+    await expectLikeSh(
+      "out=/tmp/bunmsh-stderr-$$; sh -c 'printf error >&2' 2> \"$out\"; " +
+        "cat \"$out\"; rm \"$out\"",
+    );
+  });
+
+  test("matches /bin/sh when a redirect overrides the pipeline output", async () => {
+    await expectLikeSh(
+      "out=/tmp/bunmsh-override-$$; printf file > \"$out\" | cat; " +
+        "printf :; cat \"$out\"; rm \"$out\"",
+    );
+  });
+
+  test("streams a large redirect without collecting command output", async () => {
+    await expectLikeSh(
+      "out=/tmp/bunmsh-large-$$; head -c 1048576 /dev/zero > \"$out\"; " +
+        "wc -c < \"$out\"; rm \"$out\"",
+    );
+  });
+
   test("matches /bin/sh by leaving stderr outside the pipe", async () => {
     await expectLikeSh("sh -c 'printf error >&2; printf output' | cat");
   });
