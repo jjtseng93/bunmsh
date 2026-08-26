@@ -71,7 +71,10 @@ const pretty = (value) => {
 // numbers, and true/false/null constants.
 export const highlightJson = (source) => {
   const input = String(source);
-  const token = /"(?:\\(?:u[\da-fA-F]{4}|.)|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g;
+  const token = /"(?:\\(?:u[\da-fA-F]{4}|.)|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g; 
+  
+  //" fixes micro syntax highlighting
+  
   let output = "", cursor = 0, match;
   const stringHtml = (value) => {
     let html = "", offset = 0;
@@ -106,11 +109,16 @@ export const highlightJson = (source) => {
 };
 
 const previewResponse = async (entry) => {
+
+  const renderHTMLOptions = { 
+    headings: true 
+  }
+
   const kind = extension(entry.name);
   try {
     const source = await Bun.file(entry.path).text();
     if (kind === "md") return new Response(page(entry.name,
-      `<p><a href="${encodeURIComponent(entry.name)}">← ${escapeHtml(entry.name)}</a></p>\n${Bun.markdown.html(source)}`), {
+      `<p><a href="${encodeURIComponent(entry.name)}">← ${escapeHtml(entry.name)}</a></p>\n${Bun.markdown.html(source,renderHTMLOptions)}`), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
     const parser = PARSERS.get(kind);
