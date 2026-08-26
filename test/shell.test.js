@@ -31,7 +31,7 @@ import {
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
-import { canonicalEnvironment, environmentValue } from "../src/environment.js";
+import { canonicalEnvironment, environmentValue, homeRelativePath } from "../src/environment.js";
 import { findIsRegularBuiltin } from "../src/find.js";
 
 async function run(source, options = {}) {
@@ -75,12 +75,42 @@ describe("parser", () => {
 
 describe("completion", () => {
   test("treats Windows Path as PATH after copying process.env", () => {
-    const env = canonicalEnvironment({ TEMP: "C:\\Temp", Path: "C:\\Windows;C:\\Tools" }, "win32");
+    const env = canonicalEnvironment({
+      TEMP: "C:\\Temp",
+      Path: "C:\\Windows;C:\\Tools",
+      UserProfile: "C:\\Users\\me",
+    }, "win32");
     expect(env.PATH).toBe("C:\\Windows;C:\\Tools");
     expect(env.Path).toBeUndefined();
+    expect(env.HOME).toBe("C:/Users/me");
     expect(environmentValue({ path: "C:\\Bin" }, "PATH", "win32")).toBe("C:\\Bin");
+    expect(canonicalEnvironment({
+      HOME: "D:\\ShellHome",
+      USERPROFILE: "C:\\Users\\ignored",
+    }, "win32").HOME).toBe("D:/ShellHome");
+    expect(canonicalEnvironment({
+      HOMEDRIVE: "C:",
+      HOMEPATH: "\\Users\\fallback",
+    }, "win32").HOME).toBe("C:/Users/fallback");
     expect(findIsRegularBuiltin("win32")).toBe(true);
     expect(findIsRegularBuiltin("linux")).toBe(false);
+  });
+
+  test("recognizes Android app-data aliases and Windows case in HOME-relative paths", () => {
+    expect(homeRelativePath(
+      "/data/user/0/com.termux/files/home",
+      "/data/data/com.termux/files/home",
+    )).toBe("");
+    expect(homeRelativePath(
+      "/data/data/com.termux/files/home/project",
+      "/data/user/0/com.termux/files/home",
+    )).toBe("/project");
+    expect(homeRelativePath(
+      "c:/users/name/project",
+      "C:\\Users\\Name",
+      "win32",
+    )).toBe("/project");
+    expect(homeRelativePath("/elsewhere", "/home/name")).toBeNull();
   });
 
   test("removes split SGR mouse and cursor reports from readline input", async () => {
@@ -728,7 +758,25 @@ describe("CLI", () => {
     ]);
     expect(status).toBe(0);
     expect(stdout).toContain("bunmsh");
-    expect(stdout).toContain("Built-in README");
+    expect(stdout).toContain("Built-in documentation");
+    expect(stderr).toBe("");
+  });
+
+  test("--changelog renders the bundled changelog and exits", async () => {
+    const proc = Bun.spawn([process.execPath, "src/main.js", "--changelog"], {
+      cwd: new URL("..", import.meta.url).pathname,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("Changelog");
+    expect(stdout).toContain("0.1.4");
+    expect(stdout).toContain("Alt-P");
     expect(stderr).toBe("");
   });
 

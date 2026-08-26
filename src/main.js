@@ -22,6 +22,7 @@ import { buildEarlyExit } from "../single-exe/compiled.js";
 import { importedHistory, readlineHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "./mouse.js";
+import { homeRelativePath } from "./environment.js";
 
 const VERSION = `
 ${pkg.name}: ${pkg.description}
@@ -33,6 +34,13 @@ Version: ${pkg.version}
 
 async function printReadme() {
   const source = await readAssetText("README.md");
+  console.log(
+    Bun.markdown?.ansi(source, { hyperlinks: true }) || source,
+  );
+}
+
+async function printChangelog() {
+  const source = await readAssetText("CHANGELOG.md");
   console.log(
     Bun.markdown?.ansi(source, { hyperlinks: true }) || source,
   );
@@ -75,6 +83,7 @@ Options:
                Show version
   -h, --help   Show this help
   --readme     Show bunmsh's README.md
+  --changelog  Show bunmsh's CHANGELOG.md
   
   --build-exe
       Build ./bmsh for the current platform
@@ -84,12 +93,8 @@ Options:
 }
 
 function renderCwd(state, cwd) {
-  const rawHome = state.env.HOME;
-  const home = rawHome === "/" ? "/" : rawHome?.replace(/\/+$/, "");
-  if (home && cwd === home) return "~";
-  if (home === "/" && cwd.startsWith("/")) return `~${cwd}`;
-  if (home && cwd.startsWith(`${home}/`)) return `~${cwd.slice(home.length)}`;
-  return cwd;
+  const relative = homeRelativePath(cwd, state.env.HOME);
+  return relative === null ? cwd : `~${relative}`;
 }
 
 function renderPrompt(state, withRegions = false) {
@@ -175,9 +180,14 @@ async function interactive(state) {
   const runFancyShortcut = (args = []) => {
     if (!readline || mouseCommandRunning) return;
     mouseCommandRunning = true;
+    // readline.prompt(true) moves upward by the current prompt/edit buffer's
+    // row count before repainting. Reserve those rows below the listing so it
+    // clears the reserved space instead of overwriting a short lsfancy result.
+    const repaintRows = readline.getCursorPos().rows;
     process.stdout.write("\r\x1b[0J\n");
     void executeArgv(["builtin", "lsfancy", ...args], state).finally(() => {
       mouseCommandRunning = false;
+      if (repaintRows > 0) process.stdout.write("\n".repeat(repaintRows));
       const next = renderPrompt(state, true);
       promptRegions = next.regions;
       newTabRegion = next.newTabRegion;
@@ -424,6 +434,10 @@ async function main(argv) {
     }
     if (arg === "--readme") {
       await printReadme();
+      return 0;
+    }
+    if (arg === "--changelog") {
+      await printChangelog();
       return 0;
     }
     if (arg.startsWith("-")) {

@@ -491,16 +491,18 @@ platform notes, and the remaining mksh/POSIX compatibility work.
 bun test
 ```
 
-## Built-in README
+## Built-in documentation
 
-Show this README in the terminal with ANSI formatting:
+Show the README or changelog in the terminal with ANSI formatting:
 
 ```sh
 bunmsh --readme
+bunmsh --changelog
 ```
 
-`--readme` reads the embedded copy first when running a standalone executable,
-then falls back to the repository's `README.md` during development.
+Both commands read their embedded copy first when running a standalone
+executable, then fall back to `README.md` or `CHANGELOG.md` in the repository
+during development.
 
 ## Standalone executable
 
@@ -518,7 +520,8 @@ bun ./src/main.js --build-for bun-linux-x64
 ```
 
 The build writes `./bmsh` and leaves the repository's `./bunmsh` launcher
-unchanged. The executable includes `README.md` as an internal asset. See
+unchanged. The executable includes the runtime assets declared in
+`package.json`, currently including its README and changelog. See
 [`single-exe/README.md`](single-exe/README.md) for asset-management options.
 
 ## License

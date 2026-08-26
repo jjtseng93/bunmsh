@@ -103,6 +103,12 @@ pseudo-terminal tests.
 - Linux, Android/Termux, macOS, and Windows are the intended platforms. Windows
   users see forward slashes at the shell layer; bunmsh converts executable and
   filesystem paths at native API boundaries.
+- When Windows does not define `HOME`, bunmsh derives it from `USERPROFILE` or
+  `HOMEDRIVE` plus `HOMEPATH`, so `cd`, `~`, and prompt home shortening use the
+  same user directory conventions as history storage.
+- Prompt home shortening treats Android's `/data/data/PACKAGE` and
+  `/data/user/0/PACKAGE` app-sandbox paths as equivalent, while preserving the
+  actual cwd spelling used for filesystem operations.
 - Windows command discovery recognises common executable suffixes internally;
   full `PATHEXT` emulation is intentionally not implemented.
 - OS/2, EBCDIC, MirBSD-specific, and legacy lksh modes are out of scope.

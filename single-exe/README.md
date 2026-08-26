@@ -355,28 +355,35 @@ before a shell is ever started. `--build-exe` and `--build-for` are listed in
 ```shell
 ./bmsh --version
 ./bmsh --readme
+./bmsh --changelog
 ```
 
-### The one packed asset
+### Packed assets
 
-`package.json` declares a single entry:
+`package.json` declares the runtime files currently needed by bunmsh:
 
 ```json
-{ "assets": ["README.md"] }
+{ "assets": ["README.md", "CHANGELOG.md"] }
 ```
 
-`--readme` is what reads it, in one line:
+This is an extensible list, not a fixed asset count. Add future files or
+directories to the same array when new runtime features need them.
+
+`--readme` and `--changelog` read their respective assets through the same
+helper:
 
 ```js
 const source = await readAssetText("README.md");
+const changes = await readAssetText("CHANGELOG.md");
 ```
 
 Embedded first, the file on disk otherwise — and `assetDiskPath` decides which
 file that is, so `--assets-extract` and `--assets-external` compose:
 
 ```shell
-./bmsh --assets-extract          # -> ./assets/bunmsh@0.0.1/README.md
+./bmsh --assets-extract          # -> ./assets/bunmsh@<version>/...
 ./bmsh --assets-external --readme
+./bmsh --assets-external --changelog
 ```
 
 The extracted tree keeps the archive's namespace rather than landing beside the
@@ -387,8 +394,9 @@ fallback yourself — `bunmsh` did roll its own until it wasn't.
 ### The loader is not zero-copy
 
 The tar back end materializes every packed file in memory and keeps the bytes
-in `globalThis.internalAssets` for the life of the process. With one README
-that is nothing, but it scales with the archive. `ASSETS_BUNFS=1` is one answer
-(see the table at the top); for Linux there is also an experimental zero-copy
-hack of mine for the tar back end:
+in `globalThis.internalAssets` for the life of the process. A few small
+documentation assets are inexpensive, but the cost scales with everything
+added to the archive. `ASSETS_BUNFS=1` is one answer (see the table at the
+top); for Linux there is also an experimental zero-copy hack of mine for the
+tar back end:
 [bun-assets-zerocopy](https://github.com/jjtseng93/bun-assets-zerocopy).

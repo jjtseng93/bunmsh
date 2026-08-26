@@ -19,6 +19,7 @@
     "mksh"
   ],
   "assets": [
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ]
 }
