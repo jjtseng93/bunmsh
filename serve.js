@@ -46,7 +46,7 @@ const directoryHtml = (path, entries) => {
 
 export function main(directory = process.argv[2] ?? process.cwd()) {
   root = resolve(directory);
-  const values = new Map();
+  const routes = Object.create(null);
   const visit = (path) => {
     const entries = readdirSync(path, { withFileTypes: true }).map((entry) => ({
       name: entry.name,
@@ -55,23 +55,18 @@ export function main(directory = process.argv[2] ?? process.cwd()) {
     }));
     const route = routePath(path, true);
     const html = directoryHtml(path, entries);
-    values.set(route, () => new Response(html, {
+    routes[route] = () => new Response(html, {
       headers: { "content-type": "text/html; charset=utf-8" },
-    }));
-    if (route !== "/") values.set(route.slice(0, -1), (request) =>
-      Response.redirect(new URL(`${new URL(request.url).pathname}/`, request.url), 308));
+    });
+    if (route !== "/") routes[route.slice(0, -1)] = (request) =>
+      Response.redirect(new URL(`${new URL(request.url).pathname}/`, request.url), 308);
     for (const entry of entries) {
       if (entry.stats.isDirectory()) visit(entry.path);
-      else values.set(routePath(entry.path), new Response(Bun.file(entry.path)));
+      else routes[routePath(entry.path)] = new Response(Bun.file(entry.path));
     }
   };
 
   visit(root);
-  const routes = new Proxy({}, {
-    ownKeys: () => [...values.keys()],
-    getOwnPropertyDescriptor: () => ({ configurable: true, enumerable: true }),
-    get: (_target, route) => values.get(route),
-  });
   const serverOptions = {
     port: Number(process.env.PORT ?? 3000),
     routes,
