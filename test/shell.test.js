@@ -775,8 +775,8 @@ describe("CLI", () => {
     ]);
     expect(status).toBe(0);
     expect(stdout).toContain("Changelog");
-    expect(stdout).toContain("0.1.5");
-    expect(stdout).toContain("↩️");
+    expect(stdout).toContain("0.1.8");
+    expect(stdout).toContain("serve");
     expect(stderr).toBe("");
   });
 
@@ -856,6 +856,51 @@ describe("CLI", () => {
       expect(await proc.exited).toBe(0);
     } finally { terminal.close(); }
     expect(transcript).toContain("hello\x1b[6n↩️\r\n> ");
+  });
+
+  test("Ctrl-C returns to the prompt while Ctrl-D exits, including during serve", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-sigint-"));
+    let transcript = "";
+    let terminal;
+    terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) {
+        const text = data.toString();
+        transcript += text;
+        if (text.includes("\x1b[6n")) terminal.write("\x1b[4;1R");
+      },
+    });
+    const entry = join(new URL("..", import.meta.url).pathname, "src/main.js");
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, entry, "-i"],
+      cwd,
+      env: { ...process.env, PORT: "0", PS1: "> " },
+      terminal,
+    });
+    const waitFor = async (needle) => {
+      for (let attempt = 0; attempt < 100 && !transcript.includes(needle); attempt++)
+        await Bun.sleep(10);
+      expect(transcript).toContain(needle);
+    };
+    try {
+      await waitFor("> ");
+      terminal.write("\x03");
+      await Bun.sleep(30);
+      terminal.write("echo prompt-survived\r");
+      await waitFor("prompt-survived\r\n");
+      terminal.write("builtin serve\r");
+      await waitFor("http://localhost:");
+      proc.kill("SIGINT");
+      await Bun.sleep(30);
+      terminal.write("echo server-survived\r");
+      await waitFor("server-survived\r\n");
+      terminal.write("\x04");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("prompt-survived\r\n");
+    expect(transcript).toContain("Serving ");
+    expect(transcript).toContain("server-survived\r\n");
   });
 
   test("shows all tab paths and marks the active tab", async () => {

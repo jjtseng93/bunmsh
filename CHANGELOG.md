@@ -2,6 +2,22 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.1.8] - 2026-08-27
+
+### Added
+
+- Add the `serve [directory]` fallback builtin and standalone `serve.js` as a
+  minimal replacement for `python3 -m http.server`. File routes are indexed at
+  startup through Bun's static route table for native HTTP Range support, while
+  directory routes provide linked, `lsfancy`-style HTML listings.
+
+### Fixed
+
+- Keep the interactive shell alive when Ctrl-C interrupts the prompt or a
+  foreground `serve`. Like mksh, SIGINT now abandons the current operation and
+  returns to a fresh prompt; Ctrl-D on an empty input remains the way to send
+  EOF and leave the shell.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added

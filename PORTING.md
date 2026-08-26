@@ -1,6 +1,6 @@
 # mksh to Bun porting status
 
-This document tracks detailed implementation boundaries. bunmsh 0.1.1 is a
+This document tracks detailed implementation boundaries. bunmsh 0.1.8 is a
 clean JavaScript shell inspired by mksh's user-facing model; it is useful as a
 command shell, but it is not a drop-in mksh or fully POSIX-compatible shell.
 The README describes user-facing commands and flags. This file focuses on
@@ -19,7 +19,7 @@ semantic coverage, architecture, platform behaviour, and remaining work.
 | Pipelines | Stages run concurrently with Web Streams and `Bun.spawn`; large output is not collected, early-closing consumers stop upstream producers, and pipeline status comes from the final stage |
 | Commands | Aliases, functions, regular builtins, PATH lookup, system-first fallback builtins, Bun Shell fallbacks, explicit paths, and `command`/`builtin` lookup controls |
 | State | cwd tabs with shared shell state, environment and assignments, positional arguments, readonly names, aliases, functions, last/exit status, and pipeline state isolation |
-| Interactive | Readline editing, saved/Bash/Fish history import, manual history save, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, and terminal-aware prompt layout |
+| Interactive | Readline editing, saved/Bash/Fish history import, manual history save, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, terminal-aware prompt layout, and interactive Ctrl-C/Ctrl-D handling |
 | Platforms | Forward-slash shell paths with native conversion on Windows, platform PATH delimiters, Windows executable suffix handling, Linux/Android dynamic-linker re-execution, and inherited `LD_LIBRARY_PATH` |
 | Packaging | Source execution and standalone Bun executables, including compiled self-spawn paths used by pipelines and reflected `bunmsh` commands |
 
@@ -71,6 +71,42 @@ pseudo-terminal tests.
   preserves `LD_LIBRARY_PATH`. Unusual launch wrappers may still require
   additional platform handling.
 
+### Signals and job control
+
+- Interactive bunmsh catches SIGINT instead of allowing Ctrl-C to terminate
+  the shell. At the prompt it abandons the current edit and starts a fresh
+  prompt with status 130. A foreground `serve` handles the same signal by
+  stopping its server, returning status 130, and handing control back to the
+  interactive loop.
+- Ctrl-D on an empty readline input sends EOF and exits the interactive shell.
+  This is deliberately distinct from Ctrl-C, following the same high-level
+  editor/main-loop separation used by mksh.
+- The current implementation handles SIGINT through readline while editing and
+  through a process signal listener while a foreground operation owns the
+  terminal. It does not yet have mksh's general pending-signal table and safe
+  trap checkpoints.
+- There is no `trap` builtin or support for user handlers for signals, `EXIT`,
+  or `ERR`. Signal handlers therefore cannot yet execute shell source, be
+  listed, ignored, reset, or inherited with POSIX/mksh semantics.
+- Status 130 is defined for an interrupted `serve`, and its SIGTERM path uses
+  143. Signal-derived statuses are not yet normalised consistently for every
+  external command, builtin, pipeline stage, and command substitution.
+- SIGQUIT and SIGTERM do not yet have mksh's complete interactive policies;
+  SIGHUP does not perform shell/job cleanup; SIGCHLD does not maintain a job
+  table; and SIGWINCH is not integrated into a general signal subsystem.
+- Terminal control characters are currently mediated by Bun readline. bunmsh
+  does not read termios `VINTR`, `VQUIT`, or `VEOF`, so remapping those keys
+  with `stty` is not guaranteed to match mksh.
+- Long-running JavaScript builtins need command-specific cancellation today.
+  `serve` implements it, while there is not yet a common abort context that can
+  interrupt every asynchronous builtin safely.
+- Pipeline shutdown handles practical early-closing consumers and stops
+  upstream producers, but SIGPIPE status/disposition is not yet integrated
+  with a full process-group and job-control model.
+- Background execution, process groups, terminal foreground ownership, job
+  tables, `jobs`, `fg`, `bg`, `wait`, and Ctrl-Z/SIGTSTP handling remain
+  unimplemented. SIGTTIN and SIGTTOU policies consequently remain absent too.
+
 ### Builtins and utilities
 
 - The README's builtin tables are the source of truth for currently supported
@@ -115,7 +151,8 @@ pseudo-terminal tests.
 
 ## Remaining major work
 
-1. Background jobs, process groups, signals, traps, and `wait`.
+1. Background jobs, process groups, complete signal-status handling, traps,
+   general builtin cancellation, and `jobs`/`fg`/`bg`/`wait`.
 2. Shell options such as `errexit`, `nounset`, `pipefail`, `xtrace`, and POSIX
    mode, plus startup/login/restricted-shell files and modes.
 3. Here-documents, here-strings, brace groups, `[[ ... ]]`, arithmetic commands,

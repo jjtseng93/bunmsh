@@ -166,6 +166,8 @@ async function interactive(state) {
   let pendingCursorQuery = null;
   let lastTabClick = null;
   let mouseCommandRunning = false;
+  let foregroundCommand = false;
+  let promptAbort = null;
   const runTabShortcut = (args) => {
     if (!readline || mouseCommandRunning) return;
     mouseCommandRunning = true;
@@ -286,6 +288,14 @@ async function interactive(state) {
     history: readlineHistory(history),
     historySize: Math.max(1000, history.length + 1000),
   });
+  const interrupt = () => {
+    state.lastStatus = 130;
+    if (foregroundCommand || promptAbort?.signal.aborted) return;
+    process.stdout.write("\n");
+    promptAbort?.abort();
+  };
+  readline.on("SIGINT", interrupt);
+  process.on("SIGINT", interrupt);
   let refreshTimer = null;
   let removeGhostHooks = () => {};
   if (terminal) {
@@ -361,10 +371,19 @@ async function interactive(state) {
       promptRegions = rendered.regions;
       newTabRegion = rendered.newTabRegion;
       readline.setPrompt(rendered.text);
-      const line = await Promise.race([
-        readline.question(rendered.text),
-        closed,
-      ]);
+      promptAbort = new AbortController();
+      let line;
+      try {
+        line = await Promise.race([
+          readline.question(rendered.text, { signal: promptAbort.signal }),
+          closed,
+        ]);
+      } catch (error) {
+        if (error?.name === "AbortError") continue;
+        throw error;
+      } finally {
+        promptAbort = null;
+      }
       if (line === null) break;
       if (line && history.at(-1) !== line) history.push(line);
       // readline must not keep reading from the terminal while a foreground
@@ -377,9 +396,11 @@ async function interactive(state) {
         process.stdin.unpipe(filteredInput);
       }
       if (terminal) process.stdin.setRawMode(false);
+      foregroundCommand = true;
       try {
         await execute(line, state);
       } finally {
+        foregroundCommand = false;
         if (!state.exitRequested) {
           if (terminal) process.stdin.setRawMode(true);
           if (terminal) {
@@ -404,6 +425,8 @@ async function interactive(state) {
     }
     if (refreshTimer !== null) clearInterval(refreshTimer);
     removeGhostHooks();
+    readline.off("SIGINT", interrupt);
+    process.off("SIGINT", interrupt);
     readline.close();
   }
   return state.exitRequested ? state.exitStatus : state.lastStatus;

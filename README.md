@@ -308,6 +308,11 @@ tab r      # back to ~/project/src
 
 ### Keyboard shortcuts
 
+- `Ctrl-C`: Interrupts the current input or foreground operation and returns to
+  a fresh prompt without exiting bunmsh.
+
+- `Ctrl-D`: On an empty input line, sends EOF and exits the interactive shell.
+
 - `Ctrl-T`: Calls `builtin tab` without adding a command to history. It creates
   a tab when only one exists, or switches to the next tab otherwise. Any
   command text currently being edited is preserved.
@@ -449,6 +454,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
+| `serve` | `serve [directory]`; starts the minimal HTTP file server in cwd, or in the supplied directory; `PORT` selects the port |
 | `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
 | `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |

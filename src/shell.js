@@ -40,6 +40,7 @@ import { saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
+import { main as startFileServer, waitForInterrupt } from "../serve.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -2189,6 +2190,17 @@ const fallbackBuiltins = {
   uname: async (argv) => runUnameFallback(argv),
   bunmsh: runBunmshFallback,
   bun: runBunFallback,
+  serve: async (argv, state) => {
+    if (argv.length > 2)
+      return result(2, "", "bunmsh: serve: usage: serve [directory]\n");
+    try {
+      const server = startFileServer(argv[1] ?? state.cwd);
+      const signal = await waitForInterrupt(server);
+      return result(signal === "SIGINT" ? 130 : 143);
+    } catch (error) {
+      return result(1, "", `bunmsh: serve: ${error.message}\n`);
+    }
+  },
 };
 
 if (!findIsRegularBuiltin()) fallbackBuiltins.find = runFindBuiltin;

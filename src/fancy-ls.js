@@ -16,7 +16,7 @@ function extension(name) {
   return index > 0 ? name.slice(index + 1).toLowerCase() : "";
 }
 
-function iconFor(name, stats) {
+export function iconFor(name, stats) {
   if (stats.isDirectory()) return "📦";
   if (stats.isSymbolicLink()) return "🔗";
   const ext = extension(name);
