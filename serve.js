@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
 import { lstatSync, readdirSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { iconFor } from "./src/fancy-ls.js";
 
-let root = resolve(process.argv[2] ?? ".");
+let root = process.cwd();
 
 const escapeHtml = (value) => value.replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -81,14 +81,7 @@ const previewResponse = async (entry) => {
   }
 };
 
-const routePath = (path, directory = false) => {
-  const relativePath = relative(root, path).replaceAll("\\", "/");
-  const route = `/${relativePath.split("/").filter(Boolean).map(encodeURIComponent).join("/")}`;
-  return directory && route !== "/" ? `${route}/` : route;
-};
-
-const directoryHtml = (path, entries) => {
-  const route = routePath(path, true);
+const directoryHtml = (route, entries) => {
   const parent = route === "/" ? "" : `<a href="../">📦 ../</a>\n`;
   const links = entries
     .filter((entry) => !entry.name.startsWith("."))
@@ -101,42 +94,105 @@ const directoryHtml = (path, entries) => {
       return `<a href="${encoded}${directory ? "/" : ""}">${iconFor(entry.name, entry.stats)} ${escapeHtml(name)}</a>${preview ? `  <a href="${encoded}-${preview}" title="Preview with ${preview}">🔍</a>` : ""}`;
     })
     .join("\n");
-  const title = `Index of ${decodeURIComponent(route)}`;
+  const title = `Index of ${route}`;
   return page(title, `<h1>${escapeHtml(title)}</h1>\n<pre>${parent}${links}${links ? "\n" : ""}</pre>`);
 };
 
-export function main(directory = process.argv[2] ?? process.cwd()) {
-  root = resolve(directory);
-  const routes = Object.create(null);
-  const visit = (path) => {
-    const entries = readdirSync(path, { withFileTypes: true }).map((entry) => ({
-      name: entry.name,
-      path: resolve(path, entry.name),
-      stats: lstatSync(resolve(path, entry.name)),
-    }));
-    const route = routePath(path, true);
-    const html = directoryHtml(path, entries);
-    routes[route] = () => new Response(html, {
+const resolveRequestPath = (pathname) => {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\0")) return null;
+  const path = resolve(root, `.${decoded.replaceAll("\\", "/")}`);
+  const fromRoot = relative(root, path);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot))
+    return null;
+  return { path, decoded };
+};
+
+const previewRequest = (pathname) => {
+  const names = ["bun.markdown.html", ...new Set([...PARSERS.values()].map(({ name }) => name))];
+  for (const preview of names) {
+    const suffix = `-${preview}`;
+    if (!pathname.endsWith(suffix)) continue;
+    const original = pathname.slice(0, -suffix.length);
+    if (previewName(basename(original)) === preview) return original;
+  }
+  return null;
+};
+
+const notFound = () => new Response("Not Found", { status: 404 });
+
+export const resolveBunfsPath = (directory, moduleDirectory = import.meta.dirname) => {
+  const requested = String(directory).replaceAll("\\", "/");
+  const moduleDir = String(moduleDirectory).replaceAll("\\", "/").replace(/\/$/, "");
+  const mount = /^(\/\$bunfs|[a-z]:\/~bun)(?:\/|$)/i.exec(moduleDir)?.[1];
+  if (!mount) return null;
+  const alias = /^(\/\$bunfs|[a-z]:\/~bun)(?=\/|$)/i.exec(requested)?.[1];
+  if (!alias) return null;
+  let suffix = requested.slice(alias.length);
+  // Accept both the logical-root spelling and Bun's displayed physical
+  // spelling without turning .../root/... into .../root/root/....
+  if (suffix.toLowerCase() === "/root") suffix = "";
+  else if (suffix.toLowerCase().startsWith("/root/")) suffix = suffix.slice(5);
+  return `${moduleDir}${suffix}`;
+};
+
+const handleRequest = async (request) => {
+  if (request.method !== "GET" && request.method !== "HEAD")
+    return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+
+  const url = new URL(request.url);
+  const originalPreviewPath = previewRequest(url.pathname);
+  const resolved = resolveRequestPath(originalPreviewPath ?? url.pathname);
+  if (!resolved) return new Response("Bad Request", { status: 400 });
+
+  let stats;
+  try {
+    stats = lstatSync(resolved.path);
+  } catch {
+    return notFound();
+  }
+
+  if (originalPreviewPath) {
+    if (stats.isDirectory()) return notFound();
+    return previewResponse({ name: basename(resolved.path), path: resolved.path, stats });
+  }
+
+  if (stats.isDirectory()) {
+    if (!url.pathname.endsWith("/")) {
+      url.pathname += "/";
+      return Response.redirect(url, 308);
+    }
+    let entries;
+    try {
+      entries = readdirSync(resolved.path, { withFileTypes: true }).map((entry) => {
+        const path = resolve(resolved.path, entry.name);
+        return { name: entry.name, path, stats: lstatSync(path) };
+      });
+    } catch (error) {
+      return new Response(`Cannot list directory: ${error.message}`, { status: 403 });
+    }
+    return new Response(directoryHtml(resolved.decoded, entries), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
-    if (route !== "/") routes[route.slice(0, -1)] = (request) =>
-      Response.redirect(new URL(`${new URL(request.url).pathname}/`, request.url), 308);
-    for (const entry of entries) {
-      if (entry.stats.isDirectory()) visit(entry.path);
-      else {
-        const fileRoute = routePath(entry.path);
-        routes[fileRoute] = new Response(Bun.file(entry.path));
-        const preview = previewName(entry.name);
-        if (preview) routes[`${fileRoute}-${preview}`] = () => previewResponse(entry);
-      }
-    }
-  };
+  }
 
-  visit(root);
+  // Keep this as a whole, unsliced Bun.file() response. Bun's normal response
+  // path then provides native GET/HEAD Range handling, including 206 and 416.
+  return new Response(Bun.file(resolved.path));
+};
+
+export function main(directory = process.argv[2] ?? process.cwd()) {
+  // The virtual mount itself is not stat-able. import.meta.dirname points at
+  // its real root on each platform: /$bunfs/root or B:/~BUN/root.
+  root = resolve(resolveBunfsPath(directory) ?? directory);
   const serverOptions = {
     port: Number(process.env.PORT ?? 3000),
-    routes,
-    fetch: () => new Response("Not Found", { status: 404 }),
+    fetch: handleRequest,
   };
   let server;
   try {

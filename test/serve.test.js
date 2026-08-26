@@ -1,10 +1,25 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { main as startFileServer } from "../serve.js";
+import { main as startFileServer, resolveBunfsPath } from "../serve.js";
 
 const cwd = join(import.meta.dir, "serve");
 let previousPort;
 let server;
+
+test("serve accepts either bunfs spelling and derives the platform path", () => {
+  expect(resolveBunfsPath("/$bunfs", "/$bunfs/root")).toBe("/$bunfs/root");
+  expect(resolveBunfsPath("/$bunfs/assets/file.txt", "/$bunfs/root"))
+    .toBe("/$bunfs/root/assets/file.txt");
+  expect(resolveBunfsPath("B:/~BUN/root/assets/file.txt", "/$bunfs/root"))
+    .toBe("/$bunfs/root/assets/file.txt");
+  expect(resolveBunfsPath("/$bunfs", "B:\\~BUN\\root")).toBe("B:/~BUN/root");
+  expect(resolveBunfsPath("/$bunfs/assets/file.txt", "B:\\~BUN\\root"))
+    .toBe("B:/~BUN/root/assets/file.txt");
+  expect(resolveBunfsPath("B:/~BUN/root/assets/file.txt", "B:\\~BUN\\root"))
+    .toBe("B:/~BUN/root/assets/file.txt");
+  expect(resolveBunfsPath("/$bunfs", "/source/bunmsh")).toBeNull();
+});
 
 beforeAll(() => {
   previousPort = process.env.PORT;
@@ -63,4 +78,26 @@ test("serve keeps native HTTP Range handling on original files", async () => {
   expect(response.status).toBe(206);
   expect(response.headers.get("content-range")).toBe("bytes 0-8/26");
   expect(await response.text()).toBe("# Preview");
+});
+
+test("serve discovers request-time files without rebuilding routes", async () => {
+  const path = join(cwd, "created-after-start.txt");
+  try {
+    await Bun.write(path, "dynamic file");
+    const index = await fetch(server.url).then((response) => response.text());
+    expect(index).toContain("created-after-start.txt");
+    const response = await fetch(new URL("created-after-start.txt", server.url), {
+      headers: { range: "bytes=0-6" },
+    });
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe("bytes 0-6/12");
+    expect(await response.text()).toBe("dynamic");
+  } finally {
+    rmSync(path, { force: true });
+  }
+  expect((await fetch(new URL("created-after-start.txt", server.url))).status).toBe(404);
+});
+
+test("serve rejects paths escaping the served root", async () => {
+  expect((await fetch(new URL("/%5c..%5cpackage.json", server.url))).status).toBe(400);
 });

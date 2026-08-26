@@ -7,15 +7,18 @@ All notable user-visible changes to bunmsh are documented here.
 ### Added
 
 - Add the `serve [directory]` fallback builtin and standalone `serve.js` as a
-  minimal replacement for `python3 -m http.server`. File routes are indexed at
-  startup through Bun's static route table for native HTTP Range support, while
-  directory routes provide linked, `lsfancy`-style HTML listings.
+  minimal replacement for `python3 -m http.server`. It provides live directory
+  listings, reflects filesystem changes, and serves whole `Bun.file` responses
+  with Bun's native HTTP Range support.
 - Add `🔍` preview links to `serve` directory pages. Markdown is rendered by
   `Bun.markdown.html`; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, and TOML are
   parsed by their corresponding runtime parser and pretty-printed as HTML.
   XML is also previewed when the running Bun provides `Bun.XML.parse`.
 - Add interactive `serve` controls: `q`, `quit`, and `exit` stop the server,
   while `o` opens its URL through `xdg-open`.
+- Accept both `/$bunfs/...` and `B:/~BUN/...` serve paths on every platform,
+  translating either spelling through the compiled module's
+  `import.meta.dirname` to the bunfs mount accepted by the current runtime.
 
 ### Fixed
 
