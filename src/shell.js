@@ -2196,7 +2196,7 @@ const fallbackBuiltins = {
     try {
       const server = startFileServer(argv[1] ?? state.cwd);
       const signal = await waitForInterrupt(server);
-      return result(signal === "SIGINT" ? 130 : 143);
+      return result(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0);
     } catch (error) {
       return result(1, "", `bunmsh: serve: ${error.message}\n`);
     }

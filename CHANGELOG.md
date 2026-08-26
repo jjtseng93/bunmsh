@@ -14,6 +14,8 @@ All notable user-visible changes to bunmsh are documented here.
   `Bun.markdown.html`; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, and TOML are
   parsed by their corresponding runtime parser and pretty-printed as HTML.
   XML is also previewed when the running Bun provides `Bun.XML.parse`.
+- Add interactive `serve` controls: `q`, `quit`, and `exit` stop the server,
+  while `o` opens its URL through `xdg-open`.
 
 ### Fixed
 

@@ -2,6 +2,7 @@
 
 import { lstatSync, readdirSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { iconFor } from "./src/fancy-ls.js";
 
 let root = resolve(process.argv[2] ?? ".");
@@ -146,20 +147,55 @@ export function main(directory = process.argv[2] ?? process.cwd()) {
     if (serverOptions.port !== 3000 || !addressInUse) throw error;
     server = Bun.serve({ ...serverOptions, port: 0 });
   }
-  console.log(`Serving ${root}\n${server.url.href}`);
+  console.log(`Serving ${root}\n  ${server.url.href}`);
   return server;
 }
 
 export function waitForInterrupt(server) {
   return new Promise((resolve) => {
+    let readline;
+    let finished = false;
     const stop = (signal) => {
-      process.off("SIGINT", stop);
-      process.off("SIGTERM", stop);
-      server.stop();
+      if (finished) return;
+      finished = true;
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      readline?.close();
+      server.stop(true);
       resolve(signal);
     };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
+    const onSigint = () => stop("SIGINT");
+    const onSigterm = () => stop("SIGTERM");
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
+
+    if (!process.stdin.isTTY) return;
+    console.log("q/quit/exit: stop  o: open in browser");
+    readline = createInterface({ input: process.stdin, terminal: false });
+    readline.on("line", (line) => {
+      const command = line.trim().toLowerCase();
+      if (["q", "quit", "exit"].includes(command)) {
+        stop("QUIT");
+      } else if (command === "o") {
+        const executable = Bun.which("xdg-open");
+        if (!executable) {
+          console.error("bunmsh: serve: xdg-open not found");
+          return;
+        }
+        try {
+          Bun.spawn([executable, server.url.href], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          }).unref();
+        } catch (error) {
+          console.error(`bunmsh: serve: xdg-open: ${error.message}`);
+        }
+      } else if (command) {
+        console.error(`bunmsh: serve: unknown control: ${command}`);
+      }
+    });
+    readline.on("close", () => stop("EOF"));
   });
 }
 

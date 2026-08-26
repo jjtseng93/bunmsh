@@ -454,7 +454,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
-| `serve` | `serve [directory]`; starts the minimal HTTP file server in cwd, or in the supplied directory; `PORT` selects the port; directory pages provide `🔍` rendered Markdown and pretty-printed JSON/JSON5/JSONC/JSONL/YAML/TOML previews, plus XML when the running Bun provides `Bun.XML.parse` |
+| `serve` | `serve [directory]`; starts the minimal HTTP file server in cwd, or in the supplied directory; `PORT` selects the port; enter `q`, `quit`, or `exit` to stop, or `o` to open the URL with `xdg-open`; directory pages provide `🔍` rendered Markdown and pretty-printed JSON/JSON5/JSONC/JSONL/YAML/TOML previews, plus XML when the running Bun provides `Bun.XML.parse` |
 | `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
 | `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |

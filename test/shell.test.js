@@ -891,6 +891,15 @@ describe("CLI", () => {
       await waitFor("prompt-survived\r\n");
       terminal.write("builtin serve\r");
       await waitFor("http://localhost:");
+      const beforeQuit = transcript.length;
+      terminal.write("q\r");
+      for (let attempt = 0; attempt < 100 && !transcript.slice(beforeQuit).includes("> "); attempt++)
+        await Bun.sleep(10);
+      expect(transcript.slice(beforeQuit)).toContain("> ");
+      terminal.write("builtin serve\r");
+      for (let attempt = 0; attempt < 100 &&
+        !transcript.slice(beforeQuit).includes("http://localhost:"); attempt++)
+        await Bun.sleep(10);
       const promptsWhileServing = transcript.split("> ").length - 1;
       terminal.resize(79, 24);
       await Bun.sleep(30);
