@@ -10,6 +10,10 @@ All notable user-visible changes to bunmsh are documented here.
   minimal replacement for `python3 -m http.server`. File routes are indexed at
   startup through Bun's static route table for native HTTP Range support, while
   directory routes provide linked, `lsfancy`-style HTML listings.
+- Add `🔍` preview links to `serve` directory pages. Markdown is rendered by
+  `Bun.markdown.html`; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, and TOML are
+  parsed by their corresponding runtime parser and pretty-printed as HTML.
+  XML is also previewed when the running Bun provides `Bun.XML.parse`.
 
 ### Fixed
 
