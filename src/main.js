@@ -280,6 +280,9 @@ async function interactive(state) {
     const chunk = nextGhostChunk(ghost);
     return chunk ? [[`${line}${chunk}`], line] : [[], line];
   };
+  const resizeListenersBeforeReadline = terminal
+    ? new Set(process.stdout.listeners("resize"))
+    : null;
   readline = createInterface({
     input: filteredInput,
     output: process.stdout,
@@ -288,6 +291,24 @@ async function interactive(state) {
     history: readlineHistory(history),
     historySize: Math.max(1000, history.length + 1000),
   });
+  // readline refreshes its prompt whenever stdout emits "resize", even while
+  // the interface is paused. Termux emits a resize when its app returns to the
+  // foreground, which otherwise paints the shell's cwd prompt over a running
+  // server or other foreground command.
+  const readlineResizeListeners = terminal
+    ? process.stdout.listeners("resize").filter(
+        (listener) => !resizeListenersBeforeReadline.has(listener))
+    : [];
+  const setReadlineResizeEnabled = (enabled) => {
+    for (const listener of readlineResizeListeners) {
+      if (enabled) {
+        if (!process.stdout.listeners("resize").includes(listener))
+          process.stdout.on("resize", listener);
+      } else {
+        process.stdout.off("resize", listener);
+      }
+    }
+  };
   const interrupt = () => {
     state.lastStatus = 130;
     if (foregroundCommand || promptAbort?.signal.aborted) return;
@@ -391,6 +412,7 @@ async function interactive(state) {
       // first key (notably Ctrl-Q in full-screen editors) can be consumed by
       // the shell.  Also give the child a sane terminal mode to start from.
       readline.pause();
+      setReadlineResizeEnabled(false);
       if (terminal) {
         if (mouseTracking) process.stdout.write(MOUSE_OFF);
         process.stdin.unpipe(filteredInput);
@@ -414,6 +436,7 @@ async function interactive(state) {
             mouseTracking = Boolean(state.mouseTracking);
             if (mouseTracking) process.stdout.write(MOUSE_ON);
           }
+          setReadlineResizeEnabled(true);
           readline.resume();
         }
       }

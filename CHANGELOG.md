@@ -17,6 +17,8 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Fixed
 
+- Prevent Termux foreground/resume terminal resize events from repainting the
+  shell's cwd prompt over a running server or other foreground command.
 - Keep the interactive shell alive when Ctrl-C interrupts the prompt or a
   foreground `serve`. Like mksh, SIGINT now abandons the current operation and
   returns to a fresh prompt; Ctrl-D on an empty input remains the way to send

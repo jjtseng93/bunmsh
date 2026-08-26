@@ -891,6 +891,10 @@ describe("CLI", () => {
       await waitFor("prompt-survived\r\n");
       terminal.write("builtin serve\r");
       await waitFor("http://localhost:");
+      const promptsWhileServing = transcript.split("> ").length - 1;
+      terminal.resize(79, 24);
+      await Bun.sleep(30);
+      expect(transcript.split("> ").length - 1).toBe(promptsWhileServing);
       proc.kill("SIGINT");
       await Bun.sleep(30);
       terminal.write("echo server-survived\r");
