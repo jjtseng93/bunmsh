@@ -347,6 +347,14 @@ tab r      # back to ~/project/src
   command owns the terminal, so full-screen editors and other TUI programs
   receive their own mouse input. bunmsh restores it when the command returns.
 
+### Terminal behavior
+
+- `↩️`: When a command finishes without a trailing newline, bunmsh prints this
+  marker and then inserts a newline before drawing the next prompt. The marker
+  makes it clear where the program's exact output ended; it is not part of the
+  command's output. Commands that end their own output with a newline do not
+  show the marker.
+
 ### Very short aliases
 
 - `?`: When the entire command is exactly this single character, prints the

@@ -2,6 +2,21 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.1.5] - 2026-08-26
+
+### Added
+
+- Mark shell-inserted line endings with `↩️`, making the exact boundary of a
+  command's output visible when the command does not emit a trailing newline.
+- Document this marker under **Special Interactions → Terminal behavior**.
+
+### Fixed
+
+- Preserve the final line of any interactive command whose output has no
+  trailing newline, including streamed external commands such as
+  `printf hello`. bunmsh now queries the terminal cursor before repainting the
+  prompt and only inserts a marked newline when the cursor remains mid-line.
+
 ## [0.1.4] - 2026-08-26
 
 ### Added

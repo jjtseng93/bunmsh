@@ -163,6 +163,7 @@ async function interactive(state) {
   let promptRegions = [];
   let newTabRegion = [];
   let pendingClick = null;
+  let pendingCursorQuery = null;
   let lastTabClick = null;
   let mouseCommandRunning = false;
   const runTabShortcut = (args) => {
@@ -195,11 +196,30 @@ async function interactive(state) {
       readline.prompt(true);
     });
   };
+  const queryCursor = () => new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingCursorQuery?.resolve === resolve) pendingCursorQuery = null;
+      resolve(null);
+    }, 60);
+    pendingCursorQuery = {
+      resolve(position) {
+        clearTimeout(timer);
+        pendingCursorQuery = null;
+        resolve(position);
+      },
+    };
+    process.stdout.write("\x1b[6n");
+  });
   const filteredInput = terminal ? mouseInput((mouse) => {
     if (!mouse.press || (mouse.button & 3) !== 0 || (mouse.button & 32)) return;
     pendingClick = { ...mouse, at: Date.now() };
     process.stdout.write("\x1b[6n");
-  }, ({ row }) => {
+  }, (position) => {
+    if (pendingCursorQuery) {
+      pendingCursorQuery.resolve(position);
+      return;
+    }
+    const { row } = position;
     if (!pendingClick || !readline) return;
     const click = pendingClick;
     pendingClick = null;
@@ -364,6 +384,12 @@ async function interactive(state) {
           if (terminal) process.stdin.setRawMode(true);
           if (terminal) {
             process.stdin.pipe(filteredInput);
+            // External commands stream directly to the terminal, so their
+            // final byte cannot be inferred from an execution result. Ask the
+            // terminal where the cursor is and terminate an unfinished line
+            // before readline paints a multi-line prompt over it.
+            const cursor = await queryCursor();
+            if (cursor && cursor.column > 1) process.stdout.write("↩️\n");
             mouseTracking = Boolean(state.mouseTracking);
             if (mouseTracking) process.stdout.write(MOUSE_ON);
           }

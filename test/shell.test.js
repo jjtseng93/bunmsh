@@ -775,8 +775,8 @@ describe("CLI", () => {
     ]);
     expect(status).toBe(0);
     expect(stdout).toContain("Changelog");
-    expect(stdout).toContain("0.1.4");
-    expect(stdout).toContain("Alt-P");
+    expect(stdout).toContain("0.1.5");
+    expect(stdout).toContain("↩️");
     expect(stderr).toBe("");
   });
 
@@ -826,6 +826,36 @@ describe("CLI", () => {
     } finally { terminal.close(); }
     expect(transcript).toContain("\x1b[31m$\x1b[0m ");
     expect(transcript).toContain("1\r\n");
+  });
+
+  test("preserves command output without a trailing newline before repainting", async () => {
+    const cwd = new URL("..", import.meta.url).pathname;
+    let transcript = "";
+    let terminal;
+    terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) {
+        const text = data.toString();
+        transcript += text;
+        if (text.includes("\x1b[6n")) terminal.write("\x1b[4;4R");
+      },
+    });
+    const entry = join(new URL("..", import.meta.url).pathname, "src/main.js");
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, entry, "-i"],
+      cwd,
+      env: { ...process.env, PS1: "> " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("printf hello\r");
+      await Bun.sleep(150);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("hello\x1b[6n↩️\r\n> ");
   });
 
   test("shows all tab paths and marks the active tab", async () => {
