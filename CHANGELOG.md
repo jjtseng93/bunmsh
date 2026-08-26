@@ -2,6 +2,30 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.1.9] - 2026-08-27
+
+### Added
+
+- Render Markdown previews in `serve` with heading anchors, passing
+  `{ headings: true }` to `Bun.markdown.html`, so long documents get linkable
+  section ids.
+- Document `serve` in its own README section, pulled out of the fallback
+  builtin table: port selection and its fallback, the `q`/`quit`/`exit` and `o`
+  controls, exit codes, directory listings and previews, and the
+  non-interactive forms such as `bmsh -cc builtin serve <directory>` that start
+  it from another shell or a script.
+- Document packing a folder into a single executable without a source
+  checkout — `npx bunmsh --build-exe --asset /absolute/path/mysite`, then
+  `bmsh -cc builtin serve 'B:/~BUN/mysite'` — including the absolute-path
+  requirement, the PowerShell and `cmd.exe` spellings, and the trade-off
+  against the `package.json` `assets` route, which is what makes the same file
+  readable through `readAssetText` from a checkout and from the binary.
+- Document that `serve` always answers a directory with its listing rather than
+  the directory's `index.html`, and point site hosting at `npx serve` or Bun
+  1.4's `{ dir }` routes, which do send it.
+- Document that HTTP Range is not honoured for files inside a compiled binary:
+  Bun answers those with the whole body and a `200`.
+
 ## [0.1.8] - 2026-08-27
 
 ### Added
