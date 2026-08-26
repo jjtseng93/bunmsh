@@ -426,6 +426,104 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `time` | Command and arguments; reports `real` elapsed time in milliseconds, with each decimal magnitude group shown in a different color |
 | `yes` | Optional output words; no flags |
 
+### The `serve` command
+
+`serve [directory]` starts a minimal HTTP file server; it is a PATH-fallback
+builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
+`builtin serve ...`.
+
+- Serves the current working directory, or the directory given as the only
+  argument. More than one argument is a usage error.
+- `PORT` selects the port; it defaults to `3000`, and only that default falls
+  back to a free port chosen by the OS when it is taken — an explicit `PORT`
+  that is already in use is an error. The URL it settled on is printed on
+  startup.
+- While it runs it holds the foreground. On a TTY it also takes single-word
+  controls on stdin: `q`, `quit` or `exit` stops it, and `o` opens the URL with
+  `xdg-open`. `Ctrl-C` and `SIGTERM` stop it too, exiting `130` and `143`
+  respectively; every other way out exits `0`.
+- Directory pages list the entries by name, each with an emoji for its kind,
+  and hide dotfiles. Previewable files get a `🔍` link next to them: it renders
+  Markdown, and pretty-prints JSON, JSON5, JSONC, JSONL, YAML and TOML, plus
+  XML when the running Bun provides `Bun.XML.parse`.
+- Files are served through a whole, unsliced `Bun.file()` response, so Bun's
+  own `Range` handling applies — `206` and `416` included.
+- Paths that would escape the served directory are rejected with `400`, and a
+  failing request cannot take the server down; it answers `500` and stays up.
+- It does not have to be started from inside an interactive bunmsh. Any of the
+  non-interactive entry points reaches it, which is what makes it usable as a
+  one-liner from another shell, a script, or a service unit:
+
+  ```sh
+  ./bmsh -cc builtin serve ./public      # argv as-is, no shell parsing
+  ./bmsh -c 'builtin serve ./public'             # shell text, expansions apply
+  bun ./src/main.js -cc builtin serve .  # from a source checkout
+  npx bunmsh -cc builtin serve .         # without installing anything
+  ```
+
+  `-cc` forwards everything after it as argv, so the calling shell does the
+  quoting and bunmsh performs no expansion of its own. `builtin` is what pins
+  the choice to this implementation; drop it and a `serve` executable found in
+  `PATH` would win. The `q`/`o` controls still work whenever stdin is a TTY,
+  and `Ctrl-C` stops it either way.
+
+#### Serving a folder packed into the executable
+
+A compiled `bmsh` can serve a directory that lives *inside* the binary, so a
+whole site can ship as one file and be browsed with a real web server:
+
+- Declare the folder in `package.json` under `assets`. It is packed
+  recursively, and paths are relative to the project root:
+
+  ```json
+  { "assets": ["README.md", "CHANGELOG.md", "site"] }
+  ```
+
+- Build with `ASSETS_BUNFS=1`. That back end stores the files individually in
+  the binary's virtual filesystem, where they have real paths that `serve` can
+  stat and read. The default tar back end unpacks into memory instead, and
+  memory has no paths, so it cannot be served:
+
+  ```sh
+  ASSETS_BUNFS=1 bun ./src/main.js --build-exe
+  ```
+
+- Inside the binary the files keep the `assets/<name>@<version>/` namespace the
+  packer gives them, below the virtual root — which is `/$bunfs/root` on Linux
+  and macOS and `B:/~BUN/root` on Windows. For this project at 0.1.8 the folder
+  above therefore lands at:
+
+  ```
+  /$bunfs/root/assets/bunmsh@0.1.8/site        # Linux, macOS
+  B:/~BUN/root/assets/bunmsh@0.1.8/site        # Windows
+  ```
+
+- Pass that path to `serve`, in single quotes so the shell does not expand
+  `$bunfs`:
+
+  ```sh
+  ./bmsh
+  $ serve '/$bunfs/root/assets/bunmsh@0.1.8/site'
+  ```
+
+  Or without entering the shell at all — one command that starts a web server
+  for a folder that only exists inside the binary:
+
+  ```sh
+  ./bmsh -cc builtin serve '/$bunfs/root/assets/bunmsh@0.1.8/site'
+  ```
+
+- Either spelling works on either platform, and the `/root` part is optional —
+  `serve` rewrites `/$bunfs`, `/$bunfs/root` and `B:/~BUN/root` to whichever
+  root the running binary actually uses. Serving `'/$bunfs/root'` itself
+  browses everything in the binary, the executable's own bundled files
+  included.
+
+This only works from a compiled executable: in a source checkout there is no
+virtual filesystem, so `serve ./site` reads the folder from disk instead. See
+[`single-exe/README.md`](single-exe/README.md) for the packing details and the
+trade-offs between the two asset back ends.
+
 ### PATH-fallback builtins
 
 | Command | Supported flags/forms |
@@ -454,7 +552,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
-| `serve` | `serve [directory]`; starts the minimal HTTP file server in cwd, or in the supplied directory; `PORT` selects the port; enter `q`, `quit`, or `exit` to stop, or `o` to open the URL with `xdg-open`; directory pages provide `🔍` rendered Markdown and pretty-printed JSON/JSON5/JSONC/JSONL/YAML/TOML previews, plus XML when the running Bun provides `Bun.XML.parse` |
+| `serve` | `serve [directory]`; see [The `serve` command](#the-serve-command) above |
 | `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
 | `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |
