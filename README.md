@@ -447,7 +447,9 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
   Markdown, and pretty-prints JSON, JSON5, JSONC, JSONL, YAML and TOML, plus
   XML when the running Bun provides `Bun.XML.parse`.
 - Files are served through a whole, unsliced `Bun.file()` response, so Bun's
-  own `Range` handling applies — `206` and `416` included.
+  own `Range` handling applies — `206` and `416` included. Files inside a
+  compiled binary are the exception: Bun answers those with the whole body and
+  a `200`, whatever `Range` asked for.
 - Paths that would escape the served directory are rejected with `400`, and a
   failing request cannot take the server down; it answers `500` and stays up.
 - It does not have to be started from inside an interactive bunmsh. Any of the
