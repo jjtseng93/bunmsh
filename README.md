@@ -471,60 +471,72 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
 
 #### Serving a folder packed into the executable
 
+- What this is for is handing a folder of files to someone, not hosting a site.
+- That is why `serve` never answers a directory with its `index.html`:
+- `/` is always the listing, so the folder stays browsable 
+- and every file — the index page included — is one click away. 
+
+- Two other tools do the site case properly
+  * `npx serve <dir>` sends `index.html` for any directory that has one and falls
+back to a listing for any directory that does not. 
+  * Bun 1.4's directory routes do it in-process, streaming with `sendfile` and handling `Content-Type`, `ETag`, `Last-Modified`, `304` and `Range`; a directory holding an `index.html` gets it, one without gets `404`:
+
+```js
+Bun.serve({ routes: { "/static/*": { dir: "./public" } } });
+```
+
 A compiled `bmsh` can serve a directory that lives *inside* the binary, so a
-whole site can ship as one file and be browsed with a real web server:
+whole folder ships as one file and is browsed over HTTP wherever it lands.
+Nothing needs to be checked out or configured — two commands do it:
 
-- Declare the folder in `package.json` under `assets`. It is packed
-  recursively, and paths are relative to the project root:
+```sh
+npx bunmsh --build-exe --asset /absolute/path/to/mysite
+./bmsh -cc builtin serve 'B:/~BUN/mysite'
+```
 
-  ```json
-  { "assets": ["README.md", "CHANGELOG.md", "site"] }
-  ```
+On Windows the build appends `.exe` to the output name, so the same two lines
+read:
 
-- Build with `ASSETS_BUNFS=1`. That back end stores the files individually in
-  the binary's virtual filesystem, where they have real paths that `serve` can
-  stat and read. The default tar back end unpacks into memory instead, and
-  memory has no paths, so it cannot be served:
+```powershell
+npx bunmsh --build-exe --asset C:\path\to\mysite
+./bmsh.exe -cc builtin serve 'B:/~BUN/mysite'
+```
 
-  ```sh
-  ASSETS_BUNFS=1 bun ./src/main.js --build-exe
-  ```
+PowerShell's single quotes are literal, exactly like the POSIX shell's, so the
+argument itself is written the same way on both. `cmd.exe` has no single
+quotes — it would hand them to the program as part of the path — so there the
+line is `.\bmsh.exe -cc builtin serve "B:/~BUN/mysite"`.
 
-- Inside the binary the files keep the `assets/<name>@<version>/` namespace the
-  packer gives them, below the virtual root — which is `/$bunfs/root` on Linux
-  and macOS and `B:/~BUN/root` on Windows. For this project at 0.1.8 the folder
-  above therefore lands at:
+- Everything after `--build-exe` is forwarded to `bun build`, which is how
+  `--asset` reaches the compile step. `--build-for <target>` takes the same
+  trailing flags, so a cross-compiled binary can carry the folder too.
+- **The path has to be absolute.** The compile runs from the installed
+  package's own directory, wherever npm put it, so a relative path resolves
+  somewhere else entirely and the build fails. A trailing slash is harmless.
+- `--asset` keeps only the **basename** of the folder, and that name becomes a
+  root inside the binary: `/absolute/path/to/mysite` is served as
+  `B:/~BUN/mysite`, or equivalently `/$bunfs/root/mysite`. `serve` accepts
+  either spelling on either platform and treats the `/root` part as optional,
+  so one argument works on Linux, macOS and Windows alike. Quote it: both the
+  POSIX shells and PowerShell would otherwise expand `$bunfs` to nothing.
+- The folder is copied in whole, recursively, and `./bmsh` is written to the
+  current directory, along with the `bmsh.meta.json` and `bmsh.meta.md` build
+  reports. Only the executable is needed to run it; the two reports can be
+  deleted.
+- Serving `'B:/~BUN'` instead browses the binary's whole virtual root, which
+  also holds the executable itself and bunmsh's own embedded assets.
+- Only a compiled executable has that virtual filesystem. From a source
+  checkout the same folder is just a folder: `serve ./mysite`.
 
-  ```
-  /$bunfs/root/assets/bunmsh@0.1.8/site        # Linux, macOS
-  B:/~BUN/root/assets/bunmsh@0.1.8/site        # Windows
-  ```
-
-- Pass that path to `serve`, in single quotes so the shell does not expand
-  `$bunfs`:
-
-  ```sh
-  ./bmsh
-  $ serve '/$bunfs/root/assets/bunmsh@0.1.8/site'
-  ```
-
-  Or without entering the shell at all — one command that starts a web server
-  for a folder that only exists inside the binary:
-
-  ```sh
-  ./bmsh -cc builtin serve '/$bunfs/root/assets/bunmsh@0.1.8/site'
-  ```
-
-- Either spelling works on either platform, and the `/root` part is optional —
-  `serve` rewrites `/$bunfs`, `/$bunfs/root` and `B:/~BUN/root` to whichever
-  root the running binary actually uses. Serving `'/$bunfs/root'` itself
-  browses everything in the binary, the executable's own bundled files
-  included.
-
-This only works from a compiled executable: in a source checkout there is no
-virtual filesystem, so `serve ./site` reads the folder from disk instead. See
-[`single-exe/README.md`](single-exe/README.md) for the packing details and the
-trade-offs between the two asset back ends.
+`--asset` hands the files to Bun directly and bypasses bunmsh's asset packing
+system. That system is the other way to do this — the folder is declared in
+`package.json` under `assets` and the build runs with `ASSETS_BUNFS=1` — and
+what it buys is source-level access: `readAssetText` and `readAssetBytes`
+answer the same key whether the file is embedded or still on disk, so the same
+JavaScript runs from a checkout and from the binary. `--asset` alone gives no
+such reader; the files exist only as paths inside the binary. See
+[`single-exe/README.md`](single-exe/README.md) for that route and for the
+trade-offs between its two back ends.
 
 ### PATH-fallback builtins
 
