@@ -14,6 +14,9 @@ All notable user-visible changes to bunmsh are documented here.
   `Bun.markdown.html`; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, and TOML are
   parsed by their corresponding runtime parser and pretty-printed as HTML.
   XML is also previewed when the running Bun provides `Bun.XML.parse`.
+- Add basic syntax colouring to structured-data previews, following the
+  statement, string, escape, number, and constant groups from jsmdcui's
+  `runtime/syntax/json.yaml` after parser output is pretty-printed as JSON.
 - Add interactive `serve` controls: `q`, `quit`, and `exit` stop the server,
   while `o` opens its URL through `xdg-open`.
 - Accept both `/$bunfs/...` and `B:/~BUN/...` serve paths on every platform,
@@ -22,6 +25,9 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Fixed
 
+- Keep `serve` running after malformed preview data or any other uncaught
+  request-handler exception; parser failures return 422 and the outer request
+  boundary converts unexpected failures to an isolated HTTP 500 response.
 - Prevent Termux foreground/resume terminal resize events from repainting the
   shell's cwd prompt over a running server or other foreground command.
 - Keep the interactive shell alive when Ctrl-C interrupts the prompt or a

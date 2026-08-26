@@ -7,9 +7,7 @@ import { iconFor } from "./src/fancy-ls.js";
 
 let root = process.cwd();
 
-const escapeHtml = (value) => value.replace(/[&<>"']/g, (character) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-})[character]);
+const escapeHtml = (value) => Bun.escapeHTML(value);
 
 const PARSERS = new Map([
   ["json", { name: "json.parse", parse: JSON.parse }],
@@ -46,6 +44,16 @@ const page = (title, body) => `<!doctype html>
   a:hover { text-decoration: underline }
   pre { padding: 1rem; overflow: auto; white-space: pre-wrap; background: color-mix(in srgb, CanvasText 7%, Canvas) }
   code { font: inherit }
+  .json-statement { color: #b0005a }
+  .json-string { color: #6b5d00 }
+  .json-special { color: #087f5b }
+  .json-number, .json-constant { color: #5f3dc4 }
+  @media (prefers-color-scheme: dark) {
+    .json-statement { color: #f92672 }
+    .json-string { color: #e6db74 }
+    .json-special { color: #a6e22e }
+    .json-number, .json-constant { color: #ae81ff }
+  }
 </style>
 ${body}`;
 
@@ -56,6 +64,45 @@ const pretty = (value) => {
   } catch {
     return Bun.inspect(value, { colors: false, depth: Infinity });
   }
+};
+
+// Mirrors the useful groups in jsmdcui/runtime/syntax/json.yaml for the
+// strict JSON emitted by pretty(): statement keys, strings and escapes,
+// numbers, and true/false/null constants.
+export const highlightJson = (source) => {
+  const input = String(source);
+  const token = /"(?:\\(?:u[\da-fA-F]{4}|.)|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g;
+  let output = "", cursor = 0, match;
+  const stringHtml = (value) => {
+    let html = "", offset = 0;
+    for (const escape of value.matchAll(/\\(?:u[\da-fA-F]{4}|.)/g)) {
+      html += escapeHtml(value.slice(offset, escape.index));
+      html += `<span class="json-special">${escapeHtml(escape[0])}</span>`;
+      offset = escape.index + escape[0].length;
+    }
+    return html + escapeHtml(value.slice(offset));
+  };
+  while ((match = token.exec(input))) {
+    output += escapeHtml(input.slice(cursor, match.index));
+    const value = match[0];
+    let end = token.lastIndex;
+    if (value.startsWith('"')) {
+      const propertyEnd = /^\s*:/.exec(input.slice(end));
+      if (propertyEnd) {
+        end += propertyEnd[0].length;
+        output += `<span class="json-statement">${escapeHtml(input.slice(match.index, end))}</span>`;
+      } else {
+        output += `<span class="json-string">${stringHtml(value)}</span>`;
+      }
+    } else if (value === "true" || value === "false" || value === "null") {
+      output += `<span class="json-constant">${value}</span>`;
+    } else {
+      output += `<span class="json-number">${value}</span>`;
+    }
+    cursor = end;
+    token.lastIndex = end;
+  }
+  return output + escapeHtml(input.slice(cursor));
 };
 
 const previewResponse = async (entry) => {
@@ -69,7 +116,7 @@ const previewResponse = async (entry) => {
     const parser = PARSERS.get(kind);
     const output = pretty(parser.parse(source));
     return new Response(page(`${entry.name} — ${parser.name}`,
-      `<p><a href="${encodeURIComponent(entry.name)}">← ${escapeHtml(entry.name)}</a></p>\n<h1>${escapeHtml(entry.name)}</h1>\n<pre><code>${escapeHtml(output)}</code></pre>`), {
+      `<p><a href="${encodeURIComponent(entry.name)}">← ${escapeHtml(entry.name)}</a></p>\n<h1>${escapeHtml(entry.name)}</h1>\n<pre><code>${highlightJson(output)}</code></pre>`), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   } catch (error) {
@@ -186,13 +233,28 @@ const handleRequest = async (request) => {
   return new Response(Bun.file(resolved.path));
 };
 
+const safeHandleRequest = async (request) => {
+  try {
+    return await handleRequest(request);
+  } catch (error) {
+    // Keep an unexpected renderer, filesystem, or runtime exception local to
+    // this request. Bun.serve stays alive and the next request is unaffected.
+    console.error("bunmsh: serve: request failed:", error);
+    return new Response(page("Internal Server Error",
+      "<h1>Internal Server Error</h1>\n<p>The server is still running.</p>"), {
+      status: 500,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+};
+
 export function main(directory = process.argv[2] ?? process.cwd()) {
   // The virtual mount itself is not stat-able. import.meta.dirname points at
   // its real root on each platform: /$bunfs/root or B:/~BUN/root.
   root = resolve(resolveBunfsPath(directory) ?? directory);
   const serverOptions = {
     port: Number(process.env.PORT ?? 3000),
-    fetch: handleRequest,
+    fetch: safeHandleRequest,
   };
   let server;
   try {

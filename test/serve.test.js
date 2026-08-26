@@ -1,11 +1,23 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { main as startFileServer, resolveBunfsPath } from "../serve.js";
+import { highlightJson, main as startFileServer, resolveBunfsPath } from "../serve.js";
 
 const cwd = join(import.meta.dir, "serve");
 let previousPort;
 let server;
+
+test("serve highlights pretty JSON using jsmdcui json syntax groups", () => {
+  const html = highlightJson('{"key":"line\\n <tag> & \\"quoted\\" \'apostrophe\'","number":12,"ok":true,"empty":null}');
+  expect(html).toContain('<span class="json-statement">&quot;key&quot;:</span>');
+  expect(html).toContain('<span class="json-special">\\n</span>');
+  expect(html).toContain('<span class="json-number">12</span>');
+  expect(html).toContain('<span class="json-constant">true</span>');
+  expect(html).toContain('<span class="json-constant">null</span>');
+  expect(html).toContain("&lt;tag&gt; &amp;");
+  expect(html).toContain("&#x27;apostrophe&#x27;");
+  expect(html).not.toContain("<tag>");
+});
 
 test("serve accepts either bunfs spelling and derives the platform path", () => {
   expect(resolveBunfsPath("/$bunfs", "/$bunfs/root")).toBe("/$bunfs/root");
@@ -65,10 +77,16 @@ test("serve exposes linked Markdown and parser previews", async () => {
   for (const [path, expected] of previews) {
     const response = await fetch(new URL(path, server.url));
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain(expected.replaceAll('"', "&quot;"));
+    const html = await response.text();
+    expect(html.replace(/<\/?span(?: [^>]*)?>/g, ""))
+      .toContain(expected.replaceAll('"', "&quot;"));
+    expect(html).toContain('class="json-statement"');
   }
 
   expect((await fetch(new URL("bad.json-json.parse", server.url))).status).toBe(422);
+  const afterParserError = await fetch(server.url);
+  expect(afterParserError.status).toBe(200);
+  expect(await afterParserError.text()).toContain("README.md");
 });
 
 test("serve keeps native HTTP Range handling on original files", async () => {
@@ -96,6 +114,7 @@ test("serve discovers request-time files without rebuilding routes", async () =>
     rmSync(path, { force: true });
   }
   expect((await fetch(new URL("created-after-start.txt", server.url))).status).toBe(404);
+  expect((await fetch(server.url)).status).toBe(200);
 });
 
 test("serve rejects paths escaping the served root", async () => {
