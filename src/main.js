@@ -623,3 +623,12 @@ async function main(argv) {
 
 await buildEarlyExit(process.argv, "bmsh");
 process.exitCode = await main(process.argv.slice(2));
+// By this point every await in main() (including interactive()'s own
+// cleanup and every writeStream() call for command output) has already
+// finished, so there is no legitimate reason left for the process to stay
+// alive. Force the exit rather than letting the event loop decide: a killed
+// pipeline stage (see runExternal's stopUpstream handling) can leave behind
+// a stream operation Bun never lets finish or be canceled, which otherwise
+// hangs the shell forever even though the pipeline itself already produced
+// its result correctly.
+process.exit(process.exitCode);

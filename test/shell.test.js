@@ -976,7 +976,18 @@ describe("CLI", () => {
       terminal.write("exit\r");
       expect(await proc.exited).toBe(0);
     } finally { terminal.close(); }
-    expect(transcript).toContain("hello\x1b[6n↩️\r\n> ");
+    // The "↩️" marker must appear right after the unterminated output and its
+    // cursor-position query, before the next prompt is repainted. The exact
+    // bytes readline uses to repaint that prompt (padding cursor moves and
+    // erase-to-end-of-line codes around the "> " text) are an internal
+    // implementation detail of the readline version in use, not something
+    // this shell controls, so check the marker's position and that a fresh
+    // prompt follows it, rather than pinning readline's own redraw bytes.
+    const markerIndex = transcript.indexOf("hello\x1b[6n↩️\r\n");
+    expect(markerIndex).toBeGreaterThan(-1);
+    const afterMarker = transcript.slice(markerIndex);
+    expect(afterMarker.indexOf("> ")).toBeGreaterThan(-1);
+    expect(afterMarker.indexOf("> ")).toBeLessThan(afterMarker.indexOf("exit"));
   });
 
   test("Ctrl-C returns to the prompt while Ctrl-D exits, including during serve", async () => {

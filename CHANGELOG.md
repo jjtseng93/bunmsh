@@ -34,6 +34,19 @@ All notable user-visible changes to bunmsh are documented here.
   closes itself on an empty-line Ctrl-D, so this transparently rebuilds it),
   the same as mksh, instead of exiting the whole session.
 
+### Fixed
+
+- Fix an unrelated pre-existing hang found while working on the above: a
+  pipeline whose downstream stage closes early (`yes | head -n 3`) could
+  leave the killed upstream stage's own output-forwarding stuck forever —
+  Bun never releases the reader lock it holds on that pipeline link's read
+  side once the stage reading it has exited, so a write already in flight
+  into it backpressures permanently and cannot be canceled from outside.
+  That write is now abandoned instead of waited on once the downstream stage
+  is known to be done, and the shell forces its own exit once a script or
+  `-c` command finishes rather than leaving that abandoned operation to keep
+  the process running forever.
+
 ## [0.1.9] - 2026-08-27
 
 ### Added

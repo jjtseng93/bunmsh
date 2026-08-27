@@ -2729,20 +2729,37 @@ async function runExternal(
   try {
     const proc = Bun.spawn(options);
     const pipelineKillSignal = runtimeOptions.pipelineKillSignal ?? "SIGPIPE";
-    runtimeOptions.onSpawn?.(proc, pipelineKillSignal);
+    // A downstream pipeline stage that closes early (for example `head -n 3`)
+    // leaves nothing reading the other end of `stdoutSink`/`stderrSink` (a
+    // link's readable side, fed as the next stage's stdin). Bun never
+    // releases the reader lock it holds on that side even once the process
+    // reading it has exited, so a write already in flight into it (from the
+    // pipeTo() calls below) backpressures forever instead of settling, and
+    // there is no way to cancel or abort it from out here to unstick it —
+    // every avenue requires a lock only Bun's own, already-exited consumer
+    // holds. So this does not wait for that write to actually finish once
+    // the caller (see onSpawn below) says the downstream stage is done;
+    // it is abandoned in place, harmless since the killed process here
+    // will not produce anything more for it to forward anyway.
+    const abandonStreaming = new Promise((resolve) => {
+      runtimeOptions.onSpawn?.(proc, pipelineKillSignal, resolve);
+    });
     const outputPromise = captureStdout
       ? new Response(proc.stdout).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
     const streamPromise = stdoutSink
-      ? proc.stdout.pipeTo(stdoutSink).catch(() => {
-          // A downstream stage (for example `head`) closed early. Bun's
-          // ReadableStream bridge does not always turn that into SIGPIPE for
-          // the producer, so deliver the normal shell signal explicitly.
-          try { proc.kill(pipelineKillSignal); } catch {}
-        })
+      ? Promise.race([
+          proc.stdout.pipeTo(stdoutSink).catch(() => {
+            try { proc.kill(pipelineKillSignal); } catch {}
+          }),
+          abandonStreaming,
+        ])
       : Promise.resolve();
     const errorStreamPromise = runtimeOptions.stderrSink
-      ? proc.stderr.pipeTo(runtimeOptions.stderrSink).catch(() => {})
+      ? Promise.race([
+          proc.stderr.pipeTo(runtimeOptions.stderrSink).catch(() => {}),
+          abandonStreaming,
+        ])
       : Promise.resolve();
     const errorPromise = captureStderr
       ? new Response(proc.stderr).arrayBuffer()
@@ -3189,6 +3206,13 @@ async function runPipeline(pipeline, state, options = {}) {
     const processInfo = processes[index];
     if (processInfo) {
       try { processInfo.proc.kill(processInfo.signal); } catch {}
+      // Killing the process only stops it from producing more output. Its
+      // own `proc.stdout.pipeTo()` forwarding that output into this link can
+      // still be stuck mid-write, backpressured forever with nobody left to
+      // read the link's other end now that the downstream stage is done —
+      // see runExternal for why that write can't be canceled directly.
+      // This just stops waiting on it instead.
+      try { processInfo.detachStream(); } catch {}
     }
   };
   const stages = pipeline.map((command, i) => {
@@ -3200,8 +3224,8 @@ async function runPipeline(pipeline, state, options = {}) {
       stdoutSink: last ? null : links[i].writable,
       pipelineStage: true,
       subshell: true,
-      onSpawn(proc, signal) {
-        processes[i] = { proc, signal };
+      onSpawn(proc, signal, detachStream) {
+        processes[i] = { proc, signal, detachStream };
         if (finished[i + 1]) stopUpstream(i);
       },
       onExit() {
