@@ -389,6 +389,30 @@ describe("execution", () => {
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
+  test("fallback ls is lsfancy; Bun Shell's own ls moved to lsbun", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-ls-rename-"));
+    try {
+      await Bun.write(join(cwd, "photo.png"), "image");
+      const asLs = await run("builtin ls", { cwd });
+      expect(asLs.status).toBe(0);
+      expect(asLs.stdout).toContain("🖼️ photo.png");
+      const asLsfancy = await run("builtin lsfancy", { cwd });
+      expect(asLsfancy.stdout).toBe(asLs.stdout);
+      // Bun Shell's own implementation is still reachable, just renamed, and
+      // produces its old plain (no emoji) output.
+      const asLsbun = await run("builtin lsbun", { cwd });
+      expect(asLsbun.status).toBe(0);
+      expect(asLsbun.stdout).toContain("photo.png");
+      expect(asLsbun.stdout).not.toContain("🖼️");
+      // Errors report the name actually invoked, not a hardcoded "lsfancy".
+      const badFlag = await run("builtin ls -Z", { cwd });
+      expect(badFlag).toMatchObject({ status: 2, stdout: "", stderr: "bunmsh: ls: unsupported option: -Z\n" });
+      const missing = await run("builtin ls does-not-exist", { cwd });
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain("bunmsh: ls: does-not-exist:");
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
   test("fallback find filters paths and supports both -exec modes", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bunmsh-find-"));
     try {

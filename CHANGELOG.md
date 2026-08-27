@@ -41,6 +41,15 @@ All notable user-visible changes to bunmsh are documented here.
   distinct 🚫 icon instead of the normal 🔗, in both the plain and `-l`
   listing forms.
 
+### Changed
+
+- The `ls` fallback builtin (used when no PATH `ls` is found, e.g. on
+  Windows, or under `--builtin-only`) is now `lsfancy` instead of Bun Shell's
+  own `ls`, since it now covers more real `ls` behavior (working `-h`/`-t`/
+  `-r`, a symlink's target, alphabetical default order) than Bun Shell's
+  version does. Bun Shell's `ls` is still reachable, renamed to `lsbun`.
+  `lsfancy` itself is unchanged and still callable under its own name.
+
 ### Fixed
 
 - Fix an unrelated pre-existing hang found while working on the above: a

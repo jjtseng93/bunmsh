@@ -115,7 +115,7 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
         else if (flag === "R") options.recursive = true;
         else if (flag === "t") options.time = true;
         else if (flag === "r") options.reverse = true;
-        else return { status: 2, stdout: "", stderr: `bunmsh: lsfancy: unsupported option: -${flag}\n` };
+        else return { status: 2, stdout: "", stderr: `bunmsh: ${argv[0]}: unsupported option: -${flag}\n` };
       }
     } else operands.push(argument);
   }
@@ -153,7 +153,7 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
       }
     } catch (error) {
       status = 1;
-      stderr += `bunmsh: lsfancy: ${operand}: ${error.message}\n`;
+      stderr += `bunmsh: ${argv[0]}: ${operand}: ${error.message}\n`;
     }
   };
   for (let i = 0; i < operands.length; i++) {

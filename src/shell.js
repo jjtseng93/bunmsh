@@ -1548,6 +1548,11 @@ async function runBunShellFallback(argv, state) {
   return result(output.exitCode, output.stdout, output.stderr);
 }
 
+async function runFancyLsFallback(argv, state) {
+  const output = fancyLs(argv, state);
+  return result(output.status, output.stdout, output.stderr);
+}
+
 async function runBunShellCpFallback(argv, state) {
   const cmd = IS_COMPILED
     ? [...EXECUTABLE_COMMAND, "--bun-shell-fallback", ...bunShellFallbackArgv(argv)]
@@ -2249,11 +2254,13 @@ const fallbackBuiltins = {
       return result(1, "", "bunmsh: dirname: usage: dirname string\n");
     return result(0, `${pathDirname(argv[i])}\n`);
   },
-  ls: runBunShellFallback,
-  lsfancy: async (argv, state) => {
-    const output = fancyLs(argv, state);
-    return result(output.status, output.stdout, output.stderr);
-  },
+  ls: runFancyLsFallback,
+  // Bun Shell's own `ls`, kept reachable under a different name now that
+  // plain `ls` falls back to lsfancy instead. Bun.$ dispatches on the
+  // literal command name, so argv[0] is rewritten back to "ls" for it —
+  // `lsbun` itself is not something Bun Shell knows how to run.
+  lsbun: (argv, state) => runBunShellFallback(["ls", ...argv.slice(1)], state),
+  lsfancy: runFancyLsFallback,
   mv: runBunShellFallback,
   rm: runBunShellFallback,
   mkdir: runBunShellFallback,
