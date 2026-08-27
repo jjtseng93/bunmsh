@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -30,6 +30,7 @@ import {
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
+import { fancyLs } from "../src/fancy-ls.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
 import { canonicalEnvironment, environmentValue, homeRelativePath } from "../src/environment.js";
 import { findIsRegularBuiltin } from "../src/find.js";
@@ -339,6 +340,39 @@ describe("execution", () => {
       expect(timed.status).toBe(0);
       expect(timed.stdout.indexOf("time-old.txt"))
         .toBeLessThan(timed.stdout.indexOf("time-new.txt"));
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  test("lsfancy supports -S (sort by size), -1 (one per line), and -F (classify)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-lsfancy-flags-"));
+    try {
+      await Bun.write(join(cwd, "small.txt"), "x");
+      await Bun.write(join(cwd, "big.txt"), "x".repeat(100));
+      await Bun.write(join(cwd, "script.sh"), "#!/bin/sh\n");
+      chmodSync(join(cwd, "script.sh"), 0o755);
+      mkdirSync(join(cwd, "subdir"));
+      symlinkSync("small.txt", join(cwd, "link_ok"));
+
+      const bySize = await run("builtin lsfancy -S", { cwd });
+      expect(bySize.status).toBe(0);
+      expect(bySize.stdout.indexOf("big.txt")).toBeLessThan(bySize.stdout.indexOf("small.txt"));
+
+      const classified = await run("builtin lsfancy -F", { cwd });
+      expect(classified.status).toBe(0);
+      expect(classified.stdout).toContain("subdir/");
+      expect(classified.stdout).toContain("script.sh*");
+      expect(classified.stdout).toContain("link_ok@");
+      // A plain regular file gets no classify suffix at all.
+      expect(classified.stdout).toContain("small.txt\n");
+
+      // -1 only differs from the default in a terminal (execute()'s non-tty
+      // capture path is already one entry per line either way), so exercise
+      // fancyLs directly with terminal forced on to see the effect.
+      const state = createState({ cwd });
+      const wide = fancyLs(["lsfancy"], state, true);
+      const single = fancyLs(["lsfancy", "-1"], state, true);
+      expect(wide.stdout.split("\n").filter(Boolean).length).toBeLessThan(5);
+      expect(single.stdout.split("\n").filter(Boolean).length).toBe(5);
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 

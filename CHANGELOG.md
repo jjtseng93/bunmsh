@@ -46,6 +46,10 @@ All notable user-visible changes to bunmsh are documented here.
   continuation prompt), the same as clicking inside a text field, instead of
   only reacting to clicks on tabs. Clicking past the end of the typed text
   moves the cursor to the end of the line rather than doing nothing.
+- Add `-S` (sort by size, largest first), `-1` (force one entry per line,
+  even in a terminal), and `-F` (append a classify suffix — `/` directory,
+  `@` symlink, `*` executable, `=` socket, `|` FIFO) to `lsfancy`, all
+  combinable with the existing flags (`-lSF`, etc.).
 
 ### Changed
 

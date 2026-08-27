@@ -28,8 +28,23 @@ export function iconFor(name, stats, path = null) {
   return "📄";
 }
 
-function displayEntry(entry) {
-  return `${iconFor(entry.name, entry.stats, entry.path)} ${entry.name}${entry.stats.isDirectory() ? "/" : ""}`;
+// Only touches cross-platform-safe fs.Stats methods (isDirectory/
+// isSymbolicLink/isSocket/isFIFO always return a real boolean on Windows
+// too, just typically false for socket/FIFO since NTFS directory entries
+// aren't reported as those) and the same mode-bit check iconFor already
+// uses elsewhere in this file, so this needs no platform-specific handling.
+function classifySuffix(stats) {
+  if (stats.isDirectory()) return "/";
+  if (stats.isSymbolicLink()) return "@";
+  if (stats.isSocket()) return "=";
+  if (stats.isFIFO()) return "|";
+  if (stats.mode & 0o111) return "*";
+  return "";
+}
+
+function displayEntry(entry, options) {
+  const suffix = options.classify ? classifySuffix(entry.stats) : entry.stats.isDirectory() ? "/" : "";
+  return `${iconFor(entry.name, entry.stats, entry.path)} ${entry.name}${suffix}`;
 }
 
 function columns(items, width) {
@@ -90,7 +105,9 @@ function listDirectory(path, options) {
     { name: "..", stats: lstatSync(resolve(path, "..")), path: resolve(path, "..") },
     ...entries,
   ];
-  entries.sort(options.time
+  entries.sort(options.size
+    ? (a, b) => b.stats.size - a.stats.size || a.name.localeCompare(b.name)
+    : options.time
     ? (a, b) => b.stats.mtimeMs - a.stats.mtimeMs || a.name.localeCompare(b.name)
     : (a, b) => a.name.localeCompare(b.name));
   if (options.reverse) entries.reverse();
@@ -100,7 +117,7 @@ function listDirectory(path, options) {
 export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
   const options = {
     all: false, almostAll: false, directory: false, long: false, human: false,
-    recursive: false, time: false, reverse: false,
+    recursive: false, time: false, reverse: false, size: false, one: false, classify: false,
   };
   const operands = [];
   for (const argument of argv.slice(1)) {
@@ -115,6 +132,9 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
         else if (flag === "R") options.recursive = true;
         else if (flag === "t") options.time = true;
         else if (flag === "r") options.reverse = true;
+        else if (flag === "S") options.size = true;
+        else if (flag === "1") options.one = true;
+        else if (flag === "F") options.classify = true;
         else return { status: 2, stdout: "", stderr: `bunmsh: ${argv[0]}: unsupported option: -${flag}\n` };
       }
     } else operands.push(argument);
@@ -131,7 +151,7 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
         entries = [{ name: basename(operand) || operand, stats, path }];
       else entries = listDirectory(path, options);
       if (heading) stdout += `${operand}:\n`;
-      const rendered = entries.map(displayEntry);
+      const rendered = entries.map((entry) => displayEntry(entry, options));
       if (options.long) {
         for (let i = 0; i < entries.length; i++) {
           const item = entries[i];
@@ -141,7 +161,9 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
           const suffix = target === null ? "" : ` -> ${target}`;
           stdout += `${item.stats.isDirectory() ? "d" : item.stats.isSymbolicLink() ? "l" : "-"}${modeString(item.stats.mode)} ${size.padStart(8)} ${date} ${rendered[i]}${suffix}\n`;
         }
-      } else stdout += terminal ? columns(rendered, process.stdout.columns ?? 80) : `${rendered.join("\n")}${rendered.length ? "\n" : ""}`;
+      } else stdout += terminal && !options.one
+        ? columns(rendered, process.stdout.columns ?? 80)
+        : `${rendered.join("\n")}${rendered.length ? "\n" : ""}`;
       if (options.recursive && stats.isDirectory() && !options.directory) {
         for (const entry of entries) if (entry.stats.isDirectory() && entry.name !== "." && entry.name !== "..") {
           const child = resolve(path, entry.name);
