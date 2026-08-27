@@ -139,9 +139,10 @@ pseudo-terminal tests.
   reads. It is practical rather than a byte-for-byte mksh completion engine.
 - Ghost suggestions use imported/saved history and filesystem matches after
   filtering terminal control characters.
-- Full Emacs/Vi editing-mode compatibility, user-defined key bindings,
-  multiline continuation prompts, and programmable completion are not yet
-  implemented.
+- Full Emacs/Vi editing-mode compatibility, user-defined key bindings, and
+  programmable completion are not yet implemented. `PS2` continuation
+  prompting (here-documents, open quotes/substitutions, unfinished compound
+  bodies) is implemented; see the Implemented core table above.
 - Mouse tracking is opt-in because terminal application tracking interferes
   with normal scrollback in Termux, xterm, and similar terminals.
 
