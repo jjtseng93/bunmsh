@@ -2,6 +2,29 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.1.10] - 2026-08-27
+
+### Added
+
+- Add `<<`/`<<-` here-documents. An unquoted, unescaped delimiter expands
+  parameters, command substitution, and arithmetic in the body like a
+  double-quoted string; a quoted or backslash-escaped delimiter (`<<'EOF'`,
+  `<<\EOF`) leaves it literal. `<<-` strips leading tabs from the body and the
+  terminator. Here-documents work on plain command lines, in pipelines, across
+  multiple heredocs on one command, and inside `if`/`while`/`for`/`case`
+  bodies. Like dash and bash, a script that ends before the terminator line
+  appears uses whatever was read as the body instead of raising a syntax
+  error.
+- Add `<<<` here-strings, matching mksh's `DOHERESTR | DOSCALAR` word
+  expansion: parameter, command, and arithmetic substitution run, but there is
+  no field splitting, pathname expansion, or tilde expansion, and a trailing
+  newline is appended before the word becomes stdin.
+- Fix an unrelated pre-existing crash surfaced while adding here-documents: any
+  tokenizer syntax error (for example an unterminated quote) raised while
+  probing whether a script uses compound (`if`/`while`/`for`/`case`) syntax
+  used to escape as an unhandled exception instead of the usual
+  `bunmsh: syntax error: ...` message.
+
 ## [0.1.9] - 2026-08-27
 
 ### Added

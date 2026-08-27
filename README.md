@@ -598,7 +598,9 @@ detailed compatibility snapshot.
 - Quotes, parameter/command/arithmetic expansion, IFS field splitting, tilde,
   brace, and pathname expansion.
 - Environment assignments, aliases, readonly names, positional parameters,
-  shell functions, common redirections, and `2>&1` descriptor duplication.
+  shell functions, common redirections, `2>&1` descriptor duplication,
+  here-documents (`<<`/`<<-`, with quoted/escaped delimiters suppressing
+  expansion), and mksh-style here-strings (`<<<`).
 - Regular builtins, system-command-first fallback builtins, Bun Shell fallbacks,
   and explicit lookup through `command`, `builtin`, `whence`, `type`, and
   `which`.

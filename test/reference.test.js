@@ -143,6 +143,73 @@ describe("/bin/sh reference", () => {
     });
   });
 
+  describe("here documents", () => {
+    test("feeds a heredoc body to a command's stdin", async () => {
+      await expectLikeSh("cat <<EOF\nhello world\nEOF");
+    });
+
+    test("expands parameters and command substitution in an unquoted delimiter", async () => {
+      await expectLikeSh("name=world; cat <<EOF\nhi $name, today is $(echo Tuesday)\nEOF");
+    });
+
+    test("leaves a quoted or escaped delimiter's body literal", async () => {
+      await expectLikeSh("name=world; cat <<'EOF'\nhi $name\nEOF");
+      await expectLikeSh("name=world; cat <<\\EOF\nhi $name\nEOF");
+    });
+
+    test("<<- strips leading tabs from the body and the terminator", async () => {
+      await expectLikeSh("cat <<-EOF\n\thello\n\tEOF");
+    });
+
+    test("feeds a pipeline stage and composes with other redirects", async () => {
+      await expectLikeSh("cat <<EOF | tr a-z A-Z\nhi there\nEOF");
+    });
+
+    test("supports multiple heredocs on one command, last one wins", async () => {
+      await expectLikeSh("cat <<A <<B\nfirst\nA\nsecond\nB");
+    });
+
+    test("works inside while and if compound bodies", async () => {
+      await expectLikeSh(
+        "i=0\nwhile [ $i -lt 2 ]; do\n  cat <<EOF\nline $i\nEOF\n  i=$((i + 1))\ndone",
+      );
+      await expectLikeSh("if true; then\n  cat <<EOF\nyes branch\nEOF\nfi");
+    });
+
+    test("leniently uses whatever was read when the terminator never appears", async () => {
+      await expectLikeSh("cat <<EOF\nno terminator here");
+    });
+  });
+
+  // /bin/sh here is dash, which does not implement <<<; these compare
+  // against bunmsh's own output instead of expectLikeSh's dash reference.
+  describe("here strings (mksh extension)", () => {
+    test("feeds the expanded word plus a trailing newline to stdin", async () => {
+      const output = await invoke(bunmsh, "cat <<< hello");
+      expect(output).toEqual({ status: 0, stdout: "hello\n", stderr: "" });
+    });
+
+    test("expands parameters and command substitution", async () => {
+      const output = await invoke(bunmsh, 'x=world; cat <<< "hi $x, $(echo there)"');
+      expect(output).toEqual({ status: 0, stdout: "hi world, there\n", stderr: "" });
+    });
+
+    test("does not field-split an unquoted expansion", async () => {
+      const output = await invoke(bunmsh, 'x="a  b   c"; cat <<< $x');
+      expect(output).toEqual({ status: 0, stdout: "a  b   c\n", stderr: "" });
+    });
+
+    test("leaves a single-quoted word literal", async () => {
+      const output = await invoke(bunmsh, "x=world; cat <<< 'hi $x'");
+      expect(output).toEqual({ status: 0, stdout: "hi $x\n", stderr: "" });
+    });
+
+    test("does not tilde-expand, unlike a file redirect target", async () => {
+      const output = await invoke(bunmsh, "cat <<< ~");
+      expect(output).toEqual({ status: 0, stdout: "~\n", stderr: "" });
+    });
+  });
+
   describe("command", () => {
     test("executes a utility and preserves its status", async () => {
       await expectLikeSh(

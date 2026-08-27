@@ -15,7 +15,7 @@ semantic coverage, architecture, platform behaviour, and remaining work.
 | Lexing and lists | Comments at word boundaries, single/double quotes, escapes, newline and `;` lists, `&&`, `||`, pipelines, and `!` negation |
 | Compound grammar | One-line and multiline `if`/`elif`/`else`, `case`, `while`, `until`, `for`, shell functions, and parenthesised subshells |
 | Expansion | Parameters and common POSIX operators, mksh-style replacement, command substitution, legacy backticks, arithmetic expansion, IFS field splitting, tilde expansion, brace alternatives, and standard pathname globs |
-| Redirection | Streamed stdin/stdout/stderr truncate and append redirects, redirects on pipelines and compound commands, and common descriptor duplication such as `2>&1` |
+| Redirection | Streamed stdin/stdout/stderr truncate and append redirects, `<<`/`<<-` here-documents, `<<<` here-strings, redirects on pipelines and compound commands, and common descriptor duplication such as `2>&1` |
 | Pipelines | Stages run concurrently with Web Streams and `Bun.spawn`; large output is not collected, early-closing consumers stop upstream producers, and pipeline status comes from the final stage |
 | Commands | Aliases, functions, regular builtins, PATH lookup, system-first fallback builtins, Bun Shell fallbacks, explicit paths, and `command`/`builtin` lookup controls |
 | State | cwd tabs with shared shell state, environment and assignments, positional arguments, readonly names, aliases, functions, last/exit status, and pipeline state isolation |
@@ -34,8 +34,8 @@ pseudo-terminal tests.
 
 - Background jobs (`&`), job control, coprocesses, and asynchronous command
   lists are not implemented.
-- Here-documents, here-strings, brace command groups, `select`, arithmetic
-  commands, and `[[ ... ]]` are not implemented.
+- Brace command groups, `select`, arithmetic commands, and `[[ ... ]]` are
+  not implemented.
 - Functions and subshells cover practical cases but do not yet reproduce every
   mksh scoping, local-variable, trap, and diagnostic edge case.
 - Pipelines isolate builtin/function state through subprocess copies. Changes
@@ -59,10 +59,21 @@ pseudo-terminal tests.
 
 ### Redirection and processes
 
-- `<`, `>`, `>>`, `2>`, `2>>`, and common output descriptor duplication are
-  implemented with streaming I/O.
-- Arbitrary descriptor allocation/manipulation, descriptor variables, here-doc
-  descriptors, and every ordering edge case remain incomplete.
+- `<`, `>`, `>>`, `2>`, `2>>`, `<<`/`<<-` here-documents, `<<<` here-strings,
+  and common output descriptor duplication are implemented with streaming I/O.
+  An unquoted and unescaped heredoc delimiter expands parameters, command, and
+  arithmetic substitution in the body like a double-quoted string; a quoted or
+  backslash-escaped delimiter leaves the body literal. Like dash and bash, a
+  script that ends before a heredoc's terminator line appears uses whatever
+  was read as the body instead of raising a syntax error.
+- `<<<word` expands `word` as mksh's `DOHERESTR | DOSCALAR` do: parameter,
+  command, and arithmetic substitution run, but there is no field splitting,
+  pathname expansion, or tilde expansion, and a trailing newline is appended.
+  It follows the same dash/`/bin/sh` comparison harness as everything else in
+  this codebase, except `<<<` itself, since dash does not implement it.
+- Arbitrary descriptor allocation/manipulation, descriptor variables,
+  heredocs targeting a descriptor other than stdin, and every ordering edge
+  case remain incomplete.
 - External processes use `Bun.spawn`; regular and fallback builtins may execute
   in-process or in a self-spawned bunmsh pipeline child depending on streaming
   and state-isolation requirements.
@@ -155,7 +166,7 @@ pseudo-terminal tests.
    general builtin cancellation, and `jobs`/`fg`/`bg`/`wait`.
 2. Shell options such as `errexit`, `nounset`, `pipefail`, `xtrace`, and POSIX
    mode, plus startup/login/restricted-shell files and modes.
-3. Here-documents, here-strings, brace groups, `[[ ... ]]`, arithmetic commands,
+3. Brace groups, `[[ ... ]]`, arithmetic commands,
    extended globs, process substitution, and fuller mksh expansion semantics.
 4. Arrays, associative arrays, namerefs, `typeset`/scope semantics, and more
    complete special builtins.

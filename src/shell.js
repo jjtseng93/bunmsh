@@ -136,14 +136,69 @@ function parameterEnd(source, start) {
   throw new ShellSyntaxError("unterminated parameter expansion", start);
 }
 
-export function tokenize(source) {
+// Real shells (dash, bash) are lenient when a script ends before a
+// here-document's terminator line ever appears: whatever was read so far
+// becomes the body instead of raising a syntax error. `strict` disables that
+// leniency so a caller (see growHeredocLine) can use the throw as a signal
+// that more input is still needed.
+function consumeHeredocBodies(source, start, pending, strict) {
+  let i = start;
+  for (const entry of pending) {
+    let body = "";
+    while (true) {
+      const newline = source.indexOf("\n", i);
+      const atEnd = newline === -1;
+      const lineEnd = atEnd ? source.length : newline;
+      const rawLine = source.slice(i, lineEnd);
+      const line = entry.strip ? rawLine.replace(/^\t+/, "") : rawLine;
+      if (line === entry.delimiterText) {
+        i = atEnd ? lineEnd : newline + 1;
+        break;
+      }
+      if (atEnd) {
+        if (strict) {
+          throw new ShellSyntaxError(
+            `unterminated here-document (wanted '${entry.delimiterText}')`,
+            entry.token.offset,
+          );
+        }
+        body += line;
+        i = lineEnd;
+        break;
+      }
+      body += `${line}\n`;
+      i = newline + 1;
+    }
+    entry.token.heredoc = { body, expand: entry.expand };
+  }
+  return i;
+}
+
+export function tokenize(source, options = {}) {
+  const strict = Boolean(options.strict);
   const tokens = [];
   let i = 0;
   let current = null;
   let atWordBoundary = true;
+  let pendingHeredocs = [];
+  let awaitingHeredocDelimiter = false;
+  let currentHeredocStrip = false;
 
   const finishWord = () => {
-    if (current) tokens.push(current);
+    if (current) {
+      if (awaitingHeredocDelimiter) {
+        pendingHeredocs.push({
+          token: current,
+          strip: currentHeredocStrip,
+          expand: current.fragments.every((fragment) =>
+            fragment.quote === "none" && !fragment.text.includes("\u0000")),
+          delimiterText: current.fragments.map((fragment) =>
+            fragment.text.replace(/\u0000(.)/g, "$1")).join(""),
+        });
+        awaitingHeredocDelimiter = false;
+      }
+      tokens.push(current);
+    }
     current = null;
   };
   const ensureWord = () => {
@@ -157,8 +212,13 @@ export function tokenize(source) {
 
     if (ch === "\n") {
       finishWord();
-      tokens.push({ type: "op", value: ";", offset: i++ });
+      tokens.push({ type: "op", value: ";", offset: i });
+      i++;
       atWordBoundary = true;
+      if (pendingHeredocs.length) {
+        i = consumeHeredocBodies(source, i, pendingHeredocs, strict);
+        pendingHeredocs = [];
+      }
       continue;
     }
     if (isSpace(ch)) {
@@ -198,6 +258,21 @@ export function tokenize(source) {
     )) {
       const value = source.slice(i, i + 3) === "2>>" ? "2>>" : two;
       tokens.push({ type: "op", value, offset: i });
+      i += value.length;
+      atWordBoundary = true;
+      continue;
+    }
+    if (!current && two === "<<" && source[i + 2] === "<") {
+      tokens.push({ type: "op", value: "<<<", offset: i });
+      i += 3;
+      atWordBoundary = true;
+      continue;
+    }
+    if (!current && two === "<<") {
+      const value = source[i + 2] === "-" ? "<<-" : "<<";
+      tokens.push({ type: "op", value, offset: i });
+      currentHeredocStrip = value === "<<-";
+      awaitingHeredocDelimiter = true;
       i += value.length;
       atWordBoundary = true;
       continue;
@@ -292,6 +367,16 @@ export function tokenize(source) {
   }
 
   finishWord();
+  if (pendingHeredocs.length) {
+    if (strict) {
+      const first = pendingHeredocs[0];
+      throw new ShellSyntaxError(
+        `unterminated here-document (wanted '${first.delimiterText}')`,
+        first.token.offset,
+      );
+    }
+    for (const entry of pendingHeredocs) entry.token.heredoc = { body: "", expand: entry.expand };
+  }
   return tokens;
 }
 
@@ -323,11 +408,18 @@ export function parse(source) {
           i++;
           continue;
         }
-        if (token.type === "op" && ["<", ">", ">>", "2>", "2>>"].includes(token.value)) {
+        if (token.type === "op" && ["<", ">", ">>", "2>", "2>>", "<<", "<<-", "<<<"].includes(token.value)) {
           const target = tokens[i + 1];
           if (!target || target.type !== "word")
-            throw new ShellSyntaxError(`redirection ${token.value} requires a path`, token.offset);
-          command.redirects.push({ op: token.value, target });
+            throw new ShellSyntaxError(
+              token.value === "<<<"
+                ? `redirection ${token.value} requires a word`
+                : token.value.startsWith("<<")
+                ? `redirection ${token.value} requires a here-document delimiter`
+                : `redirection ${token.value} requires a path`,
+              token.offset,
+            );
+          command.redirects.push({ op: token.value, target, heredoc: target.heredoc ?? null });
           i += 2;
           continue;
         }
@@ -667,7 +759,7 @@ export async function expandWord(word, state, options = {}) {
   const segments = [];
   for (let index = 0; index < word.fragments.length; index++) {
     const fragment = word.fragments[index];
-    const source = fragment.quote === "none"
+    const source = fragment.quote === "none" && !options.noTilde
       ? expandTildes(fragment.text, state, Boolean(options.assignment))
       : fragment.text;
     let text = fragment.quote === "single"
@@ -2303,6 +2395,31 @@ function compoundLogicalSource(source) {
   return logical;
 }
 
+// A leaf command line inside a compound body (if/while/for/case) is scanned
+// one physical line at a time, but a here-document's body lives on the lines
+// that follow it. Grow the line by re-tokenizing with more lines appended
+// until the heredoc(s) it opens are fully resolved, so the folded lines never
+// get misread as separate commands or as clauses of the surrounding compound.
+function growHeredocLine(lines, index) {
+  const line = lines[index];
+  if (!line.includes("<<")) return { source: line, next: index + 1 };
+  let end = index;
+  let candidate = line;
+  while (true) {
+    try {
+      tokenize(candidate, { strict: true });
+      return { source: candidate, next: end + 1 };
+    } catch (error) {
+      if (!(error instanceof ShellSyntaxError) ||
+          !error.message.startsWith("unterminated here-document"))
+        throw error;
+      end++;
+      if (end >= lines.length) throw error;
+      candidate += `\n${lines[end]}`;
+    }
+  }
+}
+
 function parseCompoundScript(source) {
   const lines = compoundLogicalSource(source.replace(/\\\r?\n/g, "")).split(/\r?\n/);
   const parseSequence = (start, stops = []) => {
@@ -2426,8 +2543,9 @@ function parseCompoundScript(source) {
         i++;
         continue;
       }
-      nodes.push({ type: "command", source: line });
-      i++;
+      const grown = growHeredocLine(lines, i);
+      nodes.push({ type: "command", source: grown.source });
+      i = grown.next;
     }
     return { nodes, index: i };
   };
@@ -2847,6 +2965,36 @@ function redirectOutput(path, append) {
   return Writable.toWeb(createWriteStream(path, { fd, autoClose: true }));
 }
 
+// Mirrors the double-quote scanning in tokenize(): an unquoted heredoc body
+// only lets backslash escape $, `, \, and a trailing newline before the rest
+// goes through the normal $/`` expansion pipeline.
+function heredocLiteralPass(text) {
+  let output = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\\" && i + 1 < text.length) {
+      const next = text[i + 1];
+      if (next === "$" || next === "\\" || next === "`" || next === "\n") {
+        if (next !== "\n") output += `\u0000${next}`;
+        i += 2;
+        continue;
+      }
+    }
+    if ((text[i] === "$" && ["(", "{"].includes(text[i + 1])) || text[i] === "`") {
+      const end = text[i + 1] === "{" ? parameterEnd(text, i) : substitutionEnd(text, i);
+      output += text.slice(i, end);
+      i = end;
+      continue;
+    }
+    output += text[i++];
+  }
+  return output;
+}
+
+function redirectHeredoc(content) {
+  return new Response(bytes(content)).body;
+}
+
 async function runCommand(command, state, options = {}) {
   state.expansionStatus = null;
   const standaloneTilde =
@@ -2896,6 +3044,27 @@ async function runCommand(command, state, options = {}) {
   for (const redirect of command.redirects) {
     if (redirect.op === "1>&2") { stdoutToStderr = true; continue; }
     if (redirect.op === "2>&1") { stderrToStdout = true; continue; }
+    if (redirect.op === "<<" || redirect.op === "<<-") {
+      const heredoc = redirect.heredoc ?? { body: "", expand: false };
+      const content = heredoc.expand
+        ? stripExpansionMarkers(
+            (await expandText(heredocLiteralPass(heredoc.body), state)).replaceAll("\u0000", ""),
+          )
+        : heredoc.body;
+      if (input instanceof ReadableStream) {
+        try { await input.cancel(); } catch {}
+      }
+      input = redirectHeredoc(content);
+      continue;
+    }
+    if (redirect.op === "<<<") {
+      const [word] = await expandWord(redirect.target, state, { single: true, noTilde: true });
+      if (input instanceof ReadableStream) {
+        try { await input.cancel(); } catch {}
+      }
+      input = redirectHeredoc(`${word}\n`);
+      continue;
+    }
     const targets = await expandWord(redirect.target, state, { single: true });
     const target = targets[0];
     const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
@@ -2994,7 +3163,7 @@ async function runPipeline(pipeline, state, options = {}) {
     const stdoutRedirected = pipeline[i].redirects.some((redirect) =>
       redirect.op === ">" || redirect.op === ">>");
     const stdinRedirected = pipeline[i + 1].redirects.some((redirect) =>
-      redirect.op === "<");
+      ["<", "<<", "<<-", "<<<"].includes(redirect.op));
     return !stdoutRedirected && !stdinRedirected;
   });
   const processes = Array(pipeline.length).fill(null);
@@ -3116,7 +3285,9 @@ export async function execute(source, state = createState(), io = {}) {
         : execution;
     }
   }
-  if (!io.simple && hasCompoundSyntax(source)) {
+  let compoundSyntax = false;
+  try { compoundSyntax = !io.simple && hasCompoundSyntax(source); } catch {}
+  if (compoundSyntax) {
     let execution;
     try { execution = await executeNodeList(parseCompoundScript(source), state); }
     catch (error) {
