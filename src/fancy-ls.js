@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readlinkSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 
 const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic"]);
@@ -16,9 +16,9 @@ function extension(name) {
   return index > 0 ? name.slice(index + 1).toLowerCase() : "";
 }
 
-export function iconFor(name, stats) {
+export function iconFor(name, stats, path = null) {
   if (stats.isDirectory()) return "📦";
-  if (stats.isSymbolicLink()) return "🔗";
+  if (stats.isSymbolicLink()) return path !== null && !existsSync(path) ? "🚫" : "🔗";
   const ext = extension(name);
   if (IMAGE.has(ext)) return "🖼️";
   if (MUSIC.has(ext)) return "🎵";
@@ -29,7 +29,7 @@ export function iconFor(name, stats) {
 }
 
 function displayEntry(entry) {
-  return `${iconFor(entry.name, entry.stats)} ${entry.name}${entry.stats.isDirectory() ? "/" : ""}`;
+  return `${iconFor(entry.name, entry.stats, entry.path)} ${entry.name}${entry.stats.isDirectory() ? "/" : ""}`;
 }
 
 function columns(items, width) {
@@ -50,6 +50,25 @@ function modeString(mode) {
   return kinds.map(([bit, letter]) => mode & bit ? letter : "-").join("");
 }
 
+function linkTarget(path) {
+  try {
+    // Node/Bun read the reparse point's stored target on Windows the same
+    // way as a POSIX symlink; only the separator needs normalizing to match
+    // the forward-slash paths the rest of the shell displays.
+    const target = readlinkSync(path);
+    return process.platform === "win32" ? target.replaceAll("\\", "/") : target;
+  } catch {
+    return null;
+  }
+}
+
+function localDateTime(ms) {
+  const date = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function humanSize(bytes) {
   if (bytes < 1024) return String(bytes);
   const units = ["K", "M", "G", "T", "P"];
@@ -62,10 +81,13 @@ function humanSize(bytes) {
 function listDirectory(path, options) {
   let entries = readdirSync(path, { withFileTypes: true })
     .filter((entry) => options.all || options.almostAll || !entry.name.startsWith("."))
-    .map((entry) => ({ name: entry.name, stats: lstatSync(resolve(path, entry.name)) }));
+    .map((entry) => {
+      const entryPath = resolve(path, entry.name);
+      return { name: entry.name, stats: lstatSync(entryPath), path: entryPath };
+    });
   if (options.all) entries = [
-    { name: ".", stats: lstatSync(path) },
-    { name: "..", stats: lstatSync(resolve(path, "..")) },
+    { name: ".", stats: lstatSync(path), path },
+    { name: "..", stats: lstatSync(resolve(path, "..")), path: resolve(path, "..") },
     ...entries,
   ];
   entries.sort(options.time
@@ -106,16 +128,18 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
       const stats = lstatSync(path);
       let entries;
       if (!stats.isDirectory() || options.directory)
-        entries = [{ name: basename(operand) || operand, stats }];
+        entries = [{ name: basename(operand) || operand, stats, path }];
       else entries = listDirectory(path, options);
       if (heading) stdout += `${operand}:\n`;
       const rendered = entries.map(displayEntry);
       if (options.long) {
         for (let i = 0; i < entries.length; i++) {
           const item = entries[i];
-          const date = new Date(item.stats.mtimeMs).toISOString().slice(0, 16).replace("T", " ");
+          const date = localDateTime(item.stats.mtimeMs);
           const size = options.human ? humanSize(item.stats.size) : String(item.stats.size);
-          stdout += `${item.stats.isDirectory() ? "d" : item.stats.isSymbolicLink() ? "l" : "-"}${modeString(item.stats.mode)} ${size.padStart(8)} ${date} ${rendered[i]}\n`;
+          const target = item.stats.isSymbolicLink() ? linkTarget(item.path) : null;
+          const suffix = target === null ? "" : ` -> ${target}`;
+          stdout += `${item.stats.isDirectory() ? "d" : item.stats.isSymbolicLink() ? "l" : "-"}${modeString(item.stats.mode)} ${size.padStart(8)} ${date} ${rendered[i]}${suffix}\n`;
         }
       } else stdout += terminal ? columns(rendered, process.stdout.columns ?? 80) : `${rendered.join("\n")}${rendered.length ? "\n" : ""}`;
       if (options.recursive && stats.isDirectory() && !options.directory) {

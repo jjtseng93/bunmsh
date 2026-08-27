@@ -33,6 +33,13 @@ All notable user-visible changes to bunmsh are documented here.
   above already has — and then keeps the shell running (Node's `readline`
   closes itself on an empty-line Ctrl-D, so this transparently rebuilds it),
   the same as mksh, instead of exiting the whole session.
+- `lsfancy -l` now shows a symlink's target (`link -> target`), including a
+  broken one, matching real `ls` — this was missing from both `lsfancy` and
+  the Bun Shell `ls` fallback it is compared against. Reading it works the
+  same way on Windows as on POSIX platforms.
+- Give a symlink whose target does not resolve (missing, or a cycle) a
+  distinct 🚫 icon instead of the normal 🔗, in both the plain and `-l`
+  listing forms.
 
 ### Fixed
 
@@ -46,6 +53,10 @@ All notable user-visible changes to bunmsh are documented here.
   is known to be done, and the shell forces its own exit once a script or
   `-c` command finishes rather than leaving that abandoned operation to keep
   the process running forever.
+- Fix `lsfancy -l` showing every file's modification time in UTC instead of
+  local time (it built the column from `Date.prototype.toISOString()`, which
+  is always UTC) — a pre-existing bug, not something the symlink-target work
+  above introduced.
 
 ## [0.1.9] - 2026-08-27
 

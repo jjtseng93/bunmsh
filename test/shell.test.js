@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -339,6 +339,53 @@ describe("execution", () => {
       expect(timed.status).toBe(0);
       expect(timed.stdout.indexOf("time-old.txt"))
         .toBeLessThan(timed.stdout.indexOf("time-new.txt"));
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  test("lsfancy -l shows a file's mtime in local time, not UTC", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-lsfancy-localtime-"));
+    try {
+      await Bun.write(join(cwd, "stamped.txt"), "x");
+      const stamp = new Date(2026, 2, 4, 9, 7, 0);
+      utimesSync(join(cwd, "stamped.txt"), stamp, stamp);
+      const pad = (n) => String(n).padStart(2, "0");
+      const expected = `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())} `
+        + `${pad(stamp.getHours())}:${pad(stamp.getMinutes())}`;
+      const long = await run("builtin lsfancy -l stamped.txt", { cwd });
+      expect(long.status).toBe(0);
+      expect(long.stdout).toContain(expected);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  test("lsfancy -l shows a symlink's target, including a broken one", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-lsfancy-symlink-"));
+    try {
+      await Bun.write(join(cwd, "target.txt"), "hi");
+      mkdirSync(join(cwd, "targetdir"));
+      symlinkSync("target.txt", join(cwd, "link_ok"));
+      symlinkSync("targetdir", join(cwd, "link_dir"));
+      symlinkSync("/nonexistent/path", join(cwd, "link_broken"));
+      symlinkSync("loop_b", join(cwd, "loop_a"));
+      symlinkSync("loop_a", join(cwd, "loop_b"));
+      const long = await run("builtin lsfancy -l", { cwd });
+      expect(long.status).toBe(0);
+      expect(long.stdout).toContain("link_ok -> target.txt");
+      expect(long.stdout).toContain("link_dir -> targetdir");
+      expect(long.stdout).toContain("link_broken -> /nonexistent/path");
+      expect(long.stdout).toContain("loop_a -> loop_b");
+      // Non-symlink entries get no "-> target" suffix at all.
+      expect(long.stdout).not.toContain("target.txt ->");
+      expect(long.stdout).not.toContain("targetdir/ ->");
+      // A working symlink still gets the plain link icon; one whose target
+      // doesn't resolve (missing, or a cycle) gets a distinct broken-link
+      // icon instead, in both the plain and long listing forms.
+      expect(long.stdout).toContain("🔗 link_ok");
+      expect(long.stdout).toContain("🚫 link_broken");
+      expect(long.stdout).toContain("🚫 loop_a");
+      expect(long.stdout).toContain("🚫 loop_b");
+      const plain = await run("builtin lsfancy", { cwd });
+      expect(plain.stdout).toContain("🔗 link_ok");
+      expect(plain.stdout).toContain("🚫 link_broken");
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 

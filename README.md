@@ -567,7 +567,7 @@ trade-offs between its two back ends.
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
 | `serve` | `serve [directory]`; see [The `serve` command](#the-serve-command) above |
-| `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); always reads the directory without using the completion cache |
+| `lsfancy` | Emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, combinable (including `-lh` and `-ltr`); `-l` shows a symlink's target (`link -> target`, including a broken one), and a symlink whose target can't be resolved (missing, or a cycle) gets a 🚫 icon instead of 🔗; always reads the directory without using the completion cache |
 | `ls` | Bun Shell currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |
 | `rm` | Bun Shell currently implements `-f`, `-r`, `-R`, `-v`, `-d`, `-i`, `-I`, `--recursive`, `--verbose`, `--dir`, and `--interactive=never|once|always`; `--preserve-root` and `--no-preserve-root` are accepted but currently have no effect |
