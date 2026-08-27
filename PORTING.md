@@ -19,7 +19,7 @@ semantic coverage, architecture, platform behaviour, and remaining work.
 | Pipelines | Stages run concurrently with Web Streams and `Bun.spawn`; large output is not collected, early-closing consumers stop upstream producers, and pipeline status comes from the final stage |
 | Commands | Aliases, functions, regular builtins, PATH lookup, system-first fallback builtins, Bun Shell fallbacks, explicit paths, and `command`/`builtin` lookup controls |
 | State | cwd tabs with shared shell state, environment and assignments, positional arguments, readonly names, aliases, functions, last/exit status, and pipeline state isolation |
-| Interactive | Readline editing, saved/Bash/Fish history import, manual history save, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, terminal-aware prompt layout, and interactive Ctrl-C/Ctrl-D handling |
+| Interactive | Readline editing, saved/Bash/Fish history import, manual history save, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, terminal-aware prompt layout, `PS2` continuation prompting for here-documents/open quotes/unfinished compound bodies, and interactive Ctrl-C/Ctrl-D handling |
 | Platforms | Forward-slash shell paths with native conversion on Windows, platform PATH delimiters, Windows executable suffix handling, Linux/Android dynamic-linker re-execution, and inherited `LD_LIBRARY_PATH` |
 | Packaging | Source execution and standalone Bun executables, including compiled self-spawn paths used by pipelines and reflected `bunmsh` commands |
 

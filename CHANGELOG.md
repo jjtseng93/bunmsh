@@ -24,6 +24,15 @@ All notable user-visible changes to bunmsh are documented here.
   probing whether a script uses compound (`if`/`while`/`for`/`case`) syntax
   used to escape as an unhandled exception instead of the usual
   `bunmsh: syntax error: ...` message.
+- Show mksh's `PS2` continuation prompt (default `"> "`) in interactive mode
+  while a here-document, an open quote/substitution, or an unfinished
+  `if`/`while`/`for`/`case` body is still being typed, instead of running each
+  line on its own as soon as Enter is pressed. Ctrl-C during a continuation
+  discards it and returns to the primary prompt; Ctrl-D runs whatever was
+  typed so far — the same leniency the non-interactive here-document fallback
+  above already has — and then keeps the shell running (Node's `readline`
+  closes itself on an empty-line Ctrl-D, so this transparently rebuilds it),
+  the same as mksh, instead of exiting the whole session.
 
 ## [0.1.9] - 2026-08-27
 

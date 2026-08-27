@@ -605,8 +605,10 @@ detailed compatibility snapshot.
   and explicit lookup through `command`, `builtin`, `whence`, `type`, and
   `which`.
 - Interactive history import/save/recall, command and file completion, ghost
-  suggestions, cwd tabs, keyboard shortcuts, optional mouse interactions, and
-  fancy directory listings.
+  suggestions, cwd tabs, keyboard shortcuts, optional mouse interactions,
+  fancy directory listings, and a `PS2` continuation prompt while a
+  here-document, an open quote/substitution, or an unfinished compound
+  command is still being typed.
 - Linux, Android/Termux, macOS, and Windows-aware paths, plus standalone builds
   and dynamic-linker re-execution support.
 

@@ -7,6 +7,7 @@ import {
   execute,
   executeArgv,
   executeBunShellFallback,
+  needsMoreInput,
   pipelineChildState,
 } from "./shell.js";
 import {
@@ -280,25 +281,7 @@ async function interactive(state) {
     const chunk = nextGhostChunk(ghost);
     return chunk ? [[`${line}${chunk}`], line] : [[], line];
   };
-  const resizeListenersBeforeReadline = terminal
-    ? new Set(process.stdout.listeners("resize"))
-    : null;
-  readline = createInterface({
-    input: filteredInput,
-    output: process.stdout,
-    terminal,
-    completer,
-    history: readlineHistory(history),
-    historySize: Math.max(1000, history.length + 1000),
-  });
-  // readline refreshes its prompt whenever stdout emits "resize", even while
-  // the interface is paused. Termux emits a resize when its app returns to the
-  // foreground, which otherwise paints the shell's cwd prompt over a running
-  // server or other foreground command.
-  const readlineResizeListeners = terminal
-    ? process.stdout.listeners("resize").filter(
-        (listener) => !resizeListenersBeforeReadline.has(listener))
-    : [];
+  let readlineResizeListeners = [];
   const setReadlineResizeEnabled = (enabled) => {
     for (const listener of readlineResizeListeners) {
       if (enabled) {
@@ -315,7 +298,39 @@ async function interactive(state) {
     process.stdout.write("\n");
     promptAbort?.abort();
   };
-  readline.on("SIGINT", interrupt);
+  let closed;
+  // Node's readline closes itself (and cannot be reused) the moment Ctrl-D
+  // is pressed on an empty line — including an empty PS2 continuation line
+  // mid here-document. That should only end the current construct, like
+  // mksh, not the whole shell, so this rebuilds a fresh interface on the
+  // same input instead of exiting. Used at startup and again after such a
+  // close; it re-wires everything tied to the interface itself (the SIGINT
+  // handler and the resize-repaint listeners readline registers) since a new
+  // instance does not carry those over.
+  const setupReadline = () => {
+    const resizeListenersBeforeReadline = terminal
+      ? new Set(process.stdout.listeners("resize"))
+      : null;
+    readline = createInterface({
+      input: filteredInput,
+      output: process.stdout,
+      terminal,
+      completer,
+      history: readlineHistory(history),
+      historySize: Math.max(1000, history.length + 1000),
+    });
+    // readline refreshes its prompt whenever stdout emits "resize", even while
+    // the interface is paused. Termux emits a resize when its app returns to
+    // the foreground, which otherwise paints the shell's cwd prompt over a
+    // running server or other foreground command.
+    readlineResizeListeners = terminal
+      ? process.stdout.listeners("resize").filter(
+          (listener) => !resizeListenersBeforeReadline.has(listener))
+      : [];
+    readline.on("SIGINT", interrupt);
+    closed = new Promise((resolve) => readline.once("close", () => resolve(null)));
+  };
+  setupReadline();
   process.on("SIGINT", interrupt);
   let refreshTimer = null;
   let removeGhostHooks = () => {};
@@ -385,10 +400,18 @@ async function interactive(state) {
       filteredInput.off("keypress", afterKey);
     };
   }
-  const closed = new Promise((resolve) => readline.once("close", () => resolve(null)));
+  // A here-document, an open quote/substitution, or an unfinished if/while/
+  // for/case body all need more lines before they can run. `pending` holds
+  // what has been typed so far across such a continuation, and mksh's PS2
+  // prompt (default "> ") is shown instead of the normal prompt while it is
+  // non-empty.
+  let pending = "";
   try {
     while (!state.exitRequested) {
-      const rendered = renderPrompt(state, true);
+      const continuing = pending !== "";
+      const rendered = continuing
+        ? { text: state.env.PS2 ?? "> ", regions: [], newTabRegion: [] }
+        : renderPrompt(state, true);
       promptRegions = rendered.regions;
       newTabRegion = rendered.newTabRegion;
       readline.setPrompt(rendered.text);
@@ -400,27 +423,47 @@ async function interactive(state) {
           closed,
         ]);
       } catch (error) {
-        if (error?.name === "AbortError") continue;
+        if (error?.name === "AbortError") { pending = ""; continue; }
         throw error;
       } finally {
         promptAbort = null;
       }
-      if (line === null) break;
+      if (line === null && !continuing) break;
+      // Ctrl-D on an empty line closes readline itself, whether that empty
+      // line was the primary prompt (handled above) or a PS2 continuation
+      // line. In the latter case the interface is now gone, but the
+      // terminal is still there, so this is recoverable: run whatever was
+      // typed so far — mksh does the same for a here-document ended this
+      // way — and rebuild a fresh interface afterward instead of exiting.
+      const eof = line === null;
+      if (!eof) {
+        // Stdin is still open: fold the new line in and, if the command is
+        // still unterminated, loop back for another one under the PS2
+        // prompt instead of running it.
+        pending = continuing ? `${pending}\n${line}` : line;
+        if (needsMoreInput(pending)) continue;
+      }
+      line = pending;
+      pending = "";
       if (line && history.at(-1) !== line) history.push(line);
       // readline must not keep reading from the terminal while a foreground
       // program owns it.  Otherwise both processes race for input and the
       // first key (notably Ctrl-Q in full-screen editors) can be consumed by
       // the shell.  Also give the child a sane terminal mode to start from.
-      readline.pause();
-      setReadlineResizeEnabled(false);
+      // A closed-by-EOF readline can't be paused (or later resumed).
+      if (!eof) {
+        readline.pause();
+        setReadlineResizeEnabled(false);
+      }
       if (terminal) {
         if (mouseTracking) process.stdout.write(MOUSE_OFF);
         process.stdin.unpipe(filteredInput);
       }
       if (terminal) process.stdin.setRawMode(false);
       foregroundCommand = true;
+      let endSession = false;
       try {
-        await execute(line, state);
+        if (line) await execute(line, state);
       } finally {
         foregroundCommand = false;
         if (!state.exitRequested) {
@@ -436,10 +479,18 @@ async function interactive(state) {
             mouseTracking = Boolean(state.mouseTracking);
             if (mouseTracking) process.stdout.write(MOUSE_ON);
           }
-          setReadlineResizeEnabled(true);
-          readline.resume();
+          if (eof) {
+            if (terminal) setupReadline();
+            else endSession = true;
+          } else {
+            setReadlineResizeEnabled(true);
+            readline.resume();
+          }
+        } else if (eof) {
+          endSession = true;
         }
       }
+      if (endSession) break;
     }
   } finally {
     if (terminal) {

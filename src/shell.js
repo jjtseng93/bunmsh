@@ -2553,6 +2553,22 @@ function parseCompoundScript(source) {
   return parsed.nodes;
 }
 
+// Every "needs more input before this can run" condition in this parser
+// (open quotes, an open $()/${}/backtick, an open here-document, or a
+// compound command still missing its closing keyword) raises a
+// ShellSyntaxError whose message starts with "unterminated". An interactive
+// front end can use this, mirroring mksh's PS2 continuation prompt, to tell
+// "still typing this command" apart from a real syntax error.
+export function needsMoreInput(source) {
+  try {
+    if (hasCompoundSyntax(source)) parseCompoundScript(source);
+    else tokenize(source, { strict: true });
+  } catch (error) {
+    return error instanceof ShellSyntaxError && error.message.startsWith("unterminated");
+  }
+  return false;
+}
+
 async function executeNodeList(nodes, state) {
   const stdout = [], stderr = [];
   let execution = result(state.lastStatus);

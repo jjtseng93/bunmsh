@@ -828,6 +828,127 @@ describe("CLI", () => {
     expect(transcript).toContain("1\r\n");
   });
 
+  test("shows a PS2 continuation prompt across a here-document, like mksh", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(120);
+      terminal.write("cat <<EOF\r");
+      await Bun.sleep(80);
+      terminal.write("hello world\r");
+      await Bun.sleep(80);
+      terminal.write("EOF\r");
+      await Bun.sleep(120);
+      terminal.write("echo after:$?\r");
+      await Bun.sleep(80);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    // Two "> " continuation prompts (for the body line and the terminator),
+    // the heredoc's own output, and the shell resuming normally afterward.
+    expect(transcript.match(/\r\n\x1b\[1G\x1b\[0J> /g)).toHaveLength(2);
+    expect(transcript).toContain("hello world\r\n");
+    expect(transcript).toContain("after:0\r\n");
+  });
+
+  test("Ctrl-C during a here-document continuation returns to the primary prompt", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(120);
+      terminal.write("cat <<EOF\r");
+      await Bun.sleep(80);
+      terminal.write("partial\r");
+      await Bun.sleep(80);
+      terminal.write("\x03");
+      await Bun.sleep(120);
+      terminal.write("echo back:$?\r");
+      await Bun.sleep(80);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    // The interrupt aborted the pending heredoc before `cat` ever ran, so
+    // $? reflects the Ctrl-C signal (130), not a successful `cat` (0).
+    expect(transcript).toContain("back:130\r\n");
+  });
+
+  test("Ctrl-D during a here-document continuation ends the body, not the shell", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(120);
+      terminal.write("cat <<EOF\r");
+      await Bun.sleep(80);
+      terminal.write("partial body no terminator\r");
+      await Bun.sleep(80);
+      // Ctrl-D on the empty PS2 line: Node's readline closes itself here,
+      // like it would on an empty primary-prompt line, but that must only
+      // end the here-document (leniently, like a script hitting real EOF),
+      // not exit the whole shell.
+      terminal.write("\x04");
+      await Bun.sleep(150);
+      terminal.write("echo still-alive:$?\r");
+      await Bun.sleep(80);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("partial body no terminator");
+    expect(transcript).toContain("still-alive:0\r\n");
+  });
+
+  test("Ctrl-D at the primary prompt still exits the shell", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) { transcript += data.toString(); },
+    });
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "src/main.js", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(120);
+      terminal.write("echo hi\r");
+      await Bun.sleep(100);
+      terminal.write("\x04");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("hi\r\n");
+  });
+
   test("preserves command output without a trailing newline before repainting", async () => {
     const cwd = new URL("..", import.meta.url).pathname;
     let transcript = "";
