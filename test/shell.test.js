@@ -27,6 +27,7 @@ import {
   parseBashHistory,
   parseFishHistory,
   readlineHistory,
+  saveBunmshHistory,
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
@@ -820,9 +821,70 @@ fi
       });
       const path = join(home, ".local", "share", "bunmsh", "history");
       expect(saved).toMatchObject({ status: 0, stdout: `${path}\n`, stderr: "" });
-      expect(JSON.parse(await Bun.file(path).text()))
-        .toEqual(["echo first", "echo duplicate", "echo last"]);
+      // The plain save appends everything as-is, one JSON value per line —
+      // it does not dedupe; that is what `tab save d` is for.
+      expect(Bun.JSONL.parse(await Bun.file(path).text()))
+        .toEqual(["echo first", "echo duplicate", "echo duplicate", "echo last"]);
+      // Reading history back still dedupes in memory (keeping the most
+      // recent occurrence), regardless of what is actually on disk.
       expect(await importedHistory(env)).toEqual(["echo first", "echo duplicate", "echo last"]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test("saveBunmshHistory from two sessions never clobbers the other's entries", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-history-concurrent-"));
+    try {
+      const env = { HOME: home, BUNMSH_IMPORT_HISTORY: "off" };
+      // Two independent sessions, as if two bunmsh processes were running at
+      // once: each only knows about its own new commands (historySaved: 0),
+      // not about anything the other has written.
+      const sessionA = { history: ["a1", "a2"], historySaved: 0 };
+      const sessionB = { history: ["b1", "b2"], historySaved: 0 };
+      await saveBunmshHistory(sessionA, env);
+      await saveBunmshHistory(sessionB, env);
+      expect(await importedHistory(env)).toEqual(["a1", "a2", "b1", "b2"]);
+      // A keeps going and saves again; B's earlier entries must still be
+      // there — a second save from one session must not touch what the
+      // other already wrote (this is the whole point of appending instead
+      // of rewriting the file).
+      sessionA.history.push("a3");
+      await saveBunmshHistory(sessionA, env);
+      expect(await importedHistory(env)).toEqual(["a1", "a2", "b1", "b2", "a3"]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test("tab save d dedupes the whole history file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-history-dedupe-"));
+    try {
+      const env = { HOME: home, BUNMSH_IMPORT_HISTORY: "off" };
+      await saveBunmshHistory({ history: ["x", "y", "x", "z"], historySaved: 0 }, env);
+      const deduped = await run("tab s d", { env, history: [] });
+      const path = join(home, ".local", "share", "bunmsh", "history");
+      expect(deduped).toMatchObject({ status: 0, stderr: "" });
+      expect(deduped.stdout).toContain(`${path}: 3 unique entries`);
+      expect(Bun.JSONL.parse(await Bun.file(path).text())).toEqual(["y", "x", "z"]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test("tab save rejects an unknown modifier", async () => {
+    expect(await run("tab s bogus")).toMatchObject({
+      status: 1,
+      stderr: "bunmsh: tab: save: expected d or dedupe\n",
+    });
+  });
+
+  test("saveBunmshHistory migrates a legacy JSON-array history file to JSONL", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-history-migrate-"));
+    try {
+      const env = { HOME: home, BUNMSH_IMPORT_HISTORY: "off" };
+      const path = join(home, ".local", "share", "bunmsh", "history");
+      mkdirSync(join(home, ".local", "share", "bunmsh"), { recursive: true });
+      await Bun.write(path, `${JSON.stringify(["old1", "old2"], null, 2)}\n`);
+      expect(await importedHistory(env)).toEqual(["old1", "old2"]);
+      await saveBunmshHistory({ history: ["new1"], historySaved: 0 }, env);
+      const text = await Bun.file(path).text();
+      expect(text.trimStart().startsWith("[")).toBe(false);
+      expect(Bun.JSONL.parse(text)).toEqual(["old1", "old2", "new1"]);
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 });
@@ -1053,6 +1115,61 @@ describe("CLI", () => {
     } finally { terminal.close(); }
     expect(transcript).toContain("hi\r\n");
   });
+
+  test("exiting flushes history without waiting for the periodic autosave", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bunmsh-history-exit-flush-"));
+    try {
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 24,
+        data() {},
+      });
+      const proc = Bun.spawn({
+        cmd: [process.execPath, "src/main.js", "-i"],
+        cwd: new URL("..", import.meta.url).pathname,
+        env: { ...process.env, PS1: "$ ", HOME: home, BUNMSH_IMPORT_HISTORY: "off" },
+        terminal,
+      });
+      try {
+        await Bun.sleep(120);
+        terminal.write("echo flush-me\r");
+        await Bun.sleep(100);
+        terminal.write("exit\r");
+        expect(await proc.exited).toBe(0);
+      } finally { terminal.close(); }
+      // The 60s periodic autosave never had a chance to fire here; only the
+      // on-exit flush could have written this.
+      const saved = await importedHistory({ HOME: home, BUNMSH_IMPORT_HISTORY: "off" });
+      expect(saved).toContain("echo flush-me");
+      expect(saved).toContain("exit");
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test.each(["SIGTERM", "SIGHUP"])(
+    "%s while waiting at the prompt flushes history and exits with a signal-derived status",
+    async (signal) => {
+      const home = mkdtempSync(join(tmpdir(), `bunmsh-history-${signal}-`));
+      try {
+        const terminal = new Bun.Terminal({ cols: 80, rows: 24, data() {} });
+        const proc = Bun.spawn({
+          cmd: [process.execPath, "src/main.js", "-i"],
+          cwd: new URL("..", import.meta.url).pathname,
+          env: { ...process.env, PS1: "$ ", HOME: home, BUNMSH_IMPORT_HISTORY: "off" },
+          terminal,
+        });
+        try {
+          await Bun.sleep(120);
+          terminal.write(`echo ${signal.toLowerCase()}-flush\r`);
+          await Bun.sleep(100);
+          proc.kill(signal);
+          const expectedStatus = signal === "SIGHUP" ? 129 : 143;
+          expect(await proc.exited).toBe(expectedStatus);
+        } finally { terminal.close(); }
+        const saved = await importedHistory({ HOME: home, BUNMSH_IMPORT_HISTORY: "off" });
+        expect(saved).toContain(`echo ${signal.toLowerCase()}-flush`);
+      } finally { rmSync(home, { recursive: true, force: true }); }
+    },
+  );
 
   test("preserves command output without a trailing newline before repainting", async () => {
     const cwd = new URL("..", import.meta.url).pathname;

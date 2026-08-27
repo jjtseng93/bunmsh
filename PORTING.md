@@ -19,7 +19,7 @@ semantic coverage, architecture, platform behaviour, and remaining work.
 | Pipelines | Stages run concurrently with Web Streams and `Bun.spawn`; large output is not collected, early-closing consumers stop upstream producers, and pipeline status comes from the final stage |
 | Commands | Aliases, functions, regular builtins, PATH lookup, system-first fallback builtins, Bun Shell fallbacks, explicit paths, and `command`/`builtin` lookup controls |
 | State | cwd tabs with shared shell state, environment and assignments, positional arguments, readonly names, aliases, functions, last/exit status, and pipeline state isolation |
-| Interactive | Readline editing, saved/Bash/Fish history import, manual history save, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, terminal-aware prompt layout, `PS2` continuation prompting for here-documents/open quotes/unfinished compound bodies, and interactive Ctrl-C/Ctrl-D handling |
+| Interactive | Readline editing, saved/Bash/Fish history import, automatic append-only history save (concurrent-session-safe, every 60s/on exit/on SIGTERM/SIGHUP) plus manual `tab s`/`tab save`/`tab s d` control, Up/Down recall, command/file completion, ghost suggestions, keyboard shortcuts, optional SGR mouse interaction, terminal-aware prompt layout, `PS2` continuation prompting for here-documents/open quotes/unfinished compound bodies, and interactive Ctrl-C/Ctrl-D/SIGTERM/SIGHUP handling |
 | Platforms | Forward-slash shell paths with native conversion on Windows, platform PATH delimiters, Windows executable suffix handling, Linux/Android dynamic-linker re-execution, and inherited `LD_LIBRARY_PATH` |
 | Packaging | Source execution and standalone Bun executables, including compiled self-spawn paths used by pipelines and reflected `bunmsh` commands |
 
@@ -102,9 +102,16 @@ pseudo-terminal tests.
 - Status 130 is defined for an interrupted `serve`, and its SIGTERM path uses
   143. Signal-derived statuses are not yet normalised consistently for every
   external command, builtin, pipeline stage, and command substitution.
-- SIGQUIT and SIGTERM do not yet have mksh's complete interactive policies;
-  SIGHUP does not perform shell/job cleanup; SIGCHLD does not maintain a job
-  table; and SIGWINCH is not integrated into a general signal subsystem.
+- Interactive mode catches SIGTERM and SIGHUP while waiting at the prompt: it
+  flushes history (see the history-saving row in the Implemented core table)
+  and exits with the conventional 128+signal status. While a foreground
+  command owns the terminal, receiving either only flushes history
+  immediately — it does not stop that command, since there is no
+  process-group job-control layer yet to do that safely (see below); the
+  shell actually exits once the command finishes on its own. Neither has
+  mksh's complete interactive policies otherwise; SIGQUIT does not have a
+  handler at all; SIGCHLD does not maintain a job table; and SIGWINCH is not
+  integrated into a general signal subsystem.
 - Terminal control characters are currently mediated by Bun readline. bunmsh
   does not read termios `VINTR`, `VQUIT`, or `VEOF`, so remapping those keys
   with `stty` is not guaranteed to match mksh.
@@ -133,8 +140,16 @@ pseudo-terminal tests.
 
 ### Interactive behaviour
 
-- History is loaded at startup but saved only by explicit `tab s` or
-  `tab save`; automatic save and `fc` are not implemented.
+- History is loaded at startup and saved automatically (every 60s and once
+  more on exit), appending only this session's own new commands to a JSON
+  Lines file — never rewriting it — so concurrent bunmsh sessions saving
+  around the same time cannot overwrite each other's history. `tab s`/
+  `tab save` trigger that same append immediately; `tab s d`/`tab save dedupe`
+  is a separate, explicit whole-file rewrite that drops duplicates and
+  reports if another session's write raced it. A pre-existing history file in
+  bunmsh's older single-JSON-array format is read correctly and silently
+  upgraded to JSON Lines the next time anything is saved. `fc` is not
+  implemented.
 - Completion uses a periodically refreshed sorted PATH index plus live cwd file
   reads. It is practical rather than a byte-for-byte mksh completion engine.
 - Ghost suggestions use imported/saved history and filesystem matches after

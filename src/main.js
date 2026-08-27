@@ -20,7 +20,7 @@ import {
 } from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit } from "../single-exe/compiled.js";
-import { importedHistory, readlineHistory } from "./history.js";
+import { importedHistory, readlineHistory, saveBunmshHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "./mouse.js";
 import { homeRelativePath } from "./environment.js";
@@ -168,6 +168,11 @@ async function interactive(state) {
   const fileIndex = new FileIndex();
   state.history = await importedHistory(state.env);
   const history = state.history;
+  // Marks everything just loaded (including whatever another session has
+  // already saved) as already persisted, so this session's own history
+  // saves only ever append commands actually typed here — never the
+  // imported bash/fish/bunmsh history it started from. See saveBunmshHistory.
+  state.historySaved = state.history.length;
   if (terminal) await commandIndex.refresh(state);
   let readline;
   let promptRegions = [];
@@ -338,6 +343,25 @@ async function interactive(state) {
     process.stdout.write("\n");
     promptAbort?.abort();
   };
+  // Unlike Ctrl-C, SIGTERM/SIGHUP (e.g. `kill <pid>`, or some terminal
+  // emulators on window close) mean the process itself is being asked to
+  // go away, not just the current edit. There is no general job-control
+  // layer yet to also stop a foreground command's own process, so this
+  // only makes sure history isn't lost: flush it immediately if one is
+  // running (its own async work continues independently either way), or
+  // otherwise abort the pending prompt so the main loop's own exit path —
+  // and its usual cleanup — runs right away instead of only via the next
+  // periodic autosave.
+  const SIGNAL_EXIT_STATUS = { SIGHUP: 129, SIGTERM: 143 };
+  const terminate = (signal) => {
+    state.exitRequested = true;
+    state.exitStatus = SIGNAL_EXIT_STATUS[signal] ?? state.exitStatus;
+    if (foregroundCommand) {
+      void saveBunmshHistory(state, state.env).catch(() => {});
+      return;
+    }
+    promptAbort?.abort();
+  };
   let closed;
   // Node's readline closes itself (and cannot be reused) the moment Ctrl-D
   // is pressed on an empty line — including an empty PS2 continuation line
@@ -372,6 +396,18 @@ async function interactive(state) {
   };
   setupReadline();
   process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
+  process.on("SIGHUP", terminate);
+  // Append-only (see saveBunmshHistory), so this is cheap and safe to run
+  // unconditionally in the background — it only ever adds this session's
+  // own new commands to the end of the file, never touching anything a
+  // concurrent bunmsh session elsewhere has written. Failures (e.g. a full
+  // disk) are swallowed rather than interrupting whatever the user is
+  // typing; `tab s` still reports a real error if the user asks directly.
+  const historySaveTimer = setInterval(() => {
+    void saveBunmshHistory(state, state.env).catch(() => {});
+  }, 60_000);
+  historySaveTimer.unref?.();
   let refreshTimer = null;
   let removeGhostHooks = () => {};
   if (terminal) {
@@ -539,10 +575,16 @@ async function interactive(state) {
       if (mouseTracking) process.stdout.write(MOUSE_OFF);
       process.stdin.unpipe(filteredInput);
     }
+    clearInterval(historySaveTimer);
+    // Catches whatever the last autosave (up to 60s ago) missed, so a normal
+    // exit never loses the tail of the session's history.
+    await saveBunmshHistory(state, state.env).catch(() => {});
     if (refreshTimer !== null) clearInterval(refreshTimer);
     removeGhostHooks();
     readline.off("SIGINT", interrupt);
     process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
+    process.off("SIGHUP", terminate);
     readline.close();
   }
   return state.exitRequested ? state.exitStatus : state.lastStatus;

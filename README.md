@@ -232,7 +232,7 @@ only the contents of each `$(...)` enter the JavaScript evaluator.
 > process, environment and network permissions as bunmsh. Never pass untrusted
 > input to this mode or expose it as a remote command interface.
 
-### Imported history
+### History
 
 Interactive bunmsh loads its own saved history and imports both Bash and Fish
 history once at startup. Imported commands immediately participate in
@@ -256,12 +256,39 @@ BUNMSH_IMPORT_HISTORY=0 bunmsh
 
 `false`, `off` and `no` are also accepted, case-insensitively.
 
-bunmsh never saves history automatically. Use `tab s` or `tab save` when you
-want to persist the current interactive history. A newly opened bunmsh loads
-that file for both Up/Down arrow recall and ghost completion. The standard path
-is `$XDG_DATA_HOME/bunmsh/history`, falling back to
-`~/.local/share/bunmsh/history`. Windows uses
-`%LOCALAPPDATA%/bunmsh/history`.
+bunmsh saves its own history to a file, loaded again by every newly opened
+bunmsh for both Up/Down arrow recall and ghost completion.
+
+- **When it saves.** Automatically: every 60 seconds, once more when the
+  shell exits, and once more if it receives SIGTERM or SIGHUP (for example
+  from `kill`, or a terminal emulator closing its window) — while a
+  foreground command owns the terminal, a caught SIGTERM/SIGHUP flushes
+  history immediately but does not stop that command, since bunmsh has no
+  job-control layer yet that could do so safely; the shell exits once the
+  command finishes on its own. `tab s`/`tab save` trigger the same save on
+  demand, e.g. right before closing the terminal some other way.
+- **File format.** [JSON Lines](https://jsonlines.org/) — one JSON-encoded
+  command per line. A history file saved in bunmsh's older single-JSON-array
+  format is still read correctly and is silently upgraded to JSON Lines the
+  next time anything is saved.
+- **How concurrent sessions are handled.** Every save above only *appends*
+  the lines this session hasn't saved yet — it never rewrites the file. That
+  makes it safe to run several bunmsh sessions at once: each one only adds
+  its own new lines to the end and never touches (or needs to know about)
+  what another session has written, so two sessions saving around the same
+  time can't overwrite each other's history the way rewriting the whole file
+  each time would risk.
+- **Deduplication.** Because saving only appends, duplicate commands are
+  *not* removed automatically. Run `tab s d` (or `tab save dedupe`) to
+  rewrite the file keeping only each command's most recent occurrence.
+  Unlike the routine append, that rewrites the whole file, so it is an
+  explicit, occasional choice that carries a small chance of losing another
+  session's write if it happens mid-rewrite — the command's own output says
+  so if it looks like that happened, so it's obvious when it's worth
+  rerunning.
+- **File location.** `$XDG_DATA_HOME/bunmsh/history`, falling back to
+  `~/.local/share/bunmsh/history`. Windows uses
+  `%LOCALAPPDATA%/bunmsh/history`.
 
 ### Tab system
 

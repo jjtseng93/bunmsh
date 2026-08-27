@@ -36,7 +36,7 @@ import {
 import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
-import { saveBunmshHistory } from "./history.js";
+import { dedupeBunmshHistory, saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
@@ -1235,8 +1235,8 @@ const builtins = {
   },
   chdir: async (argv, state) => builtins.cd(["cd", ...argv.slice(1)], state),
   tab: async (argv, state) => {
-    if (argv.length > 3 || (argv.length > 2 && !["mouse", "path"].includes(argv[1])))
-      return result(1, "", "bunmsh: tab: usage: tab [n|x|c|l|r|s|save|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
+    if (argv.length > 3 || (argv.length > 2 && !["mouse", "path", "s", "save"].includes(argv[1])))
+      return result(1, "", "bunmsh: tab: usage: tab [n|x|c|l|r|s|save [d|dedupe]|mouse [on|off|true|false]|path [on|off|true|false]|number]\n");
     const action = argv[1];
     const activate = (index) => {
       state.activeTab = index;
@@ -1264,9 +1264,22 @@ const builtins = {
       return result();
     }
     if (action === "s" || action === "save") {
+      const modifier = argv[2];
+      if (modifier !== undefined && !["d", "dedupe"].includes(modifier))
+        return result(1, "", "bunmsh: tab: save: expected d or dedupe\n");
       try {
-        const path = await saveBunmshHistory(state.history ?? [], state.env);
-        return result(0, `${shellPath(path)}\n`);
+        if (modifier === undefined) {
+          const path = await saveBunmshHistory(state, state.env);
+          return result(0, `${shellPath(path)}\n`);
+        }
+        // Rewrites the whole history file to drop duplicates, unlike the
+        // plain save above — see dedupeBunmshHistory for why that is only
+        // safe to do as an explicit, occasional choice.
+        const { path, raced, count } = await dedupeBunmshHistory(state, state.env);
+        const warning = raced
+          ? " (warning: another session wrote to it during cleanup; some of its entries may have been lost — rerun if needed)"
+          : "";
+        return result(0, `${shellPath(path)}: ${count} unique entries${warning}\n`);
       } catch (error) {
         return result(1, "", `bunmsh: tab: cannot save history: ${error.message}\n`);
       }

@@ -50,9 +50,30 @@ All notable user-visible changes to bunmsh are documented here.
   even in a terminal), and `-F` (append a classify suffix — `/` directory,
   `@` symlink, `*` executable, `=` socket, `|` FIFO) to `lsfancy`, all
   combinable with the existing flags (`-lSF`, etc.).
+- Save history automatically — every 60s, once more on exit, and once more
+  on SIGTERM/SIGHUP — by appending only this session's own new commands to a
+  JSON Lines history file, never rewriting it, so several bunmsh sessions
+  saving around the same time can no longer overwrite each other's history.
+  `tab s`/`tab save` trigger the same append immediately; the new `tab s d`/
+  `tab save dedupe` is a separate, explicit whole-file rewrite that drops
+  duplicate commands and reports if another session's write raced it. A
+  history file saved in the previous single-JSON-array format is still read
+  correctly and is silently upgraded to JSON Lines the next time anything
+  is saved.
+- Catch SIGTERM and SIGHUP in interactive mode instead of leaving them at
+  the default disposition (which killed bunmsh immediately, before it could
+  save anything). Receiving either while waiting at the prompt now flushes
+  history and exits with the conventional 128+signal status; while a
+  foreground command owns the terminal, it flushes history immediately and
+  exits once that command finishes on its own, since there is no
+  job-control layer yet to also stop the command itself.
 
 ### Changed
 
+- `tab s`/`tab save` (with no `d`/`dedupe`) no longer removes duplicate
+  commands as a side effect of saving — it now only appends, matching how
+  most shells' history files work. Use the new `tab s d`/`tab save dedupe`
+  to remove duplicates explicitly.
 - The `ls` fallback builtin (used when no PATH `ls` is found, e.g. on
   Windows, or under `--builtin-only`) is now `lsfancy` instead of Bun Shell's
   own `ls`, since it now covers more real `ls` behavior (working `-h`/`-t`/
