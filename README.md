@@ -348,6 +348,11 @@ tab r      # back to ~/project/src
   the start of the `$` prompt calls `builtin tab n` to create and activate a
   new tab.
 
+- Mouse click-to-position: Clicking anywhere in the line currently being
+  typed moves the cursor there instead of leaving it at the end, the same as
+  clicking inside a text field. Clicking past the end of the typed text moves
+  the cursor to the end of the line rather than doing nothing.
+
 - Mouse foreground behavior: Mouse reporting is disabled while a foreground
   command owns the terminal, so full-screen editors and other TUI programs
   receive their own mouse input. bunmsh restores it when the command returns.

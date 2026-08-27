@@ -1364,6 +1364,42 @@ describe("CLI", () => {
     expect(transcript).toContain("[3]$ ");
   });
 
+  test("clicking inside the typed line moves the cursor there instead of appending", async () => {
+    let transcript = "";
+    const terminal = new Bun.Terminal({
+      cols: 80,
+      rows: 24,
+      data(_terminal, data) {
+        const text = data.toString();
+        transcript += text;
+        // Prompt "$ " (2 cols) + "echo hello" (10 chars) = col 13, row 1
+        // (nothing has scrolled yet in a fresh session).
+        if (text.includes("\x1b[6n")) terminal.write("\x1b[1;13R");
+      },
+    });
+    const proc = Bun.spawn({
+      cmd: [Bun.which("bun") || process.argv0, "src/main.js", "--mouse", "-i"],
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, PS1: "$ " },
+      terminal,
+    });
+    try {
+      await Bun.sleep(150);
+      terminal.write("echo hello");
+      await Bun.sleep(100);
+      // Column 8 (1-based) lands right after "echo " (index 5 of the line),
+      // just before "hello".
+      terminal.write("\x1b[<0;8;1M");
+      await Bun.sleep(150);
+      terminal.write("X\r");
+      await Bun.sleep(150);
+      terminal.write("exit\r");
+      expect(await proc.exited).toBe(0);
+    } finally { terminal.close(); }
+    expect(transcript).toContain("Xhello\r\n");
+    expect(transcript).not.toContain("helloX\r\n");
+  });
+
   test("Alt-L, Alt-U, and Alt-P list cwd or parent without discarding the edited line", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bunmsh-alt-l-"));
     const child = join(cwd, "child");

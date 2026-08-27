@@ -40,6 +40,12 @@ All notable user-visible changes to bunmsh are documented here.
 - Give a symlink whose target does not resolve (missing, or a cycle) a
   distinct 🚫 icon instead of the normal 🔗, in both the plain and `-l`
   listing forms.
+- With mouse tracking enabled, clicking inside the line currently being typed
+  now moves the cursor there (accounting for the active prompt's own width
+  and wrapping, including multi-line/multi-tab prompts and the `PS2`
+  continuation prompt), the same as clicking inside a text field, instead of
+  only reacting to clicks on tabs. Clicking past the end of the typed text
+  moves the cursor to the end of the line rather than doing nothing.
 
 ### Changed
 

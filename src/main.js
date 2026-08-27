@@ -114,8 +114,7 @@ function renderPrompt(state, withRegions = false) {
     ? template
     : template.replaceAll("$", "\x1b[31m$\x1b[0m");
   const text = styledTemplate.replaceAll("\\w", cwd);
-  if (!withRegions || !tabParts) return { text, regions: [], newTabRegion: [] };
-  const prefix = styledTemplate.slice(0, styledTemplate.indexOf("\\w"));
+  if (!withRegions) return { text, regions: [], newTabRegion: [], inputStart: null };
   const columns = process.stdout.columns ?? 80;
   let row = 0, column = 0;
   const advance = (source, cells = null) => {
@@ -133,23 +132,33 @@ function renderPrompt(state, withRegions = false) {
       }
     }
   };
-  advance(prefix);
-  const regions = tabParts.map((part, index) => {
-    const cells = [];
-    advance(part, cells);
-    if (index + 1 < tabParts.length) advance("  ");
-    return cells;
-  });
+  let regions = [];
   const newTabRegion = [];
-  const marker = `[${state.activeTab + 1}]$`;
-  const markerIndex = text.lastIndexOf(marker);
-  if (markerIndex >= 0) {
-    row = 0;
-    column = 0;
-    advance(text.slice(0, markerIndex + 1));
-    advance(String(state.activeTab + 1), newTabRegion);
+  if (tabParts) {
+    const prefix = styledTemplate.slice(0, styledTemplate.indexOf("\\w"));
+    advance(prefix);
+    regions = tabParts.map((part, index) => {
+      const cells = [];
+      advance(part, cells);
+      if (index + 1 < tabParts.length) advance("  ");
+      return cells;
+    });
+    const marker = `[${state.activeTab + 1}]$`;
+    const markerIndex = text.lastIndexOf(marker);
+    if (markerIndex >= 0) {
+      row = 0;
+      column = 0;
+      advance(text.slice(0, markerIndex + 1));
+      advance(String(state.activeTab + 1), newTabRegion);
+    }
   }
-  return { text, regions, newTabRegion };
+  // Where the editable input line begins, so a click past the prompt itself
+  // can be mapped back to a character offset in the line (see
+  // moveCursorToClick below) regardless of tab count or prompt wrapping.
+  row = 0;
+  column = 0;
+  advance(text);
+  return { text, regions, newTabRegion, inputStart: { row, column } };
 }
 
 async function interactive(state) {
@@ -163,6 +172,7 @@ async function interactive(state) {
   let readline;
   let promptRegions = [];
   let newTabRegion = [];
+  let inputStart = null;
   let pendingClick = null;
   let pendingCursorQuery = null;
   let lastTabClick = null;
@@ -177,6 +187,7 @@ async function interactive(state) {
       const next = renderPrompt(state, true);
       promptRegions = next.regions;
       newTabRegion = next.newTabRegion;
+      inputStart = next.inputStart;
       readline.setPrompt(next.text);
       readline.prompt(true);
     });
@@ -195,6 +206,7 @@ async function interactive(state) {
       const next = renderPrompt(state, true);
       promptRegions = next.regions;
       newTabRegion = next.newTabRegion;
+      inputStart = next.inputStart;
       readline.setPrompt(next.text);
       readline.prompt(true);
     });
@@ -213,6 +225,30 @@ async function interactive(state) {
     };
     process.stdout.write("\x1b[6n");
   });
+  // Maps a click's cell position (relative to the prompt's own first row,
+  // same coordinate space as promptRegions/newTabRegion) to a character
+  // offset in the currently typed input line, then moves the cursor there
+  // by simulating that many left/right arrow presses — the only way to
+  // relocate readline's cursor and have it redraw correctly without reaching
+  // into its private internals.
+  const moveCursorToClick = (targetRow, targetColumn) => {
+    if (!readline || !inputStart) return;
+    const line = readline.line ?? "";
+    const columns = process.stdout.columns ?? 80;
+    let row = inputStart.row, column = inputStart.column;
+    let index = line.length;
+    for (let i = 0; i < line.length; i++) {
+      if (row > targetRow || (row === targetRow && column >= targetColumn)) { index = i; break; }
+      const width = Bun.stringWidth(line[i]);
+      for (let n = 0; n < width; n++) {
+        if (column >= columns) { row++; column = 0; }
+        column++;
+      }
+    }
+    const delta = index - readline.cursor;
+    const key = { name: delta > 0 ? "right" : "left" };
+    for (let n = 0; n < Math.abs(delta); n++) readline.write(null, key);
+  };
   const filteredInput = terminal ? mouseInput((mouse) => {
     if (!mouse.press || (mouse.button & 3) !== 0 || (mouse.button & 32)) return;
     pendingClick = { ...mouse, at: Date.now() };
@@ -237,7 +273,10 @@ async function interactive(state) {
     }
     const index = promptRegions.findIndex((cells) =>
       cells.some((cell) => cell.row === relativeRow && cell.column === relativeColumn));
-    if (index < 0) return;
+    if (index < 0) {
+      moveCursorToClick(relativeRow, relativeColumn);
+      return;
+    }
     const doubleClick = lastTabClick?.index === index &&
       click.at - lastTabClick.at <= 400;
     lastTabClick = doubleClick ? null : { index, at: click.at };
@@ -249,6 +288,7 @@ async function interactive(state) {
     const rendered = renderPrompt(state, true);
     promptRegions = rendered.regions;
     newTabRegion = rendered.newTabRegion;
+    inputStart = rendered.inputStart;
     readline.setPrompt(rendered.text);
     if (!doubleClick || mouseCommandRunning) {
       readline.prompt(true);
@@ -410,10 +450,12 @@ async function interactive(state) {
     while (!state.exitRequested) {
       const continuing = pending !== "";
       const rendered = continuing
-        ? { text: state.env.PS2 ?? "> ", regions: [], newTabRegion: [] }
+        ? { text: state.env.PS2 ?? "> ", regions: [], newTabRegion: [],
+            inputStart: { row: 0, column: Bun.stringWidth(state.env.PS2 ?? "> ") } }
         : renderPrompt(state, true);
       promptRegions = rendered.regions;
       newTabRegion = rendered.newTabRegion;
+      inputStart = rendered.inputStart;
       readline.setPrompt(rendered.text);
       promptAbort = new AbortController();
       let line;
