@@ -572,6 +572,19 @@ trade-offs between its two back ends.
 
 ### PATH-fallback builtins
 
+Fallback builtins normally let an executable in `PATH` win. To use the fancy
+implementations by default even when the system provides `cat` and `ls`, make
+aliases that explicitly select the builtin commands:
+
+```sh
+alias cat='builtin catfancy'
+alias ls='builtin lsfancy'
+```
+
+After that, `cat README.md` renders Markdown with ANSI styling and terminal
+hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
+`unalias cat ls` to restore normal PATH-first lookup for the current shell.
+
 | Command | Supported flags/forms |
 | --- | --- |
 | `basename` | `--`, optional suffix |
