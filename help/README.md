@@ -205,6 +205,9 @@ catfancy [--exclude PATTERN]... [--] [FILE ...]
   `Bun.Glob` patterns. Repeat the option to exclude more patterns; quote a
   pattern to prevent the shell from expanding it first.
 - `-`: Read unformatted stdin; file previews are selected from filename extensions.
+- `.js`/`.mjs`/`.cjs`/`.jsx` and `.ts`/`.mts`/`.cts`/`.tsx` files are wrapped
+  in a fenced ` ```javascript `/` ```typescript ` block and rendered through
+  `Bun.markdown.ansi`, for the same syntax coloring Markdown code blocks get.
 
 ### Example
 

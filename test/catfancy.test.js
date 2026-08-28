@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { colorJson, main, renderFancy } from "../src/cat-fancy.js";
+import { colorJson, fenceFor, main, renderFancy } from "../src/cat-fancy.js";
 
 describe("catfancy", () => {
   test("parses data formats into colored pretty JSON", () => {
@@ -25,6 +25,52 @@ describe("catfancy", () => {
 
   test("leaves files without a preview format unchanged", () => {
     expect(renderFancy("plain text\n", "notes.txt")).toBe("plain text\n");
+  });
+
+  test("wraps JS-family files in a ```javascript fence and renders via markdown", () => {
+    for (const name of ["app.js", "app.mjs", "app.cjs", "app.jsx"]) {
+      const output = renderFancy("const x = 1;\n", name);
+      expect(output).toContain("\x1b[");
+      const stripped = Bun.stripANSI(output);
+      // The box border marks it as an actually-parsed fenced code block, not
+      // just source text that happens to contain the word "javascript".
+      expect(stripped).toContain("┌─ javascript");
+      expect(stripped).toContain("└─");
+      expect(stripped).toContain("const x = 1;");
+    }
+  });
+
+  test("wraps TS-family files in a ```typescript fence and renders via markdown", () => {
+    for (const name of ["app.ts", "app.mts", "app.cts", "app.tsx"]) {
+      const output = renderFancy("const x: number = 1;\n", name);
+      expect(output).toContain("\x1b[");
+      const stripped = Bun.stripANSI(output);
+      expect(stripped).toContain("┌─ typescript");
+      expect(stripped).toContain("└─");
+      expect(stripped).toContain("const x: number = 1;");
+    }
+  });
+
+  test("fenceFor widens past the longest backtick run already in the source", () => {
+    expect(fenceFor("plain source, no backticks")).toBe("```");
+    expect(fenceFor("has `one` backtick pair")).toBe("```");
+    expect(fenceFor('has "```" a triple run')).toBe("````");
+    expect(fenceFor('has "````" a quadruple run')).toBe("`````");
+  });
+
+  test("a source ``` run doesn't prematurely close the widened fence", () => {
+    const source = 'const s = `` + "```" + `` ;\n';
+    expect(fenceFor(source)).toBe("````");
+    const output = renderFancy(source, "weird.js");
+    const stripped = Bun.stripANSI(output);
+    // Genuinely parsed as one fenced block (box border present), with the
+    // source's own ``` surviving as literal code content on its one content
+    // line -- not treated as a fence closer, and not left as raw unparsed
+    // markdown source.
+    expect(stripped).toContain("┌─ javascript");
+    expect(stripped).toContain("└─");
+    expect(stripped).toContain('│ const s = `` + "```" + `` ;');
+    expect(stripped.split("\n")).not.toContain("````");
   });
 
   test("reads files relative to cwd and reports parser errors", async () => {

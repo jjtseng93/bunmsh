@@ -682,7 +682,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `dirname` | `--` |
 | `cat` | `--exclude PATTERN`, `--exclude=PATTERN` using `Bun.Glob`, `--`; files and `-` for stdin |
 | `tac` | `--`; files and `-` for stdin; reverses newline-delimited records in each operand; no other options |
-| `catfancy` | `--exclude PATTERN`, `--exclude=PATTERN` using `Bun.Glob`, `--`; files and `-` for stdin; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, TOML, and XML are parsed, pretty-printed as JSON, and colored with `Bun.color`; Markdown uses `Bun.markdown.ansi` with terminal hyperlinks; other formats are emitted unchanged |
+| `catfancy` | `--exclude PATTERN`, `--exclude=PATTERN` using `Bun.Glob`, `--`; files and `-` for stdin; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, TOML, and XML are parsed, pretty-printed as JSON, and colored with `Bun.color`; Markdown uses `Bun.markdown.ansi` with terminal hyperlinks; `.js`/`.mjs`/`.cjs`/`.jsx` and `.ts`/`.mts`/`.cts`/`.tsx` are wrapped in a fenced ` ```javascript `/` ```typescript ` block and rendered the same way, for the same syntax coloring; other formats are emitted unchanged |
 | `head` | `-n N`, `-N`, `-c N`, `-cN` |
 | `tail` | `-n N`, `-N`; `-n +N` and `-n+N` output starting at line N |
 | `wc` | `-l`, `-w`, `-c`, combinable |

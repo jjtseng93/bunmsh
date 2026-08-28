@@ -22,6 +22,13 @@ All notable user-visible changes to bunmsh are documented here.
   parsed and emitted as colorized pretty JSON; Markdown is rendered with
   `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
   through unchanged.
+- Add JS/TS syntax coloring to `catfancy`: `.js`/`.mjs`/`.cjs`/`.jsx` and
+  `.ts`/`.mts`/`.cts`/`.tsx` files are wrapped in a fenced ` ```javascript `/
+  ` ```typescript ` block and rendered through the same `Bun.markdown.ansi`
+  path Markdown gets, reusing its code-block highlighter rather than adding
+  one. The fence is widened past the longest run of backticks already in the
+  source, so a file containing its own triple-backtick text can't prematurely
+  close it.
 - Add bracketed-paste support to the interactive prompt. A paste containing a
   newline no longer gets read back a physical line at a time (which broke any
   `\`-continued command in it, since each line ran on its own the instant its

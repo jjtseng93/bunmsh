@@ -30,6 +30,26 @@ const extension = (name) => {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 };
 
+const FENCE_LANGUAGES = new Map([
+  ["js", "javascript"],
+  ["mjs", "javascript"],
+  ["cjs", "javascript"],
+  ["jsx", "javascript"],
+  ["ts", "typescript"],
+  ["mts", "typescript"],
+  ["cts", "typescript"],
+  ["tsx", "typescript"],
+]);
+
+// A fence has to be at least as long as the longest run of backticks already
+// in the source, or that run would close it early (CommonMark's own rule for
+// nesting a fenced block inside another).
+export const fenceFor = (source) => {
+  const runs = source.match(/`+/g) ?? [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+  return "`".repeat(Math.max(3, longest + 1));
+};
+
 const pretty = (value) => {
   try {
     return JSON.stringify(value, (_key, item) =>
@@ -65,6 +85,13 @@ export function renderFancy(source, name = "") {
   const kind = extension(name);
   if (kind === "md" || kind === "markdown")
     return String(Bun.markdown.ansi(String(source), { hyperlinks: true }));
+  const fenceLanguage = FENCE_LANGUAGES.get(kind);
+  if (fenceLanguage) {
+    const text = String(source);
+    const fence = fenceFor(text);
+    return String(Bun.markdown.ansi(
+      `${fence}${fenceLanguage}\n${text}\n${fence}\n`, { hyperlinks: true }));
+  }
   const parser = PARSERS.get(kind);
   return parser ? `${colorJson(pretty(parser(String(source))))}\n` : String(source);
 }
