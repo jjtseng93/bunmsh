@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { isAbsolute, resolve } from "node:path";
+import { parseCatOperands } from "./cat-operands.js";
 
 const PARSERS = new Map([
   ["json", JSON.parse],
@@ -69,11 +70,9 @@ export function renderFancy(source, name = "") {
 }
 
 export async function main(argv, cwd = process.cwd(), input = Bun.stdin.stream()) {
-  let operands = argv.slice(1);
-  if (operands[0] === "--") operands = operands.slice(1);
-  if (operands.some((value) => value.startsWith("-") && value !== "-"))
-    return { status: 1, stdout: "", stderr: "bunmsh: catfancy: options are not supported\n" };
-  if (operands.length === 0) operands = ["-"];
+  const parsed = parseCatOperands(argv, "catfancy");
+  if (parsed.error) return { status: 1, stdout: "", stderr: parsed.error };
+  const operands = parsed.operands;
 
   let status = 0, stdout = "", stderr = "";
   for (const operand of operands) {

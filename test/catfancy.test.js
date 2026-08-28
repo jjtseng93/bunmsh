@@ -35,6 +35,11 @@ describe("catfancy", () => {
       const good = await main(["catfancy", "data.toml"], directory);
       expect(good.status).toBe(0);
       expect(Bun.stripANSI(good.stdout)).toBe('{\n  "enabled": true\n}\n');
+      const excluded = await main([
+        "catfancy", "--exclude", "*.json", "bad.json", "data.toml",
+      ], directory);
+      expect(excluded.status).toBe(0);
+      expect(Bun.stripANSI(excluded.stdout)).toBe('{\n  "enabled": true\n}\n');
       const bad = await main(["catfancy", "bad.json"], directory);
       expect(bad.status).toBe(1);
       expect(bad.stderr).toContain("bunmsh: catfancy: bad.json:");

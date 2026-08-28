@@ -43,6 +43,7 @@ import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
 import { main as startFileServer, waitForInterrupt } from "../serve.js";
 import { main as catFancy } from "./cat-fancy.js";
+import { parseCatOperands } from "./cat-operands.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1688,11 +1689,9 @@ export async function executeBunShellFallback(argv) {
 }
 
 async function runCatFallback(argv, state, input) {
-  let operands = argv.slice(1);
-  if (operands[0] === "--") operands = operands.slice(1);
-  if (operands.some((value) => value.startsWith("-") && value !== "-"))
-    return result(1, "", "bunmsh: cat: options are not supported\n");
-  if (operands.length === 0) operands = ["-"];
+  const parsed = parseCatOperands(argv, "cat");
+  if (parsed.error) return result(1, "", parsed.error);
+  const operands = parsed.operands;
 
   const chunks = [];
   let status = 0;

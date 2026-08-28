@@ -6,6 +6,9 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Added
 
+- Add repeatable `--exclude PATTERN` and `--exclude=PATTERN` filtering backed
+  by `Bun.Glob` to the `cat` and `catfancy` fallback builtins for concatenating
+  expanded file sets.
 - Add a `tac` PATH-fallback builtin for reversing newline-delimited records
   from files or stdin while preserving their bytes and separators.
 - Add asset-backed `-h` and `--help` output for documented regular and fallback

@@ -285,6 +285,10 @@ describe("execution", () => {
         env: { PATH: "/no/such/path" },
       });
       expect(output).toMatchObject({ status: 0, stdout: "alphabeta", stderr: "" });
+      const excluded = await run("builtin cat --exclude a.txt *.txt", { cwd: directory });
+      expect(excluded).toMatchObject({ status: 0, stdout: "beta", stderr: "" });
+      const patternExcluded = await run("builtin cat --exclude 'a.*' *.txt", { cwd: directory });
+      expect(patternExcluded).toMatchObject({ status: 0, stdout: "beta", stderr: "" });
       mkdirSync(`${directory}/source`);
       await Bun.write(`${directory}/source/item.txt`, "copied");
       const copied = await run("cp -r source target", {
