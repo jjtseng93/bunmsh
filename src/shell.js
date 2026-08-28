@@ -386,6 +386,14 @@ export function tokenize(source, options = {}) {
     if (ch === "\\") {
       const word = ensureWord();
       if (i + 1 >= source.length) {
+        // A bare trailing backslash at the very end of the source is what an
+        // interactive line looks like the instant Enter is pressed, before
+        // the next physical line -- which would complete the continuation
+        // pair the branch above handles -- has even been typed. In strict
+        // mode (needsMoreInput's interactive-continuation check) that must
+        // wait for more input like any other unterminated construct, not
+        // silently become a literal "\" word character.
+        if (strict) throw new ShellSyntaxError("unterminated line continuation", i);
         pushFragment(word, "\\", "none");
         i++;
       } else {

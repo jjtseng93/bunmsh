@@ -22,7 +22,7 @@ import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit, stringifyNonPrimitiveDefineValues } from "../single-exe/compiled.js";
 import { importedHistory, readlineHistory, saveBunmshHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
-import { MOUSE_OFF, MOUSE_ON, mouseInput } from "./mouse.js";
+import { MOUSE_OFF, MOUSE_ON, PASTE_OFF, PASTE_ON, mouseInput } from "./mouse.js";
 import { homeRelativePath } from "./environment.js";
 
 const VERSION = `
@@ -184,6 +184,44 @@ async function interactive(state) {
   let mouseCommandRunning = false;
   let foregroundCommand = false;
   let promptAbort = null;
+  // Set by onPaste (below) when a bracketed paste contains a newline, and
+  // consumed by the main loop's readline.question() catch block right after
+  // promptAbort.abort() rejects it -- see the comment there.
+  let pastedLine = null;
+  // A single-line paste behaves exactly like ordinary typed/pasted text
+  // already did: insert it at the cursor. A multi-line one (the common case
+  // this exists for -- pasting a whole multi-command tutorial block, some of
+  // whose commands span several `\`-continued physical lines) cannot be fed
+  // through readline a keypress at a time, since every embedded "\n" would
+  // be read as its own Enter and submit each physical line separately
+  // (breaking any `\` continuation, since the interrupted line wouldn't yet
+  // have the next line to join with). Instead, whatever was already typed on
+  // this line plus the pasted text becomes the resolved `line` value for the
+  // in-flight readline.question() -- exactly as if the user had typed all of
+  // it and pressed Enter once -- so it goes through the exact same
+  // pending/needsMoreInput/execute path an ordinary submitted line does.
+  const onPaste = (text) => {
+    if (!readline) return;
+    // A terminal's own line-ending convention for pasted content isn't
+    // guaranteed to be "\n" -- observed in the wild: a bare "\r" (the same
+    // byte Enter sends) between lines, which bunmsh's parser otherwise
+    // treats as whitespace, not a statement separator (see shell.js's
+    // isSpace). Bracketed-paste content specifically always means "these
+    // are separate lines", so normalize every convention to "\n" here
+    // before anything downstream looks at it.
+    const normalized = text.replace(/\r\n?/g, "\n");
+    if (!normalized.includes("\n")) {
+      readline.write(normalized);
+      return;
+    }
+    if (foregroundCommand || !promptAbort) return;
+    const line = readline.line ?? "";
+    const cursor = readline.cursor ?? line.length;
+    pastedLine = line.slice(0, cursor) + normalized + line.slice(cursor);
+    readline.line = "";
+    readline.cursor = 0;
+    promptAbort.abort();
+  };
   const runTabShortcut = (args) => {
     if (!readline || mouseCommandRunning) return;
     mouseCommandRunning = true;
@@ -304,9 +342,9 @@ async function interactive(state) {
     if (shortcut === "tab") runTabShortcut([]);
     else if (shortcut === "tab-left") runTabShortcut(["l"]);
     else if (shortcut === "lsfancy") runFancyShortcut();
-    else if (shortcut === "lsfancy-parent") runFancyShortcut([".."]); 
+    else if (shortcut === "lsfancy-parent") runFancyShortcut([".."]);
     else if (shortcut === "tab-close") runTabShortcut(["x"]);
-  }) : process.stdin;
+  }, onPaste) : process.stdin;
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);
     const context = completionContext(line);
@@ -413,6 +451,7 @@ async function interactive(state) {
   if (terminal) {
     process.stdin.pipe(filteredInput);
     if (mouseTracking) process.stdout.write(MOUSE_ON);
+    process.stdout.write(PASTE_ON);
     refreshTimer = setInterval(() => void commandIndex.refresh(state), 10_000);
     refreshTimer.unref?.();
 
@@ -501,8 +540,16 @@ async function interactive(state) {
           closed,
         ]);
       } catch (error) {
-        if (error?.name === "AbortError") { pending = ""; continue; }
-        throw error;
+        if (error?.name !== "AbortError") throw error;
+        // onPaste aborts the same way Ctrl-C's interrupt() does, but leaves
+        // pastedLine set first. Falling through to the normal resolution
+        // path below with that as `line` runs it through the exact same
+        // pending/needsMoreInput/execute handling a typed-and-Entered line
+        // gets -- Ctrl-C itself never sets pastedLine, so that case is
+        // unaffected: pending is cleared and the loop just reprompts.
+        if (pastedLine === null) { pending = ""; continue; }
+        line = pastedLine;
+        pastedLine = null;
       } finally {
         promptAbort = null;
       }
@@ -535,6 +582,7 @@ async function interactive(state) {
       }
       if (terminal) {
         if (mouseTracking) process.stdout.write(MOUSE_OFF);
+        process.stdout.write(PASTE_OFF);
         process.stdin.unpipe(filteredInput);
       }
       if (terminal) process.stdin.setRawMode(false);
@@ -556,6 +604,7 @@ async function interactive(state) {
             if (cursor && cursor.column > 1) process.stdout.write("↩️\n");
             mouseTracking = Boolean(state.mouseTracking);
             if (mouseTracking) process.stdout.write(MOUSE_ON);
+            process.stdout.write(PASTE_ON);
           }
           if (eof) {
             if (terminal) setupReadline();
@@ -573,6 +622,7 @@ async function interactive(state) {
   } finally {
     if (terminal) {
       if (mouseTracking) process.stdout.write(MOUSE_OFF);
+      process.stdout.write(PASTE_OFF);
       process.stdin.unpipe(filteredInput);
     }
     clearInterval(historySaveTimer);

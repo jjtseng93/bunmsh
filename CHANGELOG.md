@@ -22,9 +22,26 @@ All notable user-visible changes to bunmsh are documented here.
   parsed and emitted as colorized pretty JSON; Markdown is rendered with
   `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
   through unchanged.
+- Add bracketed-paste support to the interactive prompt. A paste containing a
+  newline no longer gets read back a physical line at a time (which broke any
+  `\`-continued command in it, since each line ran on its own the instant its
+  line-ending arrived); it now resolves as a single already-typed line, going
+  through the same continuation/execute path Enter does, so a whole
+  multi-command, `\`-continued tutorial block can be pasted and run as-is. A
+  paste's own line-ending convention — `\n`, `\r\n`, or a bare `\r` (some
+  terminals use it for pasted content, even though bunmsh's parser otherwise
+  treats a standalone `\r` as whitespace) — is normalized before anything
+  downstream sees it. A single-line paste is unaffected. Independent of
+  `--mouse`/`BUNMSH_MOUSE`.
 
 ### Fixed
 
+- Recognize a line ending in a bare trailing backslash as an interactive
+  continuation request. Previously, typing `echo hi \` and pressing Enter ran
+  it immediately as `echo`, `hi`, `\` instead of showing the PS2 prompt and
+  waiting for the next line, because the interactive line-by-line `pending`
+  buffer only had the lone `\` at that point — the following `\n` that the
+  existing backslash-newline splice looks for hadn't been typed yet.
 - Normalize CRLF source to LF at every shell-language input boundary, covering
   script files, stdin, `-c`, interactive continuation, command substitutions,
   compound syntax, quoted text, and here-documents. A standalone carriage

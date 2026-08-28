@@ -9,6 +9,7 @@ import {
   decode,
   execute,
   executeArgv,
+  needsMoreInput,
   parse,
   runUnameFallback,
   tokenize,
@@ -75,6 +76,29 @@ describe("parser", () => {
 
   test("parses a pipeline", () => {
     expect(parse("echo hi | tr a-z A-Z")[0].pipeline).toHaveLength(2);
+  });
+
+  test("a bare trailing backslash asks for one more interactive line, then joins", () => {
+    // This is what the interactive prompt loop's `pending` string looks like
+    // the instant Enter is pressed after typing "echo hi \" -- the next
+    // physical line hasn't arrived yet, so there's no following "\n" for the
+    // ordinary backslash-newline splice to recognize.
+    expect(needsMoreInput("echo hi \\")).toBe(true);
+    expect(() => tokenize("echo hi \\", { strict: true }))
+      .toThrow("unterminated line continuation");
+    // Once the next line lands, `pending` gains the "\n" and the pair joins
+    // into one already-complete command -- no more waiting.
+    expect(needsMoreInput("echo hi \\\nbye")).toBe(false);
+    expect(tokenize("echo hi \\\nbye").map((token) => token.fragments?.[0]?.text))
+      .toEqual(["echo", "hi", "bye"]);
+  });
+
+  test("non-strict tokenize keeps accepting a trailing backslash as a literal word", () => {
+    // Only needsMoreInput's strict parse should wait for more input; a
+    // script or -c string whose last line genuinely ends in "\" at EOF keeps
+    // parsing the same way it always has.
+    const tokens = tokenize("echo hi \\");
+    expect(tokens.at(-1).fragments).toEqual([{ text: "\\", quote: "none" }]);
   });
 });
 
