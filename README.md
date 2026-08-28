@@ -523,6 +523,9 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
 
 #### Serving a folder packed into the executable
 
+Want `--auto-open`, `--minapk-webview`, or `--random-url` baked into the
+binary? See the next section.
+
 - What this is for is handing a folder of files to someone, not hosting a site.
 - That is why `serve` never answers a directory with its `index.html`:
 - `/` is always the listing, so the folder stays browsable 
@@ -589,6 +592,53 @@ JavaScript runs from a checkout and from the binary. `--asset` alone gives no
 such reader; the files exist only as paths inside the binary. See
 [`single-exe/README.md`](single-exe/README.md) for that route and for the
 trade-offs between its two back ends.
+
+#### Baking in `--auto-open`, `--minapk-webview`, `--random-url`
+
+`serve`'s three env vars (`SERVE_AUTO_OPEN`, `SERVE_MINAPK_WEBVIEW`,
+`SERVE_RANDOM_URL`) are each read as a literal `process.env.NAME` expression,
+so `bun build`'s `--define` can bake a default straight into the compiled
+binary — combine it with `--asset` to ship a self-opening server for a
+folder. `--define` normally needs a bare string quoted as JSON; this
+limitation doesn't apply here, because this project does extra handling to
+quote it for you (see below):
+
+```sh
+bun ./src/main.js --build-exe --asset /absolute/path/to/mysite \
+  --define process.env.SERVE_RANDOM_URL=on \
+  --define process.env.SERVE_AUTO_OPEN=/index.html \
+  --define process.env.SERVE_MINAPK_WEBVIEW=1
+./bmsh -cc builtin serve 'B:/~BUN/mysite'
+```
+
+```text
+Serving B:/~BUN/mysite
+  http://localhost:3000/AaBIdviNcACxwZF2x3VW0QAaBIdviNcAGsAviNI5B59A.../index.html
+```
+
+That starts `xdg-open` (or the platform fallback) on `/index.html` behind the
+random prefix, with `MINAPK_WEBVIEW=1` on its environment — no flags needed
+on the command line, and a plain `SERVE_AUTO_OPEN=/index.html` set at
+*runtime* no longer does anything, since `--define` replaced the
+`process.env.SERVE_AUTO_OPEN` expression in the compiled code with a literal
+before it ever runs. The CLI flags (`--auto-open`, `--random-url`,
+`--minapk-webview`, with their `=off`/`=no`/`=false` forms) still work
+normally and override whatever was baked in.
+
+**`--define` values originally need to be JSON, so a bare string has to
+arrive already quoted** — `--define process.env.SERVE_AUTO_OPEN=/index.html`
+would fail if directly passed to `bun build`, which tries to parse
+`/index.html` as a JS expression. `src/main.js` calls
+`stringifyNonPrimitiveDefineValues` (from
+`single-exe/compiled.js`, the same helper the npm package `jsmdcui` uses for
+its own `--define`-backed settings) once per `SERVE_*` name before
+`buildEarlyExit` runs, so it quotes any string-shaped value for you and
+leaves an already valid bare literal (a number, boolean, `null`, or
+`undefined` — e.g. `=1`) untouched. `off`, `on`, and a `/`-led path are all
+string-shaped, so they get quoted automatically; that's what makes the
+unquoted `=on` / `=/index.html` / `=1` forms above work directly from a
+shell, no manual `--define 'process.env.SERVE_AUTO_OPEN="/index.html"'`
+quoting required.
 
 ### PATH-fallback builtins
 

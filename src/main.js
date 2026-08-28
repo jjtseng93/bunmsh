@@ -19,7 +19,7 @@ import {
   nextGhostChunk,
 } from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
-import { buildEarlyExit } from "../single-exe/compiled.js";
+import { buildEarlyExit, stringifyNonPrimitiveDefineValues } from "../single-exe/compiled.js";
 import { importedHistory, readlineHistory, saveBunmshHistory } from "./history.js";
 import pkg from "../package.json" with { type:"json" }
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "./mouse.js";
@@ -705,6 +705,14 @@ async function main(argv) {
   return state.exitRequested ? state.exitStatus : result.status;
 }
 
+// Lets --define process.env.SERVE_AUTO_OPEN=/index.html, =off, or =yes
+// arrive unquoted from a shell: string-shaped values that aren't already a
+// valid bare literal (number/boolean/null/undefined, e.g. =1) get quoted
+// here, so `bun ./src/main.js --build-exe --define process.env.SERVE_AUTO_OPEN=/index.html`
+// works without the caller hand-quoting the value themselves.
+stringifyNonPrimitiveDefineValues(process.argv, "process.env.SERVE_AUTO_OPEN");
+stringifyNonPrimitiveDefineValues(process.argv, "process.env.SERVE_MINAPK_WEBVIEW");
+stringifyNonPrimitiveDefineValues(process.argv, "process.env.SERVE_RANDOM_URL");
 await buildEarlyExit(process.argv, "bmsh");
 process.exitCode = await main(process.argv.slice(2));
 // By this point every await in main() (including interactive()'s own
