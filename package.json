@@ -20,6 +20,7 @@
   ],
   "assets": [
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "help"
   ]
 }

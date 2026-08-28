@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   bunShellFallbackArgv,
+  builtinNames,
   createState,
   decode,
   execute,
+  executeArgv,
   parse,
   runUnameFallback,
   tokenize,
@@ -31,6 +33,7 @@ import {
   safeHistoryEntry,
 } from "../src/history.js";
 import { isLinkerPath } from "../single-exe/compiled.js";
+import { readAssetText } from "../single-exe/assetsHelper.js";
 import { fancyLs } from "../src/fancy-ls.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
 import { canonicalEnvironment, environmentValue, homeRelativePath } from "../src/environment.js";
@@ -330,8 +333,62 @@ describe("execution", () => {
     expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n 2")).toMatchObject({ stdout: "2\n3\n" });
     expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n +2")).toMatchObject({ stdout: "2\n3\n" });
     expect(await run("printf '1\\n2\\n3\\n' | builtin tail -n+3")).toMatchObject({ stdout: "3\n" });
+    expect(await run("printf '1\\n2\\n3\\n' | builtin tac")).toMatchObject({ stdout: "3\n2\n1\n" });
+    expect(await run("printf '1\\n2' | builtin tac")).toMatchObject({ stdout: "21\n" });
     expect(await run("builtin date +%F")).toMatchObject({ status: 0 });
     expect(await run("builtin sleep 1ms")).toMatchObject({ status: 0, stdout: "", stderr: "" });
+  });
+
+  test("renders asset-backed Markdown help for every documented builtin", async () => {
+    const excluded = new Set([".", "..", "//", "-", "~"]);
+    const titles = { "[": "test", __builtin: "builtin", chdir: "cd" };
+    const files = { ":": "colon", ...titles };
+    const optionDocs = new Set([
+      "basename", "builtin", "bun", "bunmsh", "cat", "catfancy", "chmod", "command", "cp", "cut",
+      "date", "dirname", "echo", "env", "find", "getopts", "grep", "head", "kill",
+      "ln", "ls", "lsbun", "lsfancy", "mkdir", "mktemp", "mv", "print", "printf",
+      "read", "readonly", "rm", "rmdir", "sed", "seq", "serve", "set", "sleep",
+      "sort", "tab", "tac", "tail", "tee", "test", "touch", "tr", "unalias",
+      "uname", "unset", "wc", "whence",
+    ]);
+    const state = createState({ env: { HOME: "/tmp", PATH: "/no/such/path" } });
+    for (const name of builtinNames().filter((item) => !excluded.has(item))) {
+      const output = await executeArgv(["builtin", name, "--help"], state, { capture: true });
+      expect(output.status, name).toBe(0);
+      const text = decode(output.stdout);
+      expect(text, name).toContain("\x1b[");
+      expect(Bun.stripANSI(text), name).toStartWith(titles[name] ?? name);
+      const source = await readAssetText(`help/${files[name] ?? name}.md`);
+      expect(source, name).toStartWith(`## ${titles[name] ?? name}`);
+      expect(source, name).toContain("\n### Example\n");
+      expect(source, name).toContain("\n```sh\n");
+      expect(source, name).toContain("\nOutput:\n\n```text\n");
+      if (optionDocs.has(files[name] ?? name))
+        expect(source, name).toMatch(/^### Options(?: and forms)?$/m);
+    }
+
+    const short = await executeArgv(["builtin", "catfancy", "-h"], state, { capture: true });
+    expect(short.status).toBe(0);
+    expect(Bun.stripANSI(decode(short.stdout))).toStartWith("catfancy");
+
+    const lsfancyShort = await executeArgv(
+      ["builtin", "lsfancy", "-h"],
+      createState({ cwd: new URL("..", import.meta.url).pathname }),
+      { capture: true },
+    );
+    expect(lsfancyShort.status).toBe(0);
+    expect(Bun.stripANSI(decode(lsfancyShort.stdout))).toContain("README.md");
+    expect(Bun.stripANSI(decode(lsfancyShort.stdout))).not.toContain("Usage");
+
+    const lsfancyHelp = await executeArgv(
+      ["builtin", "lsfancy", "--help"], state, { capture: true },
+    );
+    expect(lsfancyHelp.status).toBe(0);
+    expect(Bun.stripANSI(decode(lsfancyHelp.stdout))).toStartWith("lsfancy");
+
+    const basenameHelp = await readAssetText("help/basename.md");
+    expect(basenameHelp).toContain("basename archive.tar.gz .gz");
+    expect(basenameHelp).toContain("archive.tar");
   });
 
   test("catfancy is a PATH-overridable fallback builtin", async () => {
@@ -848,7 +905,7 @@ fi
   test("which still searches PATH while direct PATH lookup is disabled", async () => {
     const shell = Bun.which("sh");
     expect(shell).toBeTruthy();
-    const output = await run("tab path off; which sh; $(which sh) -c 'printf explicit-path'");
+    const output = await run("tab path off; which sh; \"$(which sh)\" -c 'printf explicit-path'");
     expect(output.status).toBe(0);
     expect(output.stdout).toBe(`${shell}\nexplicit-path`);
     expect(output.stderr).toBe("");

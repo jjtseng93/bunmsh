@@ -119,7 +119,7 @@ such as Termux and xterm.
 
 In `--builtin-only` mode, regular and fallback builtins, aliases, and functions
 remain available. An explicit executable path containing `/` can still run.
-The `which` builtin always searches the current `PATH`, so `$(which COMMAND)`
+The `which` builtin always searches the current `PATH`, so `"$(which COMMAND)"`
 can explicitly select a PATH executable while this mode is active. Use
 `tab path` interactively to toggle this setting; `tab path on`/`true` enables
 direct PATH lookup and `tab path off`/`false` disables it.
@@ -590,6 +590,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `basename` | `--`, optional suffix |
 | `dirname` | `--` |
 | `cat` | `--`; files and `-` for stdin; no other options |
+| `tac` | `--`; files and `-` for stdin; reverses newline-delimited records in each operand; no other options |
 | `catfancy` | `--`; files and `-` for stdin; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, TOML, and XML are parsed, pretty-printed as JSON, and colored with `Bun.color`; Markdown uses `Bun.markdown.ansi` with terminal hyperlinks; other formats are emitted unchanged |
 | `head` | `-n N`, `-N`, `-c N`, `-cN` |
 | `tail` | `-n N`, `-N`; `-n +N` and `-n+N` output starting at line N |

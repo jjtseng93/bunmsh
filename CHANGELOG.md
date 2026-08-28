@@ -6,6 +6,11 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Added
 
+- Add a `tac` PATH-fallback builtin for reversing newline-delimited records
+  from files or stdin while preserving their bytes and separators.
+- Add asset-backed `-h` and `--help` output for documented regular and fallback
+  builtins. Help lives as Markdown under `help/`, starts at level-two headings,
+  and renders through `Bun.markdown.ansi` with terminal hyperlinks enabled.
 - Add the `catfancy` PATH-fallback builtin. Previewable data formats are
   parsed and emitted as colorized pretty JSON; Markdown is rendered with
   `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass

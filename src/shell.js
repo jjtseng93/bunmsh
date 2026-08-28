@@ -36,6 +36,7 @@ import {
 import { Readable, Writable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
+import { readAssetText } from "../single-exe/assetsHelper.js";
 import { dedupeBunmshHistory, saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
@@ -59,6 +60,33 @@ const BUN_RUNTIME_COMMAND = EXECUTABLE_COMMAND.length > 1
   : [BUN_EXECUTABLE];
 const BUNMSH_ENTRY = resolvePath(import.meta.dirname, "main.js");
 const PIPELINE_STATE_ENV = "BUNMSH_INTERNAL_PIPELINE_STATE";
+
+const HELP_ALIASES = {
+  ":": "colon",
+  "[": "test",
+  __builtin: "builtin",
+  chdir: "cd",
+};
+const HELP_EXCLUDED = new Set([".", "..", "//", "-", "~"]);
+const HELP_LONG_ONLY = new Set(["ls", "lsfancy"]);
+
+function requestsBuiltinHelp(argv) {
+  return argv.length === 2 &&
+    (argv[1] === "--help" || (argv[1] === "-h" && !HELP_LONG_ONLY.has(argv[0])));
+}
+
+function hasBuiltinHelp(name) {
+  return !HELP_EXCLUDED.has(name);
+}
+
+async function builtinHelp(name) {
+  try {
+    const source = await readAssetText(`help/${HELP_ALIASES[name] ?? name}.md`);
+    return result(0, String(Bun.markdown.ansi(source, { hyperlinks: true })));
+  } catch (error) {
+    return result(1, "", `bunmsh: ${name}: cannot load help: ${error.message}\n`);
+  }
+}
 
 function shellPath(value) {
   return process.platform === "win32" ? value.replaceAll("\\", "/") : value;
@@ -1723,6 +1751,37 @@ async function readFallbackFiles(operands, state, input) {
   return concatBytes(parts);
 }
 
+async function runTacFallback(argv, state, input) {
+  let operands = argv.slice(1);
+  if (operands[0] === "--") operands = operands.slice(1);
+  if (operands.some((value) => value.startsWith("-") && value !== "-"))
+    return result(1, "", "bunmsh: tac: options are not supported\n");
+  if (operands.length === 0) operands = ["-"];
+
+  const output = [];
+  let status = 0;
+  let stderr = "";
+  for (const operand of operands) {
+    try {
+      const data = await readFallbackFiles([operand], state, input);
+      const records = [];
+      let start = 0;
+      for (let i = 0; i < data.byteLength; i++) {
+        if (data[i] !== 10) continue;
+        records.push(data.slice(start, i + 1));
+        start = i + 1;
+      }
+      if (start < data.byteLength) records.push(data.slice(start));
+      records.reverse();
+      output.push(concatBytes(records));
+    } catch (error) {
+      status = 1;
+      stderr += `bunmsh: tac: ${operand}: ${error.message}\n`;
+    }
+  }
+  return result(status, concatBytes(output), stderr);
+}
+
 async function runHeadFallback(argv, state, input) {
   let count = 10, i = 1, bytesMode = false;
   if (argv[i] === "-n") count = Number(argv[++i]), i++;
@@ -2305,6 +2364,7 @@ const fallbackBuiltins = {
   seq: runBunShellFallback,
   touch: runBunShellFallback,
   cat: runCatFallback,
+  tac: runTacFallback,
   catfancy: async (argv, state, input) => {
     const output = await catFancy(argv, state.cwd, fallbackInput(input));
     return result(output.status, output.stdout, output.stderr);
@@ -2945,6 +3005,8 @@ async function runCommandArgv(
       { ...options, pipelineKillSignal: "SIGTERM" },
     );
   while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
+    if (requestsBuiltinHelp(commandArgv) && hasBuiltinHelp(commandArgv[0]))
+      return builtinHelp(commandArgv[0]);
     if (commandArgv[0] !== "command") {
       const builtinName = commandArgv[0];
       const start = commandArgv[1] === "--" ? 2 : 1;
@@ -2957,6 +3019,8 @@ async function runCommandArgv(
       if (!Object.hasOwn(builtins, commandArgv[0]) &&
           !Object.hasOwn(fallbackBuiltins, commandArgv[0]))
         return result(1, "", `bunmsh: builtin: ${commandArgv[0]}: not found\n`);
+      if (requestsBuiltinHelp(commandArgv) && hasBuiltinHelp(commandArgv[0]))
+        return builtinHelp(commandArgv[0]);
       if (!["command", "builtin", "__builtin", "time", "yes"].includes(commandArgv[0]))
         return (builtins[commandArgv[0]] ?? fallbackBuiltins[commandArgv[0]])(
           commandArgv,
@@ -2991,6 +3055,11 @@ async function runCommandArgv(
       commandState = { ...commandState, env: { ...commandState.env, PATH: DEFAULT_COMMAND_PATH } };
     }
   }
+  if (requestsBuiltinHelp(commandArgv) && hasBuiltinHelp(commandArgv[0]) &&
+      (Object.hasOwn(builtins, commandArgv[0]) ||
+       (!findExecutable(commandArgv[0], commandState) &&
+        Object.hasOwn(fallbackBuiltins, commandArgv[0]))))
+    return builtinHelp(commandArgv[0]);
   if (commandArgv[0] === "time") {
     const started = Bun.nanoseconds();
     const execution = commandArgv.length === 1
