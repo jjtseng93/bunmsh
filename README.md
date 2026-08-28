@@ -460,7 +460,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 
 ### The `serve` command
 
-`serve [directory]` starts a minimal HTTP file server; it is a PATH-fallback
+`serve [--auto-open] [--minapk-webview] [--random-url] [directory]` starts a minimal HTTP file server; it is a PATH-fallback
 builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
 `builtin serve ...`.
 
@@ -470,6 +470,17 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
   back to a free port chosen by the OS when it is taken — an explicit `PORT`
   that is already in use is an error. The URL it settled on is printed on
   startup.
+- `--auto-open` opens the printed URL through `xdg-open` after startup.
+  `--minapk-webview` adds `MINAPK_WEBVIEW=1` to that child process, matching
+  exeapk's WebView-aware `xdg-open` behavior (`--minapk-webview=N` passes a
+  different digit string). `--random-url` places the server behind a
+  URL-safe random prefix generated from four Bun UUIDv7 values (roughly 296
+  bits of random entropy); a request without it gets `404`. All three
+  default to off/not-passed, and `SERVE_AUTO_OPEN`, `SERVE_MINAPK_WEBVIEW`,
+  and `SERVE_RANDOM_URL` set their defaults instead. A CLI flag always
+  overrides its environment default: the bare flag forces it on, and
+  `=off`/`=no`/`=false`/`=` (empty) forces it off, even if the environment
+  turned it on inline.
 - While it runs it holds the foreground. On a TTY it also takes single-word
   controls on stdin: `q`, `quit` or `exit` stops it, and `o` opens the URL with
   `xdg-open`. `Ctrl-C` and `SIGTERM` stop it too, exiting `130` and `143`
@@ -613,7 +624,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
-| `serve` | `serve [directory]`; see [The `serve` command](#the-serve-command) above |
+| `serve` | Auto-open, minapk WebView, and high-entropy random-URL flags; see [The `serve` command](#the-serve-command) above |
 | `ls`, `lsfancy` | The `ls` fallback is `lsfancy`: emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, `-S`, `-1`, `-F`, combinable (including `-lh`, `-ltr`, and `-lSF`); `-l` shows a symlink's target (`link -> target`, including a broken one), and a symlink whose target can't be resolved (missing, or a cycle) gets a 🚫 icon instead of 🔗; `-F` appends a classify suffix (`/` directory, `@` symlink, `*` executable, `=` socket, `\|` FIFO); always reads the directory without using the completion cache |
 | `lsbun` | Bun Shell's own `ls`, kept reachable under this name now that the `ls` fallback is `lsfancy`; currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |

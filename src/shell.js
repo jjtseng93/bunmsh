@@ -41,7 +41,7 @@ import { dedupeBunmshHistory, saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
-import { main as startFileServer, waitForInterrupt } from "../serve.js";
+import { main as startFileServer, parseServeArguments, waitForInterrupt } from "../serve.js";
 import { main as catFancy } from "./cat-fancy.js";
 import { parseCatOperands } from "./cat-operands.js";
 
@@ -2391,11 +2391,11 @@ const fallbackBuiltins = {
   bunmsh: runBunmshFallback,
   bun: runBunFallback,
   serve: async (argv, state) => {
-    if (argv.length > 2)
-      return result(2, "", "bunmsh: serve: usage: serve [directory]\n");
+    const options = parseServeArguments(argv.slice(1), state.env, state.cwd);
+    if (options.error) return result(2, "", `bunmsh: serve: ${options.error}\n`);
     try {
-      const server = startFileServer(argv[1] ?? state.cwd);
-      const signal = await waitForInterrupt(server);
+      const server = startFileServer(options.directory, options);
+      const signal = await waitForInterrupt(server, options);
       return result(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0);
     } catch (error) {
       return result(1, "", `bunmsh: serve: ${error.message}\n`);

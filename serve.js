@@ -6,6 +6,74 @@ import { createInterface } from "node:readline";
 import { iconFor } from "./src/fancy-ls.js";
 
 let root = process.cwd();
+let randomRoute = "";
+const publicUrls = new WeakMap();
+
+const ENV_FLAGS = {
+  autoOpen: process.env.SERVE_AUTO_OPEN,
+  minapkWebview: process.env.SERVE_MINAPK_WEBVIEW,
+  randomUrl: process.env.SERVE_RANDOM_URL,
+};
+
+const OPTION_NAMES = {
+  "--auto-open": "autoOpen",
+  "--minapk-webview": "minapkWebview",
+  "--random-url": "randomUrl",
+};
+
+const envEnabled = (value) => /^(?:1|true|yes|on)$/i.test(String(value ?? "").trim());
+// A bare CLI flag always means "on"; `=off`/`=no`/`=false`/`=` always means an
+// explicit "off" that overrides an environment default turned on inline.
+const isOffValue = (value) => value === "" || /^(?:off|no|false)$/i.test(value);
+
+// SERVE_MINAPK_WEBVIEW can hold a boolean-ish word (on/off/...) or a literal
+// number string to pass through as MINAPK_WEBVIEW's default value.
+function minapkWebviewEnvDefault(value) {
+  const trimmed = String(value ?? "").trim();
+  if (isOffValue(trimmed)) return null;
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return envEnabled(trimmed) ? "1" : null;
+}
+
+export function parseServeArguments(args, env = process.env, cwd = process.cwd()) {
+  const options = {
+    autoOpen: envEnabled(ENV_FLAGS.autoOpen),
+    minapkWebview: minapkWebviewEnvDefault(ENV_FLAGS.minapkWebview),
+    randomUrl: envEnabled(ENV_FLAGS.randomUrl),
+  };
+  const operands = [];
+  let parseOptions = true;
+  for (const argument of args) {
+    if (parseOptions && argument === "--") {
+      parseOptions = false;
+      continue;
+    }
+    if (parseOptions && argument.startsWith("--")) {
+      const equals = argument.indexOf("=");
+      const flag = equals === -1 ? argument : argument.slice(0, equals);
+      const value = equals === -1 ? undefined : argument.slice(equals + 1);
+      const name = OPTION_NAMES[flag];
+      if (!name) return { error: `unknown option: ${argument}` };
+      if (name === "minapkWebview") {
+        if (value === undefined) options.minapkWebview = "1";
+        else if (isOffValue(value)) options.minapkWebview = null;
+        else if (/^\d+$/.test(value)) options.minapkWebview = value;
+        else return { error: `invalid value for --minapk-webview: ${value}` };
+      } else {
+        options[name] = value === undefined || !isOffValue(value);
+      }
+      continue;
+    }
+    operands.push(argument);
+  }
+  if (operands.length > 1) return { error: "too many directory operands" };
+  return { directory: operands[0] ?? cwd, ...options, env };
+}
+
+export const randomServeRoute = () =>
+  `${Array.from({ length: 4 }, () => Bun.randomUUIDv7("base64url")).join("")}/`;
+
+export const serveUrl = (server) => publicUrls.get(server) ?? server.url;
 
 const escapeHtml = (value) => Bun.escapeHTML(value);
 
@@ -201,8 +269,14 @@ const handleRequest = async (request) => {
     return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } });
 
   const url = new URL(request.url);
-  const originalPreviewPath = previewRequest(url.pathname);
-  const resolved = resolveRequestPath(originalPreviewPath ?? url.pathname);
+  let pathname = url.pathname;
+  if (randomRoute) {
+    const prefix = `/${randomRoute}`;
+    if (!pathname.startsWith(prefix)) return notFound();
+    pathname = `/${pathname.slice(prefix.length)}`;
+  }
+  const originalPreviewPath = previewRequest(pathname);
+  const resolved = resolveRequestPath(originalPreviewPath ?? pathname);
   if (!resolved) return new Response("Bad Request", { status: 400 });
 
   let stats;
@@ -256,12 +330,33 @@ const safeHandleRequest = async (request) => {
   }
 };
 
-export function main(directory = process.argv[2] ?? process.cwd()) {
+function openServeUrl(url, minapkWebview, env = process.env) {
+  const executable = Bun.which("xdg-open");
+  if (!executable) {
+    console.error("bunmsh: serve: xdg-open not found");
+    return false;
+  }
+  try {
+    Bun.spawn([executable, String(url)], {
+      env: minapkWebview ? { ...env, MINAPK_WEBVIEW: String(minapkWebview) } : env,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    }).unref();
+    return true;
+  } catch (error) {
+    console.error(`bunmsh: serve: xdg-open: ${error.message}`);
+    return false;
+  }
+}
+
+export function main(directory = process.cwd(), options = {}) {
   // The virtual mount itself is not stat-able. import.meta.dirname points at
   // its real root on each platform: /$bunfs/root or B:/~BUN/root.
   root = resolve(resolveBunfsPath(directory) ?? directory);
+  randomRoute = options.randomUrl ? randomServeRoute() : "";
   const serverOptions = {
-    port: Number(process.env.PORT ?? 3000),
+    port: Number((options.env ?? process.env).PORT ?? 3000),
     fetch: safeHandleRequest,
   };
   let server;
@@ -273,11 +368,14 @@ export function main(directory = process.argv[2] ?? process.cwd()) {
     if (serverOptions.port !== 3000 || !addressInUse) throw error;
     server = Bun.serve({ ...serverOptions, port: 0 });
   }
-  console.log(`Serving ${root}\n  ${server.url.href}`);
+  const url = randomRoute ? new URL(randomRoute, server.url) : server.url;
+  publicUrls.set(server, url);
+  console.log(`Serving ${root}\n  ${url.href}`);
+  if (options.autoOpen) openServeUrl(url, options.minapkWebview, options.env);
   return server;
 }
 
-export function waitForInterrupt(server) {
+export function waitForInterrupt(server, options = {}) {
   return new Promise((resolve) => {
     let readline;
     let finished = false;
@@ -303,20 +401,7 @@ export function waitForInterrupt(server) {
       if (["q", "quit", "exit"].includes(command)) {
         stop("QUIT");
       } else if (command === "o") {
-        const executable = Bun.which("xdg-open");
-        if (!executable) {
-          console.error("bunmsh: serve: xdg-open not found");
-          return;
-        }
-        try {
-          Bun.spawn([executable, server.url.href], {
-            stdin: "ignore",
-            stdout: "ignore",
-            stderr: "ignore",
-          }).unref();
-        } catch (error) {
-          console.error(`bunmsh: serve: xdg-open: ${error.message}`);
-        }
+        openServeUrl(serveUrl(server), options.minapkWebview, options.env);
       } else if (command) {
         console.error(`bunmsh: serve: unknown control: ${command}`);
       }
@@ -325,4 +410,11 @@ export function waitForInterrupt(server) {
   });
 }
 
-if (import.meta.main) await waitForInterrupt(main());
+if (import.meta.main) {
+  const options = parseServeArguments(process.argv.slice(2));
+  if (options.error) {
+    console.error(`bunmsh: serve: ${options.error}`);
+    process.exit(2);
+  }
+  await waitForInterrupt(main(options.directory, options), options);
+}

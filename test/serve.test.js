@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { highlightJson, main as startFileServer, resolveBunfsPath } from "../serve.js";
+import {
+  highlightJson,
+  main as startFileServer,
+  parseServeArguments,
+  randomServeRoute,
+  resolveBunfsPath,
+} from "../serve.js";
 
 const cwd = join(import.meta.dir, "serve");
 let previousPort;
@@ -31,6 +37,69 @@ test("serve accepts either bunfs spelling and derives the platform path", () => 
   expect(resolveBunfsPath("B:/~BUN/root/assets/file.txt", "B:\\~BUN\\root"))
     .toBe("B:/~BUN/root/assets/file.txt");
   expect(resolveBunfsPath("/$bunfs", "/source/bunmsh")).toBeNull();
+});
+
+test("serve CLI flags turn options on over environment defaults left off", () => {
+  expect(parseServeArguments(["--auto-open", "--minapk-webview", "--random-url", "public"], {
+    SERVE_AUTO_OPEN: "0",
+    SERVE_MINAPK_WEBVIEW: "0",
+    SERVE_RANDOM_URL: "false",
+  }, "/cwd")).toMatchObject({
+    directory: "public",
+    autoOpen: true,
+    minapkWebview: "1",
+    randomUrl: true,
+  });
+});
+
+test("serve options default to off/not-passed with no flags or environment", () => {
+  expect(parseServeArguments([], {}, "/cwd")).toMatchObject({
+    directory: "/cwd",
+    autoOpen: false,
+    minapkWebview: null,
+    randomUrl: false,
+  });
+});
+
+test("serve inline environment defaults carry through unless overridden", () => {
+  const env = { SERVE_AUTO_OPEN: "1", SERVE_MINAPK_WEBVIEW: "yes", SERVE_RANDOM_URL: "on" };
+  expect(parseServeArguments([], env, "/cwd")).toMatchObject({
+    autoOpen: true,
+    minapkWebview: "1",
+    randomUrl: true,
+  });
+});
+
+test("serve CLI =off/no/false/empty explicitly disables an environment default turned on", () => {
+  const env = { SERVE_AUTO_OPEN: "1", SERVE_MINAPK_WEBVIEW: "1", SERVE_RANDOM_URL: "true" };
+  expect(parseServeArguments(
+    ["--auto-open=off", "--minapk-webview=no", "--random-url=false"], env, "/cwd",
+  )).toMatchObject({ autoOpen: false, minapkWebview: null, randomUrl: false });
+  expect(parseServeArguments(["--auto-open=", "--random-url="], env, "/cwd"))
+    .toMatchObject({ autoOpen: false, randomUrl: false });
+});
+
+test("serve --minapk-webview=N passes the literal digit string", () => {
+  expect(parseServeArguments(["--minapk-webview=42"], {}, "/cwd"))
+    .toMatchObject({ minapkWebview: "42" });
+  expect(parseServeArguments(["--minapk-webview=bogus"], {}, "/cwd"))
+    .toMatchObject({ error: "invalid value for --minapk-webview: bogus" });
+});
+
+test("serve --minapk-webview never consumes a following bare argument as its value", () => {
+  // Only `--minapk-webview=N` sets a value; a space-separated "1" must stay a
+  // directory operand, or a real directory named "1" would collide with it.
+  expect(parseServeArguments(["--minapk-webview", "1"], {}, "/cwd"))
+    .toMatchObject({ minapkWebview: "1", directory: "1" });
+  expect(parseServeArguments(["--minapk-webview", "1", "dir"], {}, "/cwd"))
+    .toMatchObject({ error: "too many directory operands" });
+});
+
+test("serve random routes have high entropy and are URL-safe", () => {
+  const first = randomServeRoute();
+  const second = randomServeRoute();
+  expect(first).not.toBe(second);
+  expect(first).toMatch(/^[A-Za-z0-9_-]{80,}\/$/);
 });
 
 beforeAll(() => {
