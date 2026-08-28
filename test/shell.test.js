@@ -307,6 +307,32 @@ describe("execution", () => {
     expect(await run("builtin sleep 1ms")).toMatchObject({ status: 0, stdout: "", stderr: "" });
   });
 
+  test("catfancy is a PATH-overridable fallback builtin", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bunmsh-catfancy-path-"));
+    try {
+      await Bun.write(join(directory, "data.json5"), "{answer: 42}");
+      const fallback = await run("catfancy data.json5", {
+        cwd: directory,
+        env: { PATH: "/no/such/path" },
+      });
+      expect(fallback.status).toBe(0);
+      expect(Bun.stripANSI(fallback.stdout)).toBe('{\n  "answer": 42\n}\n');
+
+      const executable = join(directory, "catfancy");
+      await Bun.write(executable, "#!/bin/sh\necho external-catfancy\n");
+      chmodSync(executable, 0o755);
+      const external = await run("catfancy data.json5; builtin catfancy data.json5", {
+        cwd: directory,
+        env: { PATH: directory },
+      });
+      expect(external.status).toBe(0);
+      expect(external.stdout).toStartWith("external-catfancy\n");
+      expect(Bun.stripANSI(external.stdout)).toContain('"answer": 42');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("lsfancy classifies files by extension and always reads the directory", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bunmsh-lsfancy-"));
     try {

@@ -2,6 +2,15 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.1.11] - 2026-08-28
+
+### Added
+
+- Add the `catfancy` PATH-fallback builtin. Previewable data formats are
+  parsed and emitted as colorized pretty JSON; Markdown is rendered with
+  `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
+  through unchanged.
+
 ## [0.1.10] - 2026-08-27
 
 ### Added

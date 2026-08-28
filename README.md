@@ -577,6 +577,7 @@ trade-offs between its two back ends.
 | `basename` | `--`, optional suffix |
 | `dirname` | `--` |
 | `cat` | `--`; files and `-` for stdin; no other options |
+| `catfancy` | `--`; files and `-` for stdin; JSON, JSON5, JSONC, JSONL/NDJSON, YAML, TOML, and XML are parsed, pretty-printed as JSON, and colored with `Bun.color`; Markdown uses `Bun.markdown.ansi` with terminal hyperlinks; other formats are emitted unchanged |
 | `head` | `-n N`, `-N`, `-c N`, `-cN` |
 | `tail` | `-n N`, `-N`; `-n +N` and `-n+N` output starting at line N |
 | `wc` | `-l`, `-w`, `-c`, combinable |

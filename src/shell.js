@@ -41,6 +41,7 @@ import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
 import { main as startFileServer, waitForInterrupt } from "../serve.js";
+import { main as catFancy } from "./cat-fancy.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -2280,6 +2281,10 @@ const fallbackBuiltins = {
   seq: runBunShellFallback,
   touch: runBunShellFallback,
   cat: runCatFallback,
+  catfancy: async (argv, state, input) => {
+    const output = await catFancy(argv, state.cwd, fallbackInput(input));
+    return result(output.status, output.stdout, output.stderr);
+  },
   cp: runBunShellCpFallback,
   head: runHeadFallback,
   tail: (argv, state, input) => runTextFilter(argv, state, input, "tail"),
