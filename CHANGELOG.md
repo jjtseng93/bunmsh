@@ -11,6 +11,21 @@ All notable user-visible changes to bunmsh are documented here.
   `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
   through unchanged.
 
+### Fixed
+
+- Normalize CRLF source to LF at every shell-language input boundary, covering
+  script files, stdin, `-c`, interactive continuation, command substitutions,
+  compound syntax, quoted text, and here-documents. A standalone carriage
+  return remains untouched.
+- Treat backslash followed by either LF or CRLF as a line continuation before
+  token recognition. This supports indented multi-line command invocations
+  without introducing empty arguments, including `enter_rootfs.sh`-style
+  multi-line `exec` commands.
+- Stream top-level compound-command output directly to the terminal. An
+  interactive program launched by `exec` inside `if`, loops, or other compound
+  syntax previously inherited stdin but had stdout and stderr buffered until
+  it exited, making an entered rootfs appear to hang with a blank screen.
+
 ## [0.1.10] - 2026-08-27
 
 ### Added

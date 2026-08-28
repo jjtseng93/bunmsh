@@ -88,6 +88,17 @@ function isSpace(ch) {
   return ch === " " || ch === "\t" || ch === "\r";
 }
 
+function lineContinuationLength(source, offset) {
+  if (source[offset] !== "\\") return 0;
+  if (source[offset + 1] === "\n") return 2;
+  if (source[offset + 1] === "\r" && source[offset + 2] === "\n") return 3;
+  return 0;
+}
+
+function normalizeSource(source) {
+  return String(source).replaceAll("\r\n", "\n");
+}
+
 function wordToken(offset) {
   return { type: "word", fragments: [], offset };
 }
@@ -176,6 +187,7 @@ function consumeHeredocBodies(source, start, pending, strict) {
 }
 
 export function tokenize(source, options = {}) {
+  source = normalizeSource(source);
   const strict = Boolean(options.strict);
   const tokens = [];
   let i = 0;
@@ -210,6 +222,15 @@ export function tokenize(source, options = {}) {
 
   while (i < source.length) {
     const ch = source[i];
+
+    // A backslash-newline pair is removed before token recognition. Besides
+    // joining ordinary words, doing this here avoids creating a phantom empty
+    // word for the indented continuation lines commonly used in exec calls.
+    const continuation = lineContinuationLength(source, i);
+    if (continuation) {
+      i += continuation;
+      continue;
+    }
 
     if (ch === "\n") {
       finishWord();
@@ -306,10 +327,15 @@ export function tokenize(source, options = {}) {
           i++;
           break;
         }
+        const quotedContinuation = lineContinuationLength(source, i);
+        if (quotedContinuation) {
+          i += quotedContinuation;
+          continue;
+        }
         if (source[i] === "\\" && i + 1 < source.length) {
           const next = source[i + 1];
-          if (next === "$" || next === '"' || next === "\\" || next === "\n") {
-            text += next === "\n" ? "" : `\u0000${next}`;
+          if (next === "$" || next === '"' || next === "\\") {
+            text += `\u0000${next}`;
             i += 2;
             continue;
           }
@@ -333,8 +359,6 @@ export function tokenize(source, options = {}) {
       if (i + 1 >= source.length) {
         pushFragment(word, "\\", "none");
         i++;
-      } else if (source[i + 1] === "\n") {
-        i += 2;
       } else {
         pushFragment(word, `\u0000${source[i + 1]}`, "none");
         i += 2;
@@ -2585,6 +2609,7 @@ function parseCompoundScript(source) {
 // front end can use this, mirroring mksh's PS2 continuation prompt, to tell
 // "still typing this command" apart from a real syntax error.
 export function needsMoreInput(source) {
+  source = normalizeSource(source);
   try {
     if (hasCompoundSyntax(source)) parseCompoundScript(source);
     else tokenize(source, { strict: true });
@@ -2594,10 +2619,12 @@ export function needsMoreInput(source) {
   return false;
 }
 
-async function executeNodeList(nodes, state) {
+async function executeNodeList(nodes, state, options = {}) {
+  const capture = options.capture ?? true;
   const stdout = [], stderr = [];
   let execution = result(state.lastStatus);
   const append = (value) => {
+    if (!capture) return;
     if (value.stdout.byteLength) stdout.push(value.stdout);
     if (value.stderr.byteLength) stderr.push(value.stderr);
   };
@@ -2608,7 +2635,7 @@ async function executeNodeList(nodes, state) {
       continue;
     }
     if (node.type === "command") {
-      execution = await execute(node.source, state, { capture: true, simple: true });
+      execution = await execute(node.source, state, { capture, simple: true });
       append(execution);
       continue;
     }
@@ -2624,7 +2651,7 @@ async function executeNodeList(nodes, state) {
         exitRequested: false,
         exitStatus: 0,
       };
-      execution = await execute(node.source, child, { capture: true });
+      execution = await execute(node.source, child, { capture });
       append(execution);
       state.lastStatus = execution.status;
       continue;
@@ -2642,14 +2669,14 @@ async function executeNodeList(nodes, state) {
           if (state.readLines.at(-1) === "") state.readLines.pop();
         }
         while (true) {
-          const checked = await execute(node.condition, state, { capture: true, simple: true });
+          const checked = await execute(node.condition, state, { capture, simple: true });
           append(checked);
           const proceed = node.kind === "until" ? checked.status !== 0 : checked.status === 0;
           if (!proceed || state.exitRequested) {
             if (!ranBody) execution = result();
             break;
           }
-          execution = await executeNodeList(node.body, state);
+          execution = await executeNodeList(node.body, state, { capture });
           ranBody = true;
           append(execution);
           if (state.exitRequested) break;
@@ -2675,7 +2702,7 @@ async function executeNodeList(nodes, state) {
       for (const value of values) {
         if (state.readonly.has(node.name)) { execution = readonlyError(node.name); break; }
         state.env[node.name] = value;
-        execution = await executeNodeList(node.body, state);
+        execution = await executeNodeList(node.body, state, { capture });
         append(execution);
         if (state.exitRequested) break;
       }
@@ -2694,7 +2721,7 @@ async function executeNodeList(nodes, state) {
           if (globPatternRegex(pattern, true, true, true).test(value)) { matches = true; break; }
         }
         if (!matches) continue;
-        execution = await executeNodeList(arm.body, state);
+        execution = await executeNodeList(arm.body, state, { capture });
         append(execution);
         break;
       }
@@ -2706,13 +2733,13 @@ async function executeNodeList(nodes, state) {
       let condition = branch.condition.trim();
       let negate = false;
       while (/^!\s+/.test(condition)) { negate = !negate; condition = condition.replace(/^!\s+/, ""); }
-      const checked = await execute(condition, state, { capture: true, simple: true });
+      const checked = await execute(condition, state, { capture, simple: true });
       append(checked);
       if ((checked.status === 0) !== negate) { selected = branch.body; break; }
     }
     execution = selected
-      ? await executeNodeList(selected, state)
-      : await executeNodeList(node.otherwise, state);
+      ? await executeNodeList(selected, state, { capture })
+      : await executeNodeList(node.otherwise, state, { capture });
     append(execution);
     state.lastStatus = execution.status;
   }
@@ -3283,6 +3310,7 @@ async function runPipeline(pipeline, state, options = {}) {
 }
 
 export async function execute(source, state = createState(), io = {}) {
+  source = normalizeSource(source);
   if (source === "?") {
     const execution = result(0, `${state.lastStatus}\n`);
     state.lastStatus = 0;
@@ -3354,7 +3382,11 @@ export async function execute(source, state = createState(), io = {}) {
   try { compoundSyntax = !io.simple && hasCompoundSyntax(source); } catch {}
   if (compoundSyntax) {
     let execution;
-    try { execution = await executeNodeList(parseCompoundScript(source), state); }
+    try {
+      execution = await executeNodeList(parseCompoundScript(source), state, {
+        capture: Boolean(io.capture),
+      });
+    }
     catch (error) {
       const message = error instanceof ShellSyntaxError ? error.message : String(error);
       execution = result(2, "", `bunmsh: syntax error: ${message}\n`);

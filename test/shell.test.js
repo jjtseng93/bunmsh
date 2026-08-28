@@ -295,6 +295,33 @@ describe("execution", () => {
     }
   });
 
+  test("normalizes CRLF source before parsing scripts", async () => {
+    const compound = [
+      'value="two words"',
+      'if [ "$value" = "two words" ]; then',
+      "  printf '[%s]\\n' \"$value\"",
+      "fi",
+      "",
+    ].join("\r\n");
+    expect(await run(compound)).toMatchObject({
+      status: 0,
+      stdout: "[two words]\n",
+      stderr: "",
+    });
+
+    const heredoc = [
+      "builtin cat <<'EOF'",
+      "$value remains literal",
+      "EOF",
+      "",
+    ].join("\r\n");
+    expect(await run(heredoc)).toMatchObject({
+      status: 0,
+      stdout: "$value remains literal\n",
+      stderr: "",
+    });
+  });
+
   test("provides basic fallback text and utility commands", async () => {
     expect(await run("printf 'c\\na\\nb\\n' | builtin sort")).toMatchObject({ stdout: "a\nb\nc\n" });
     expect(await run("printf 'one two\\nthree\\n' | builtin wc -lwc")).toMatchObject({ stdout: "2 3 14\n" });

@@ -76,6 +76,14 @@ async function expectBuiltinSedLike(args, input, cwd = root) {
 
 describe("/bin/sh reference", () => {
   describe("quote and word expansion", () => {
+    test("removes LF and CRLF backslash continuations before tokenization", async () => {
+      const lf = "/usr/bin/printf '<%s>\\n' one \\\n  two \\\n  three";
+      await expectLikeSh(lf);
+      const crlf = lf.replaceAll("\n", "\r\n");
+      const output = await invoke(bunmsh, crlf);
+      expect(output).toEqual({ status: 0, stdout: "<one>\n<two>\n<three>\n", stderr: "" });
+    });
+
     test("preserves quoted fields and removes quote syntax", async () => {
       await expectLikeSh("value='a b'; /usr/bin/printf '<%s>\\n' \"$value\" '$value' a\\ b");
     });
