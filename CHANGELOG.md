@@ -2,7 +2,7 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
-## [0.1.11] - 2026-08-28
+## [0.2.0] - 2026-08-29
 
 ### Added
 
@@ -13,15 +13,6 @@ All notable user-visible changes to bunmsh are documented here.
 - Add repeatable `--exclude PATTERN` and `--exclude=PATTERN` filtering backed
   by `Bun.Glob` to the `cat` and `catfancy` fallback builtins for concatenating
   expanded file sets.
-- Add a `tac` PATH-fallback builtin for reversing newline-delimited records
-  from files or stdin while preserving their bytes and separators.
-- Add asset-backed `-h` and `--help` output for documented regular and fallback
-  builtins. Help lives as Markdown under `help/`, starts at level-two headings,
-  and renders through `Bun.markdown.ansi` with terminal hyperlinks enabled.
-- Add the `catfancy` PATH-fallback builtin. Previewable data formats are
-  parsed and emitted as colorized pretty JSON; Markdown is rendered with
-  `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
-  through unchanged.
 - Add JS/TS syntax coloring to `catfancy`: `.js`/`.mjs`/`.cjs`/`.jsx` and
   `.ts`/`.mts`/`.cts`/`.tsx` files are wrapped in a fenced ` ```javascript `/
   ` ```typescript ` block and rendered through the same `Bun.markdown.ansi`
@@ -49,6 +40,23 @@ All notable user-visible changes to bunmsh are documented here.
   waiting for the next line, because the interactive line-by-line `pending`
   buffer only had the lone `\` at that point — the following `\n` that the
   existing backslash-newline splice looks for hadn't been typed yet.
+
+## [0.1.11] - 2026-08-28
+
+### Added
+
+- Add a `tac` PATH-fallback builtin for reversing newline-delimited records
+  from files or stdin while preserving their bytes and separators.
+- Add asset-backed `-h` and `--help` output for documented regular and fallback
+  builtins. Help lives as Markdown under `help/`, starts at level-two headings,
+  and renders through `Bun.markdown.ansi` with terminal hyperlinks enabled.
+- Add the `catfancy` PATH-fallback builtin. Previewable data formats are
+  parsed and emitted as colorized pretty JSON; Markdown is rendered with
+  `Bun.markdown.ansi` and hyperlinks enabled, while unrecognized formats pass
+  through unchanged.
+
+### Fixed
+
 - Normalize CRLF source to LF at every shell-language input boundary, covering
   script files, stdin, `-c`, interactive continuation, command substitutions,
   compound syntax, quoted text, and here-documents. A standalone carriage
