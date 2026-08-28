@@ -625,6 +625,27 @@ before it ever runs. The CLI flags (`--auto-open`, `--random-url`,
 `--minapk-webview`, with their `=off`/`=no`/`=false` forms) still work
 normally and override whatever was baked in.
 
+The resulting `bmsh` is also directly packageable with
+`npx @drxiaozhi/minapk` ([minapk](https://www.npmjs.com/package/@drxiaozhi/minapk))
+as the `libmain.so` the APK runs on launch:
+
+```sh
+npx @drxiaozhi/minapk ./bmsh -c "libmain.so -cc builtin serve 'B:/~BUN/mysite'"
+```
+
+`-c` replaces minapk's default startup command outright — that default is
+what auto-runs a packaged `libmain.so`, so once `-c` is used it has to call
+`libmain.so` itself, exactly as above, or the packaged binary never starts.
+The app itself holds two WebViews from launch: `0` is the console the shell
+above runs in, `1` is a second one that starts blank. `--minapk-webview` (or
+baked-in `SERVE_MINAPK_WEBVIEW`) is what tells the packaged `xdg-open` to
+load the served page into WebView `1` and switch to it — that switch, not
+anything automatic about the APK itself, is what turns "the app opened" into
+"the app is now showing this folder's content." Combine it with
+`--auto-open`/`SERVE_AUTO_OPEN` (baked in as shown above, or passed on the
+`serve` command line) so that switch happens on its own, no browser tab, no
+separate server to start.
+
 **`--define` values originally need to be JSON, so a bare string has to
 arrive already quoted** — `--define process.env.SERVE_AUTO_OPEN=/index.html`
 would fail if directly passed to `bun build`, which tries to parse
