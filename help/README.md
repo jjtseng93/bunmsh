@@ -1264,14 +1264,16 @@ serve [--auto-open] [--minapk-webview] [--random-url] [DIRECTORY]
 
 ### Options and forms
 
-- `--auto-open` / `--auto-open=off`: Open the serving URL through `xdg-open`
-  after startup, or explicitly disable it. Bare `--auto-open` turns it on;
-  `=off`, `=no`, `=false`, or `=` (empty) turns it off, overriding an
-  environment default that turned it on.
+- `--auto-open` / `--auto-open=off`: Open the serving URL after startup, or
+  explicitly disable it. Looks for `xdg-open` on PATH first regardless of
+  platform; falls back to `open` on macOS or `cmd /c start` on Windows only
+  when `xdg-open` isn't found. Bare `--auto-open` turns it on; `=off`, `=no`,
+  `=false`, or `=` (empty) turns it off, overriding an environment default
+  that turned it on.
 - `--minapk-webview` / `--minapk-webview=N` / `--minapk-webview=off`: Pass
-  `MINAPK_WEBVIEW` to the spawned `xdg-open`. Bare `--minapk-webview` passes
-  `1`; `=N` passes the literal digit string `N`; `=off`, `=no`, `=false`, or
-  `=` (empty) means don't pass it at all. Not passed by default.
+  `MINAPK_WEBVIEW` to the spawned opener. Bare `--minapk-webview` passes `1`;
+  `=N` passes the literal digit string `N`; `=off`, `=no`, `=false`, or `=`
+  (empty) means don't pass it at all. Not passed by default.
 - `--random-url` / `--random-url=off`: Serve beneath a high-entropy random URL
   prefix (requests without it get `404`), or explicitly disable it. Same
   bare/`=off`/`=no`/`=false`/`=` rules as `--auto-open`.

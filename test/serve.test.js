@@ -10,8 +10,29 @@ import {
 } from "../serve.js";
 
 const cwd = join(import.meta.dir, "serve");
+const servePath = join(import.meta.dir, "..", "serve.js");
 let previousPort;
 let server;
+
+// SERVE_AUTO_OPEN/SERVE_MINAPK_WEBVIEW/SERVE_RANDOM_URL are read straight off
+// process.env at module load (not passed through parseServeArguments'
+// `env` parameter) so a bundler can inline them as build-time constants.
+// That means their defaults can only be observed from a fresh process
+// started with those variables already set.
+function parseServeArgumentsWithEnv(args, env) {
+  const script = `
+    const { parseServeArguments } = await import(${JSON.stringify(servePath)});
+    const result = parseServeArguments(${JSON.stringify(args)}, undefined, "/cwd");
+    delete result.env;
+    console.log(JSON.stringify(result));
+  `;
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, "-e", script],
+    env: { ...process.env, SERVE_AUTO_OPEN: "", SERVE_MINAPK_WEBVIEW: "", SERVE_RANDOM_URL: "", ...env },
+  });
+  if (proc.exitCode !== 0) throw new Error(proc.stderr.toString());
+  return JSON.parse(proc.stdout.toString());
+}
 
 test("serve highlights pretty JSON using jsmdcui json syntax groups", () => {
   const html = highlightJson('{"key":"line\\n <tag> & \\"quoted\\" \'apostrophe\'","number":12,"ok":true,"empty":null}');
@@ -39,12 +60,12 @@ test("serve accepts either bunfs spelling and derives the platform path", () => 
   expect(resolveBunfsPath("/$bunfs", "/source/bunmsh")).toBeNull();
 });
 
-test("serve CLI flags turn options on over environment defaults left off", () => {
-  expect(parseServeArguments(["--auto-open", "--minapk-webview", "--random-url", "public"], {
+test("serve CLI flags force options on even over an inline environment default left off", () => {
+  expect(parseServeArgumentsWithEnv(["--auto-open", "--minapk-webview", "--random-url", "public"], {
     SERVE_AUTO_OPEN: "0",
     SERVE_MINAPK_WEBVIEW: "0",
     SERVE_RANDOM_URL: "false",
-  }, "/cwd")).toMatchObject({
+  })).toMatchObject({
     directory: "public",
     autoOpen: true,
     minapkWebview: "1",
@@ -53,7 +74,7 @@ test("serve CLI flags turn options on over environment defaults left off", () =>
 });
 
 test("serve options default to off/not-passed with no flags or environment", () => {
-  expect(parseServeArguments([], {}, "/cwd")).toMatchObject({
+  expect(parseServeArgumentsWithEnv([], {})).toMatchObject({
     directory: "/cwd",
     autoOpen: false,
     minapkWebview: null,
@@ -63,7 +84,7 @@ test("serve options default to off/not-passed with no flags or environment", () 
 
 test("serve inline environment defaults carry through unless overridden", () => {
   const env = { SERVE_AUTO_OPEN: "1", SERVE_MINAPK_WEBVIEW: "yes", SERVE_RANDOM_URL: "on" };
-  expect(parseServeArguments([], env, "/cwd")).toMatchObject({
+  expect(parseServeArgumentsWithEnv([], env)).toMatchObject({
     autoOpen: true,
     minapkWebview: "1",
     randomUrl: true,
@@ -72,10 +93,10 @@ test("serve inline environment defaults carry through unless overridden", () => 
 
 test("serve CLI =off/no/false/empty explicitly disables an environment default turned on", () => {
   const env = { SERVE_AUTO_OPEN: "1", SERVE_MINAPK_WEBVIEW: "1", SERVE_RANDOM_URL: "true" };
-  expect(parseServeArguments(
-    ["--auto-open=off", "--minapk-webview=no", "--random-url=false"], env, "/cwd",
+  expect(parseServeArgumentsWithEnv(
+    ["--auto-open=off", "--minapk-webview=no", "--random-url=false"], env,
   )).toMatchObject({ autoOpen: false, minapkWebview: null, randomUrl: false });
-  expect(parseServeArguments(["--auto-open=", "--random-url="], env, "/cwd"))
+  expect(parseServeArgumentsWithEnv(["--auto-open=", "--random-url="], env))
     .toMatchObject({ autoOpen: false, randomUrl: false });
 });
 

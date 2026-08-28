@@ -470,11 +470,13 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
   back to a free port chosen by the OS when it is taken — an explicit `PORT`
   that is already in use is an error. The URL it settled on is printed on
   startup.
-- `--auto-open` opens the printed URL through `xdg-open` after startup.
+- `--auto-open` opens the printed URL after startup: `xdg-open` on PATH wins
+  on any platform, otherwise `open` on macOS or `cmd /c start` on Windows.
   `--minapk-webview` adds `MINAPK_WEBVIEW=1` to that child process, matching
-  exeapk's WebView-aware `xdg-open` behavior (`--minapk-webview=N` passes a
-  different digit string). `--random-url` places the server behind a
-  URL-safe random prefix generated from four Bun UUIDv7 values (roughly 296
+  the npm `buninu` package's WebView-aware `xdg-open` behavior
+  (`--minapk-webview=N` passes a different digit string). `--random-url`
+  places the server behind a URL-safe random prefix generated from four Bun
+  UUIDv7 values (roughly 296
   bits of random entropy); a request without it gets `404`. All three
   default to off/not-passed, and `SERVE_AUTO_OPEN`, `SERVE_MINAPK_WEBVIEW`,
   and `SERVE_RANDOM_URL` set their defaults instead. A CLI flag always
@@ -482,9 +484,9 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
   `=off`/`=no`/`=false`/`=` (empty) forces it off, even if the environment
   turned it on inline.
 - While it runs it holds the foreground. On a TTY it also takes single-word
-  controls on stdin: `q`, `quit` or `exit` stops it, and `o` opens the URL with
-  `xdg-open`. `Ctrl-C` and `SIGTERM` stop it too, exiting `130` and `143`
-  respectively; every other way out exits `0`.
+  controls on stdin: `q`, `quit` or `exit` stops it, and `o` opens the URL the
+  same way `--auto-open` would. `Ctrl-C` and `SIGTERM` stop it too, exiting
+  `130` and `143` respectively; every other way out exits `0`.
 - Directory pages list the entries by name, each with an emoji for its kind,
   and hide dotfiles. Previewable files get a `🔍` link next to them: it renders
   Markdown, and pretty-prints JSON, JSON5, JSONC, JSONL, YAML and TOML, plus

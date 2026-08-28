@@ -7,7 +7,8 @@ All notable user-visible changes to bunmsh are documented here.
 ### Added
 
 - Add `SERVE_AUTO_OPEN`, `SERVE_MINAPK_WEBVIEW`, and `SERVE_RANDOM_URL` plus
-  overriding `serve` CLI flags for opening the server, targeting exeapk's app
+  overriding `serve` CLI flags for opening the server (cross-platform, with
+  `xdg-open` on PATH preferred), targeting the npm `buninu` package's app
   WebView, and protecting it behind a high-entropy random URL prefix.
 - Add repeatable `--exclude PATTERN` and `--exclude=PATTERN` filtering backed
   by `Bun.Glob` to the `cat` and `catfancy` fallback builtins for concatenating

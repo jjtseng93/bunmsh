@@ -330,14 +330,29 @@ const safeHandleRequest = async (request) => {
   }
 };
 
-function openServeUrl(url, minapkWebview, env = process.env) {
+// Prefer a real xdg-open on PATH regardless of platform -- it's common
+// enough on macOS/Windows dev setups (Cygwin, MSYS2, Homebrew's xdg-utils)
+// and behaves consistently. Only fall back to each OS's own "hand this to
+// the default handler" command when xdg-open isn't present, same relationship
+// as the npm `buninu` package's own xdg-open shim.
+function openServeCommand() {
   const executable = Bun.which("xdg-open");
-  if (!executable) {
+  if (executable) return [executable];
+  if (process.platform === "darwin") return ["open"];
+  // start is a cmd builtin, not a real executable, and needs an empty ""
+  // title argument first or it treats a quoted target as the title.
+  if (process.platform === "win32") return ["cmd", "/c", "start", ""];
+  return null;
+}
+
+function openServeUrl(url, minapkWebview, env = process.env) {
+  const command = openServeCommand();
+  if (!command) {
     console.error("bunmsh: serve: xdg-open not found");
     return false;
   }
   try {
-    Bun.spawn([executable, String(url)], {
+    Bun.spawn([...command, String(url)], {
       env: minapkWebview ? { ...env, MINAPK_WEBVIEW: String(minapkWebview) } : env,
       stdin: "ignore",
       stdout: "ignore",
@@ -345,7 +360,7 @@ function openServeUrl(url, minapkWebview, env = process.env) {
     }).unref();
     return true;
   } catch (error) {
-    console.error(`bunmsh: serve: xdg-open: ${error.message}`);
+    console.error(`bunmsh: serve: ${command[0]}: ${error.message}`);
     return false;
   }
 }
