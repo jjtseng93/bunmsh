@@ -35,9 +35,18 @@ function minapkWebviewEnvDefault(value) {
   return envEnabled(trimmed) ? "1" : null;
 }
 
+// autoOpen is `false` (off), `true` (on, open the server root), or a string
+// starting with "/" -- a path opened relative to the served URL (after any
+// --random-url prefix) instead of the root. SERVE_AUTO_OPEN can set any of
+// the three as the default the same way --auto-open's value does.
+function autoOpenEnvDefault(value) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed.startsWith("/") ? trimmed : envEnabled(trimmed);
+}
+
 export function parseServeArguments(args, env = process.env, cwd = process.cwd()) {
   const options = {
-    autoOpen: envEnabled(ENV_FLAGS.autoOpen),
+    autoOpen: autoOpenEnvDefault(ENV_FLAGS.autoOpen),
     minapkWebview: minapkWebviewEnvDefault(ENV_FLAGS.minapkWebview),
     randomUrl: envEnabled(ENV_FLAGS.randomUrl),
   };
@@ -59,6 +68,11 @@ export function parseServeArguments(args, env = process.env, cwd = process.cwd()
         else if (isOffValue(value)) options.minapkWebview = null;
         else if (/^\d+$/.test(value)) options.minapkWebview = value;
         else return { error: `invalid value for --minapk-webview: ${value}` };
+      } else if (name === "autoOpen") {
+        if (value === undefined) options.autoOpen = true;
+        else if (isOffValue(value)) options.autoOpen = false;
+        else if (value.startsWith("/")) options.autoOpen = value;
+        else options.autoOpen = true;
       } else {
         options[name] = value === undefined || !isOffValue(value);
       }
@@ -70,6 +84,18 @@ export function parseServeArguments(args, env = process.env, cwd = process.cwd()
   return { directory: operands[0] ?? cwd, ...options, env };
 }
 
+// Each UUIDv7 is 128 bits: a 48-bit ms timestamp (not secret), a 4-bit
+// version + 2-bit variant (fixed), a 12-bit rand_a, and a 62-bit rand_b.
+// Confirmed against Bun's own source (bun/src/jsc/uuid.rs UUID7::next):
+// rand_a is a process-global monotonic counter seeded fresh only on the
+// first call to observe a new millisecond -- every later call in that same
+// millisecond just gets seed+1, seed+2, ..., not a fresh random draw. Four
+// calls made back-to-back like this land in the same millisecond, so their
+// timestamp and rand_a sequence are effectively one shared, low-entropy
+// value. Only rand_b is unconditionally re-drawn from BoringSSL's CSPRNG
+// (bun/src/jsc/rare_data.rs EntropyCache, backed by bun_boringssl::rand_bytes)
+// on every single call, so the four independent 62-bit rand_b fields are
+// the actual guaranteed entropy floor: >= 248 bits, not 4 * 128.
 export const randomServeRoute = () =>
   `${Array.from({ length: 4 }, () => Bun.randomUUIDv7("base64url")).join("")}/`;
 
@@ -345,6 +371,13 @@ function openServeCommand() {
   return null;
 }
 
+// autoOpen is `true` for the served root as-is, or a "/"-led path opened
+// relative to it -- resolved after any --random-url prefix baked into url,
+// since url already ends in "/" (server.url does, and so does the URL built
+// from randomRoute in main()).
+export const openTargetUrl = (url, autoOpen) =>
+  typeof autoOpen === "string" ? new URL(autoOpen.slice(1), url) : url;
+
 function openServeUrl(url, minapkWebview, env = process.env) {
   const command = openServeCommand();
   if (!command) {
@@ -386,7 +419,7 @@ export function main(directory = process.cwd(), options = {}) {
   const url = randomRoute ? new URL(randomRoute, server.url) : server.url;
   publicUrls.set(server, url);
   console.log(`Serving ${root}\n  ${url.href}`);
-  if (options.autoOpen) openServeUrl(url, options.minapkWebview, options.env);
+  if (options.autoOpen) openServeUrl(openTargetUrl(url, options.autoOpen), options.minapkWebview, options.env);
   return server;
 }
 
@@ -416,7 +449,7 @@ export function waitForInterrupt(server, options = {}) {
       if (["q", "quit", "exit"].includes(command)) {
         stop("QUIT");
       } else if (command === "o") {
-        openServeUrl(serveUrl(server), options.minapkWebview, options.env);
+        openServeUrl(openTargetUrl(serveUrl(server), options.autoOpen), options.minapkWebview, options.env);
       } else if (command) {
         console.error(`bunmsh: serve: unknown control: ${command}`);
       }

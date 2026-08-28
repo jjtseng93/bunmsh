@@ -472,17 +472,24 @@ builtin, so a `serve` executable found in `PATH` wins unless it is invoked as
   startup.
 - `--auto-open` opens the printed URL after startup: `xdg-open` on PATH wins
   on any platform, otherwise `open` on macOS or `cmd /c start` on Windows.
-  `--minapk-webview` adds `MINAPK_WEBVIEW=1` to that child process, matching
-  the npm `buninu` package's WebView-aware `xdg-open` behavior
-  (`--minapk-webview=N` passes a different digit string). `--random-url`
-  places the server behind a URL-safe random prefix generated from four Bun
-  UUIDv7 values (roughly 296
-  bits of random entropy); a request without it gets `404`. All three
-  default to off/not-passed, and `SERVE_AUTO_OPEN`, `SERVE_MINAPK_WEBVIEW`,
-  and `SERVE_RANDOM_URL` set their defaults instead. A CLI flag always
-  overrides its environment default: the bare flag forces it on, and
-  `=off`/`=no`/`=false`/`=` (empty) forces it off, even if the environment
-  turned it on inline.
+  `--auto-open=/path` opens that path relative to the served URL instead of
+  the root (resolved after any `--random-url` prefix, so the secret prefix
+  stays intact); the `o` stdin control opens the same target.
+- `--minapk-webview` adds `MINAPK_WEBVIEW=1` to the opener's child process,
+  matching the npm `buninu` package's WebView-aware `xdg-open` behavior
+  (`--minapk-webview=N` passes a different digit string).
+- `--random-url` places the server behind a URL-safe random prefix generated
+  from four Bun UUIDv7 values — at least 248 bits of guaranteed-random
+  entropy (each UUIDv7's 62-bit `rand_b` field; the 48-bit timestamp isn't
+  secret, and Bun's `rand_a` is a monotonic counter within the same
+  millisecond rather than independently random, so neither counts toward the
+  floor); a request without it gets `404`.
+- All three default to off/not-passed, and `SERVE_AUTO_OPEN`,
+  `SERVE_MINAPK_WEBVIEW`, and `SERVE_RANDOM_URL` set their defaults instead
+  (`SERVE_AUTO_OPEN` can also be set to a `/`-led path, same as
+  `--auto-open=/path`). A CLI flag always overrides its environment default:
+  the bare flag forces it on, and `=off`/`=no`/`=false`/`=` (empty) forces it
+  off, even if the environment turned it on inline.
 - While it runs it holds the foreground. On a TTY it also takes single-word
   controls on stdin: `q`, `quit` or `exit` stops it, and `o` opens the URL the
   same way `--auto-open` would. `Ctrl-C` and `SIGTERM` stop it too, exiting

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   highlightJson,
   main as startFileServer,
+  openTargetUrl,
   parseServeArguments,
   randomServeRoute,
   resolveBunfsPath,
@@ -98,6 +99,34 @@ test("serve CLI =off/no/false/empty explicitly disables an environment default t
   )).toMatchObject({ autoOpen: false, minapkWebview: null, randomUrl: false });
   expect(parseServeArgumentsWithEnv(["--auto-open=", "--random-url="], env))
     .toMatchObject({ autoOpen: false, randomUrl: false });
+});
+
+test("serve --auto-open=/path sets a suffix path instead of plain on/off", () => {
+  expect(parseServeArguments(["--auto-open=/index.html"], {}, "/cwd"))
+    .toMatchObject({ autoOpen: "/index.html" });
+  expect(parseServeArguments(["--auto-open=/nested/page.html"], {}, "/cwd"))
+    .toMatchObject({ autoOpen: "/nested/page.html" });
+});
+
+test("serve SERVE_AUTO_OPEN=/path sets the same suffix as a default, CLI still overrides it", () => {
+  expect(parseServeArgumentsWithEnv([], { SERVE_AUTO_OPEN: "/default.html" }))
+    .toMatchObject({ autoOpen: "/default.html" });
+  expect(parseServeArgumentsWithEnv(["--auto-open=off"], { SERVE_AUTO_OPEN: "/default.html" }))
+    .toMatchObject({ autoOpen: false });
+  expect(parseServeArgumentsWithEnv(["--auto-open=/override.html"], { SERVE_AUTO_OPEN: "/default.html" }))
+    .toMatchObject({ autoOpen: "/override.html" });
+});
+
+test("openTargetUrl resolves a /path suffix relative to the served URL, including any random-url prefix", () => {
+  const base = new URL("http://localhost:3000/");
+  expect(openTargetUrl(base, true).href).toBe(base.href);
+  expect(openTargetUrl(base, false).href).toBe(base.href);
+  expect(openTargetUrl(base, "/index.html").href).toBe("http://localhost:3000/index.html");
+  expect(openTargetUrl(base, "/nested/page.html").href).toBe("http://localhost:3000/nested/page.html");
+
+  const prefixed = new URL("http://localhost:3000/AaBIsecretprefix/");
+  expect(openTargetUrl(prefixed, "/index.html").href)
+    .toBe("http://localhost:3000/AaBIsecretprefix/index.html");
 });
 
 test("serve --minapk-webview=N passes the literal digit string", () => {
