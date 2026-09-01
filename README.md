@@ -388,6 +388,40 @@ tab r      # back to ~/project/src
 
 ## Special Interactions
 
+### Completion and ghost suggestions
+
+Tab completes the word being typed, and a dim **ghost** shows the first match
+inline ahead of the cursor; the Right arrow accepts it. What is offered depends
+on where the cursor is:
+
+| Where | Offered |
+| --- | --- |
+| A command name | Builtins, aliases, and executables on `PATH` |
+| Inside `$(` | Command names again — a substitution starts a new command |
+| A `$` being typed | Shell variable names |
+| Anywhere else | Files and directories, and history for the ghost |
+
+**Variables.** `$HO` suggests `$HOME`, and `${HO` suggests `${HOME}` — the
+brace it opened is closed for it. `${#HO` works the same way. Names come from
+the shell's own variable table, so unexported names and anything JavaScript
+mode wrote through `$` are offered alongside the environment.
+
+The suggestion follows the shell's own rules about when a `$` expands:
+
+- It works wherever an expansion would: mid-word, on the right of an
+  assignment (`X=$HO`), inside double quotes, and where a command name would
+  go (`$ED`).
+- Single quotes suppress it, because nothing expands inside them.
+- Nothing is offered for the other things a `$` can start, since none of them
+  is a name in progress: `$(` (a command substitution), `$?`, `$1`, `$$`
+  (already complete), and `\$` (a literal dollar sign — the backslashes are
+  counted, so `\\$HO` does suggest).
+- A bare `$` has no name to match on, so it ghosts nothing. Tab still lists
+  every variable, the way Tab on an empty word lists every file.
+
+Where both could apply, history wins the ghost: it completes the whole line,
+which reaches further than a single variable name.
+
 ### Keyboard shortcuts
 
 - `Ctrl-C`: Interrupts the current input or foreground operation and returns to
@@ -843,7 +877,8 @@ detailed compatibility snapshot.
 - Regular builtins, system-command-first fallback builtins, Bun Shell fallbacks,
   and explicit lookup through `command`, `builtin`, `whence`, `type`, and
   `which`.
-- Interactive history import/save/recall, command and file completion, ghost
+- Interactive history import/save/recall, command, file, and shell-variable
+  completion, ghost
   suggestions, cwd tabs, keyboard shortcuts, optional mouse interactions,
   fancy directory listings, and a `PS2` continuation prompt while a
   here-document, an open quote/substitution, or an unfinished compound

@@ -13,10 +13,13 @@ import {
 import {
   CommandIndex,
   FileIndex,
+  VariableIndex,
   completionContext,
   fitGhost,
   historyGhost,
   nextGhostChunk,
+  variableCompletion,
+  variableContext,
 } from "./completion.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
 import { buildEarlyExit, stringifyNonPrimitiveDefineValues } from "../single-exe/compiled.js";
@@ -166,6 +169,15 @@ async function interactive(state) {
   let mouseTracking = terminal && state.mouseTracking;
   const commandIndex = new CommandIndex(builtinNames());
   const fileIndex = new FileIndex();
+  const variableIndex = new VariableIndex();
+  //  A `$` being typed outranks the word it sits in: `$ED` is a variable
+  //  name, not a command or a file, wherever on the line it appears. Single
+  //  quotes are the exception, since nothing expands inside them.
+  const variableMatch = (line, cursor, context) => {
+    if (context.quote === "'") return null;
+    const variable = variableContext(line, cursor);
+    return variable ? { variable } : null;
+  };
   state.history = await importedHistory(state.env);
   const history = state.history;
   // Marks everything just loaded (including whatever another session has
@@ -348,6 +360,12 @@ async function interactive(state) {
   const completer = (line) => {
     commandIndex.refreshIfChanged(state);
     const context = completionContext(line);
+    const found = variableMatch(line, line.length, context);
+    if (found) {
+      const names = variableIndex.matches(state, found.variable.prefix);
+      if (names.length)
+        return [names.map((name) => variableCompletion(found.variable, name)), found.variable.text];
+    }
     if (context.command) {
       return [
         context.prefix.includes("/")
@@ -461,14 +479,30 @@ async function interactive(state) {
     const currentGhost = () => {
       if (readline.cursor !== readline.line.length) return null;
       const context = completionContext(readline.line, readline.cursor);
+      const found = variableMatch(readline.line, readline.cursor, context);
+      //  An empty name would match every variable there is, so a bare `$`
+      //  ghosts nothing; Tab still lists them all, the way it does for files.
+      const variableGhost = () => {
+        if (!found?.variable.prefix) return null;
+        const name = variableIndex.first(state, found.variable.prefix);
+        return name
+          ? variableCompletion(found.variable, name).slice(found.variable.text.length)
+          : null;
+      };
       if (context.command) {
+        const ghost = variableGhost();
+        if (ghost) return ghost;
         const match = context.prefix.includes("/")
           ? fileIndex.first(context.prefix, state)
           : commandIndex.first(context.prefix);
         return match ? match.slice(context.prefix.length) : null;
       }
+      //  History still wins where it applies: it completes the whole line,
+      //  which reaches further than one variable name.
       const fromHistory = historyGhost(history, readline.line);
       if (fromHistory) return fromHistory;
+      const ghost = variableGhost();
+      if (ghost) return ghost;
       const match = fileIndex.first(context.prefix, state);
       return match ? match.slice(context.prefix.length) : null;
     };

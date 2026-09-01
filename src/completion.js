@@ -75,6 +75,21 @@ export function completionContext(line, cursor = line.length) {
       quote = ch;
       continue;
     }
+    //  `$(` opens a nested command list, so what follows it is a command
+    //  name again rather than a continuation of the word being typed.
+    if (ch === "$" && source[i + 1] === "(") {
+      finishWord();
+      command = true;
+      token = "";
+      i++;
+      wordStart = i + 1;
+      continue;
+    }
+    if (ch === ")") {
+      finishWord();
+      wordStart = i + 1;
+      continue;
+    }
     if (ch === ";" || ch === "|" || ch === "&" || ch === "\n") {
       finishWord();
       command = true;
@@ -96,7 +111,36 @@ export function completionContext(line, cursor = line.length) {
     command: command && !assignment && quote === null,
     prefix: token,
     start: wordStart,
+    quote,
   };
+}
+
+//  A `$` with a name being typed after it: `$NAME`, `${NAME`, `${#NAME`.
+//  Everything else a `$` can begin is left alone, because none of it is a
+//  name in progress: `$(` opens a command substitution, `$?`/`$1`/`$$` are
+//  already complete, and a backslash-escaped `\$` is a literal dollar sign.
+export function variableContext(line, cursor = line.length) {
+  const source = line.slice(0, cursor);
+  const match = /\$(\{#?)?([A-Za-z_][A-Za-z0-9_]*)?$/.exec(source);
+  if (!match) return null;
+  if (source[match.index - 1] === "$") return null;
+  let backslashes = 0;
+  for (let i = match.index - 1; i >= 0 && source[i] === "\\"; i--) backslashes++;
+  if (backslashes % 2) return null;
+  const name = match[2] ?? "";
+  return {
+    start: match.index,
+    text: match[0],
+    lead: match[0].slice(0, match[0].length - name.length),
+    brace: Boolean(match[1]),
+    prefix: name,
+  };
+}
+
+//  `${NAME` completes to `${NAME}`: the brace it opened is part of the name
+//  being written, so finishing the name finishes the brace too.
+export function variableCompletion(context, name) {
+  return `${context.lead}${name}${context.brace ? "}" : ""}`;
 }
 
 export function historyGhost(history, line) {
@@ -196,6 +240,34 @@ export class CommandIndex {
 
   first(prefix) {
     return firstPrefixMatch(this.names, prefix);
+  }
+}
+
+//  Names come from the shell's own variable table, so completion offers what
+//  expansion would actually find — exported or not, and including anything
+//  JavaScript mode wrote through `$`.
+export class VariableIndex {
+  constructor() {
+    this.names = [];
+    this.signature = null;
+  }
+
+  sync(state) {
+    const keys = Object.keys(state.env);
+    const signature = keys.join("\0");
+    if (signature === this.signature) return;
+    this.signature = signature;
+    this.names = keys.sort();
+  }
+
+  matches(state, prefix) {
+    this.sync(state);
+    return prefix ? prefixMatches(this.names, prefix) : [...this.names];
+  }
+
+  first(state, prefix) {
+    this.sync(state);
+    return prefix ? firstPrefixMatch(this.names, prefix) : null;
   }
 }
 

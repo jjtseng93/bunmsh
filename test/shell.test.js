@@ -26,12 +26,15 @@ import {
 import {
   CommandIndex,
   FileIndex,
+  VariableIndex,
   completionContext,
   fitGhost,
   firstPrefixMatch,
   historyGhost,
   nextGhostChunk,
   prefixMatches,
+  variableCompletion,
+  variableContext,
 } from "../src/completion.js";
 import {
   bunmshHistoryPath,
@@ -1963,5 +1966,76 @@ describe("pspac", () => {
     const execution = await executeArgv(["builtin", "pspac", "extra"], createState(), { capture: true });
     expect(execution.status).toBe(2);
     expect(decode(execution.stderr)).toBe("bunmsh: pspac: unexpected operand: extra\n");
+  });
+});
+
+describe("variable completion", () => {
+  const state = { env: { HOME: "/home/user", HOSTNAME: "box", PATH: "/bin", LOCAL_ONLY: "x" } };
+
+  test("recognizes a name being typed after $, ${, and ${#", () => {
+    expect(variableContext("echo $HO")).toMatchObject({ prefix: "HO", lead: "$", brace: false });
+    expect(variableContext("echo ${HO")).toMatchObject({ prefix: "HO", lead: "${", brace: true });
+    expect(variableContext("echo ${#HO")).toMatchObject({ prefix: "HO", lead: "${#", brace: true });
+    //  A bare $ is a name with nothing typed yet, not a non-match.
+    expect(variableContext("echo $")).toMatchObject({ prefix: "", lead: "$" });
+    //  Position on the line does not matter: inside double quotes, on the
+    //  right of an assignment, or where a command name would go.
+    expect(variableContext('echo "$HO')).toMatchObject({ prefix: "HO" });
+    expect(variableContext("X=$HO")).toMatchObject({ prefix: "HO" });
+    expect(variableContext("$ED")).toMatchObject({ prefix: "ED" });
+  });
+
+  test("leaves alone every other thing a $ can start", () => {
+    expect(variableContext("echo $(")).toBeNull();
+    expect(variableContext("echo $(l")).toBeNull();
+    expect(variableContext("echo $?")).toBeNull();
+    expect(variableContext("echo $1")).toBeNull();
+    //  $$ is the pid, already complete; the second $ is not a name opening.
+    expect(variableContext("echo $$")).toBeNull();
+    expect(variableContext("echo hi")).toBeNull();
+    expect(variableContext("echo $HOME ")).toBeNull();
+  });
+
+  test("counts backslashes so an escaped dollar stays literal", () => {
+    expect(variableContext(String.raw`echo \$HO`)).toBeNull();
+    //  An escaped backslash is not escaping the dollar.
+    expect(variableContext(String.raw`echo \\$HO`)).toMatchObject({ prefix: "HO" });
+    expect(variableContext(String.raw`echo \\\$HO`)).toBeNull();
+  });
+
+  test("completes from the shell's own table, exported or not", () => {
+    const index = new VariableIndex();
+    expect(index.matches(state, "HO")).toEqual(["HOME", "HOSTNAME"]);
+    expect(index.first(state, "LOCAL")).toBe("LOCAL_ONLY");
+    expect(index.first(state, "ZZ")).toBeNull();
+    //  An empty prefix lists everything, the way Tab on an empty word does.
+    expect(index.matches(state, "")).toEqual(["HOME", "HOSTNAME", "LOCAL_ONLY", "PATH"]);
+    expect(index.first(state, "")).toBeNull();
+  });
+
+  test("picks up a name added after the index was first built", () => {
+    const index = new VariableIndex();
+    const live = { env: { ...state.env } };
+    expect(index.first(live, "TA")).toBeNull();
+    live.env.TAG = "v1";
+    expect(index.first(live, "TA")).toBe("TAG");
+  });
+
+  test("closes the brace it was given", () => {
+    expect(variableCompletion(variableContext("echo $HO"), "HOME")).toBe("$HOME");
+    expect(variableCompletion(variableContext("echo ${HO"), "HOME")).toBe("${HOME}");
+    expect(variableCompletion(variableContext("echo ${#HO"), "HOME")).toBe("${#HOME}");
+  });
+
+  test("reports the quote a word is inside, so nothing expands in single quotes", () => {
+    expect(completionContext("echo 'foo")).toMatchObject({ quote: "'" });
+    expect(completionContext('echo "foo')).toMatchObject({ quote: '"' });
+    expect(completionContext("echo foo")).toMatchObject({ quote: null });
+  });
+
+  test("treats $( as a command position and ) as the end of one", () => {
+    expect(completionContext("echo $(l")).toMatchObject({ command: true, prefix: "l" });
+    expect(completionContext("echo $(ls /tm")).toMatchObject({ command: false, prefix: "/tm" });
+    expect(completionContext("echo $(date) fi")).toMatchObject({ command: false, prefix: "fi" });
   });
 });

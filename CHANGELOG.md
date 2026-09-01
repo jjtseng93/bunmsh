@@ -20,6 +20,23 @@ All notable user-visible changes to bunmsh are documented here.
   with a number under that name while every name the shell set stays a string.
   The README says so with examples.
 
+- Complete shell variable names. Typing `$HO` now ghosts `$HOME` and Tab
+  offers every matching name; `${HO` completes to `${HOME}`, closing the brace
+  it opened, and `${#HO` does the same. Names come from the shell's own
+  variable table, so unexported names — and anything JavaScript mode wrote
+  through `$` — are offered alongside the environment. It applies wherever an
+  expansion would happen (mid-word, after `X=`, inside double quotes, and in
+  command position), stays quiet inside single quotes, and is not offered for
+  the other things a `$` can start: `$(`, `$?`, `$1`, `$$`, and a
+  backslash-escaped `\$` (the backslashes are counted, so `\\$HO` still
+  suggests). A bare `$` ghosts nothing but still lists everything on Tab, the
+  way an empty word lists every file. Where both apply, the history ghost still
+  wins, since it completes the whole line.
+- Complete command names inside `$(`. A command substitution starts a new
+  command, but the completer used to read `$(l` as one long word and look for
+  a file by that name; it now offers commands there, and files after the
+  command, the way it does at the start of a line.
+
 ## [0.3.1] - 2026-09-01
 
 ### Added
