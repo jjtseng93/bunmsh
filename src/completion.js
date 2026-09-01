@@ -243,6 +243,50 @@ export class CommandIndex {
   }
 }
 
+//  A JavaScript line is not shell text, so the shell's own word-splitting says
+//  nothing useful about it: `Bun.file("/tm` is one long word to a tokenizer
+//  that only breaks on whitespace. This reads it as JavaScript instead, and
+//  answers the two questions worth asking there — is the cursor inside a
+//  string literal, where a path is being typed, or on a `$.` property, where
+//  a shell variable name is.
+//
+//  Strings are tracked with a stack so that an interpolation is code again:
+//  inside `\`${...}\`` a `$.` completes, and the template only resumes after
+//  the closing brace.
+export function javascriptContext(line, cursor = line.length) {
+  const source = line.slice(0, cursor);
+  const stack = [];
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    const top = stack.at(-1);
+    if (top?.kind === "string") {
+      if (ch === "\\") { i++; continue; }
+      if (top.quote === "`" && ch === "$" && source[i + 1] === "{") {
+        stack.push({ kind: "code" });
+        i++;
+        continue;
+      }
+      if (ch === top.quote) stack.pop();
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      stack.push({ kind: "string", quote: ch, start: i + 1 });
+      continue;
+    }
+    if (ch === "}" && top?.kind === "code") stack.pop();
+  }
+  const top = stack.at(-1);
+  //  An unclosed string is a path being typed, whatever else is on the line.
+  if (top?.kind === "string")
+    return { kind: "path", prefix: source.slice(top.start), quote: top.quote, text: source.slice(top.start) };
+  //  `$` alone is the table object itself, so only the property form
+  //  completes: a name is being written only after the dot.
+  const match = /\$\.([A-Za-z_][A-Za-z0-9_]*)?$/.exec(source);
+  if (!match) return null;
+  const name = match[1] ?? "";
+  return { kind: "variable", prefix: name, text: match[0], lead: "$.", brace: false };
+}
+
 //  Names come from the shell's own variable table, so completion offers what
 //  expansion would actually find — exported or not, and including anything
 //  JavaScript mode wrote through `$`.

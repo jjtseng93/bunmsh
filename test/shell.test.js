@@ -13,6 +13,7 @@ import {
   highlightShellCommand,
   executeArgv,
   formatProcessTable,
+  isJavaScriptMode,
   needsMoreInput,
   parse,
   parsePosixProcessList,
@@ -31,6 +32,7 @@ import {
   fitGhost,
   firstPrefixMatch,
   historyGhost,
+  javascriptContext,
   nextGhostChunk,
   prefixMatches,
   variableCompletion,
@@ -2037,5 +2039,53 @@ describe("variable completion", () => {
     expect(completionContext("echo $(l")).toMatchObject({ command: true, prefix: "l" });
     expect(completionContext("echo $(ls /tm")).toMatchObject({ command: false, prefix: "/tm" });
     expect(completionContext("echo $(date) fi")).toMatchObject({ command: false, prefix: "fi" });
+  });
+});
+
+describe("javascript mode completion", () => {
+  test("decides mode by the rule the evaluator dispatches on", () => {
+    expect(isJavaScriptMode("Bun.e, 1")).toBe(true);
+    expect(isJavaScriptMode("  Bun.file('x')")).toBe(true);
+    expect(isJavaScriptMode("echo Bun.e")).toBe(false);
+  });
+
+  test("stops offering a continuation a JavaScript line could never accept", () => {
+    //  A bare trailing backslash is a syntax error in JavaScript, not a
+    //  request for another line, so the prompt no longer asks for one.
+    expect(needsMoreInput("Bun.e; const p = \\")).toBe(false);
+    //  An unterminated string still continues: that is JavaScript's own line
+    //  continuation, and the evaluator accepts it.
+    expect(needsMoreInput('Bun.e, "abc\\')).toBe(true);
+    expect(needsMoreInput("Bun.e, `abc")).toBe(true);
+    //  Shell text is untouched.
+    expect(needsMoreInput("echo hi \\")).toBe(true);
+    expect(needsMoreInput('echo "abc')).toBe(true);
+    expect(needsMoreInput("echo hi")).toBe(false);
+  });
+
+  test("completes a shell variable after $. and nothing after a bare $", () => {
+    expect(javascriptContext("Bun.e, $.HO")).toMatchObject({ kind: "variable", prefix: "HO", lead: "$." });
+    expect(javascriptContext("Bun.e, $.")).toMatchObject({ kind: "variable", prefix: "" });
+    //  In JavaScript a bare `$` is the table object itself; a name only
+    //  starts after the dot.
+    expect(javascriptContext("Bun.e, $")).toBeNull();
+    expect(javascriptContext("Bun.e, 1 + 2")).toBeNull();
+  });
+
+  test("completes a path inside an unclosed string literal", () => {
+    expect(javascriptContext('Bun.e, Bun.file("/tm')).toMatchObject({ kind: "path", prefix: "/tm", quote: '"' });
+    expect(javascriptContext("Bun.e, Bun.file('/tm")).toMatchObject({ kind: "path", prefix: "/tm", quote: "'" });
+    expect(javascriptContext("Bun.e, Bun.file(`/tm")).toMatchObject({ kind: "path", prefix: "/tm", quote: "`" });
+    //  A closed string is not a path being typed.
+    expect(javascriptContext('Bun.e, Bun.file("/tmp/x")')).toBeNull();
+    //  An escaped quote does not close it.
+    expect(javascriptContext('Bun.e, "it\\"s /tm')).toMatchObject({ kind: "path", prefix: 'it\\"s /tm' });
+  });
+
+  test("treats a template interpolation as code again", () => {
+    //  Inside ${ } the cursor is back in JavaScript, so $. completes there.
+    expect(javascriptContext("Bun.e, `a${$.HO")).toMatchObject({ kind: "variable", prefix: "HO" });
+    //  And the template resumes after the closing brace.
+    expect(javascriptContext("Bun.e, `a${b}/tm")).toMatchObject({ kind: "path", quote: "`" });
   });
 });

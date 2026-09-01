@@ -3000,13 +3000,26 @@ function parseCompoundScript(source) {
 // ShellSyntaxError whose message starts with "unterminated". An interactive
 // front end can use this, mirroring mksh's PS2 continuation prompt, to tell
 // "still typing this command" apart from a real syntax error.
+export function isJavaScriptMode(source) {
+  return source.trimStart().startsWith("Bun.");
+}
+
 export function needsMoreInput(source) {
   source = normalizeSource(source);
   try {
     if (hasCompoundSyntax(source)) parseCompoundScript(source);
     else tokenize(source, { strict: true });
   } catch (error) {
-    return error instanceof ShellSyntaxError && error.message.startsWith("unterminated");
+    if (!(error instanceof ShellSyntaxError && error.message.startsWith("unterminated")))
+      return false;
+    //  JavaScript has no line-continuation backslash outside a string
+    //  literal: there it is a syntax error, not a request for another line,
+    //  so asking for one only leads the typing somewhere that cannot parse.
+    //  An unterminated quote still continues, because that is JavaScript's
+    //  own line continuation and the evaluator does accept it.
+    if (isJavaScriptMode(source) && error.message === "unterminated line continuation")
+      return false;
+    return true;
   }
   return false;
 }
@@ -3719,7 +3732,7 @@ export async function execute(source, state = createState(), io = {}) {
     return execution;
   }
   const rawSource = source.trimStart();
-  if (rawSource.startsWith("Bun.")) {
+  if (isJavaScriptMode(rawSource)) {
     let execution;
     const previousCwd = process.cwd();
     try {
@@ -3744,11 +3757,11 @@ export async function execute(source, state = createState(), io = {}) {
     return execution;
   }
   const lines = source.match(/.*(?:\n|$)/g)?.filter(Boolean) ?? [];
-  if (lines.some((line) => line.trimStart().startsWith("Bun."))) {
+  if (lines.some((line) => isJavaScriptMode(line))) {
     const parts = [];
     let shellSource = "";
     for (const line of lines) {
-      if (!line.trimStart().startsWith("Bun.")) {
+      if (!isJavaScriptMode(line)) {
         shellSource += line;
         continue;
       }
