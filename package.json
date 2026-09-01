@@ -22,6 +22,9 @@
   "assets": [
     "README.md",
     "CHANGELOG.md",
+    "LICENSE",
+    "LICENSE-MKSH",
+    "LICENSE-MICRO",
     "help"
   ]
 }

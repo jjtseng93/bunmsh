@@ -12,7 +12,8 @@ https://github.com/zyedidia/micro. What it derives from micro is:
 
   * The colours those classes are painted in, which are the colour-links of
     micro's `runtime/colorschemes/monokai.micro`, transcribed into the same
-    file. `src/cat-fancy.js` paints JSON with five of the same values.
+    file. `src/cat-fancy.js` takes five of the same colour-links for the
+    JSON it colours.
 
 Both come from micro's own tree — `runtime/syntax/sh.yaml` and
 `runtime/colorschemes/monokai.micro` — and that is where to trace this

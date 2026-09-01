@@ -2,6 +2,27 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.1] - 2026-09-01
+
+### Added
+
+- Ship `LICENSE`, `LICENSE-MKSH`, and `LICENSE-MICRO` as packaged assets, so
+  a standalone executable carries them the way it already carried the README
+  and this changelog. It matters for `LICENSE-MICRO` in particular: the binary
+  contains the highlighting rules transcribed from micro's
+  `runtime/syntax/sh.yaml`, and an MIT notice has to travel with the code it
+  covers, not only with the repository. Reading them back out of a build is
+  `--assets-extract` on the tar back end, or `builtin serve 'B:/~BUN'` on an
+  `ASSETS_BUNFS=1` one; both land the licences under
+  `assets/bunmsh@<version>/`, and the README's licence section says so.
+
+### Changed
+
+- Say plainly in the README and in `LICENSE-MICRO` that `catfancy` takes five
+  of micro's `monokai.micro` colour-links for its JSON, rather than only that
+  its colours happen to be the same five values. The palette was taken from
+  micro, so the attribution now says so.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added

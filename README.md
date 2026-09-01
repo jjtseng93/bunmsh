@@ -877,11 +877,29 @@ collection.
 The colours those classes are painted in are the colour-links of micro's
 `runtime/colorschemes/monokai.micro` — micro itself is MIT, Copyright (c)
 2016-2020: Zachary Yedidia, et al. — which renders the Monokai palette created
-by Wimer Hazenberg. `catfancy` colours JSON keys, strings, numbers, escapes,
-and constants with five of the same values, so both commands read as one
-scheme rather than two.
+by Wimer Hazenberg. `catfancy` takes five of the same colour-links for its
+JSON keys, strings, numbers, escapes, and constants, so both commands read as
+one scheme rather than two.
 
 Micro's terms are in [LICENSE-MICRO](LICENSE-MICRO); upstream they are
 `runtime/syntax/LICENSE` and `LICENSE` in
 [zyedidia/micro](https://github.com/zyedidia/micro), which is where to trace
 either of them from.
+
+### Licences in a compiled executable
+
+`LICENSE`, `LICENSE-MKSH`, and `LICENSE-MICRO` are packaged assets, so a
+standalone build carries them inside the binary rather than leaving the notices
+behind in the repository. Reading them back depends on which asset back end the
+build used:
+
+```sh
+./bmsh --assets-extract               # tar back end (the default)
+./bmsh -cc builtin serve 'B:/~BUN'    # ASSETS_BUNFS=1 build
+```
+
+[`--assets-extract`](#standalone-executable) writes every asset beside the
+executable, licences included, under `assets/bunmsh@<version>/`. For a bunfs
+build, [serving `B:/~BUN`](#serving-a-folder-packed-into-the-executable)
+browses the binary's own virtual root, where the same files sit under
+`/assets/bunmsh@<version>/`.
