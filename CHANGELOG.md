@@ -2,6 +2,24 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.2] - 2026-09-01
+
+### Added
+
+- Bind `$` to the shell's variable table inside the highest-priority
+  JavaScript mode, so the two languages share one set of variables rather than
+  passing strings across a boundary. `Bun.e, $.HOME` reads one — exported or
+  not — `$.TAG = "v1"` writes one that later shell commands and external child
+  processes both see, `delete $.NAME` unsets one, and `Object.keys($)`
+  enumerates them. It is the live table rather than a copy, which is what makes
+  a write visible immediately; it also means a write bypasses `readonly`, so
+  `$` is an escape hatch as much as a convenience. Bun Shell's own `Bun.$` is
+  reached through the `Bun` object and is unaffected by the binding. Values
+  are shell values, so they are strings: `$.X + 1` concatenates unless
+  converted, and assigning a non-string stores it as-is, leaving JavaScript
+  with a number under that name while every name the shell set stays a string.
+  The README says so with examples.
+
 ## [0.3.1] - 2026-09-01
 
 ### Added

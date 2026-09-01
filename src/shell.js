@@ -3725,6 +3725,9 @@ export async function execute(source, state = createState(), io = {}) {
     try {
       try {
         process.chdir(nativePath(state.cwd));
+        
+        const $ = state.env
+        
         const value = await eval(rawSource);
         execution = result(0, value === undefined ? "" : `${formatValue(value)}\n`);
       } finally {

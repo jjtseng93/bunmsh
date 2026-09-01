@@ -196,6 +196,61 @@ the right. Neither form invokes Bun Shell by itself; their purpose here is
 only to enter the highest-priority evaluator and then execute unrestricted
 JavaScript.
 
+#### Use `$` to read and write shell variables
+
+Inside JavaScript mode, `$` is the shell's own variable table — the live
+object, not a copy — so the two languages share one set of variables instead of
+passing strings between them:
+
+```sh
+Bun.e, $.HOME                      # read
+Bun.e, $.PATH.split(":").length    # read, as a JavaScript value
+Bun.e; void ($.TAG = "v" + Date.now())
+echo "$TAG"                        # the shell sees what JavaScript wrote
+```
+
+A shell variable is visible to JavaScript whether or not it was exported, and a
+name JavaScript writes behaves like any other shell variable from that point
+on, including being inherited by external child processes. `delete $.NAME`
+unsets one, and `Object.keys($)` enumerates them.
+
+An assignment is an expression, so its value is printed like any other result.
+Wrap it in `void (...)` — as above — when the assignment is the point and the
+echo is not.
+
+**Everything the shell put there is a string.** A shell has no other type, so
+`+` concatenates where you may have meant arithmetic — convert first:
+
+```sh
+X=3
+Bun.e, $.X + 1            # "31"
+Bun.e, Number($.X) + 1    # 4
+```
+
+The reverse direction does not convert for you either: `$.N = 42` stores the
+number 42 in the table. The shell and any child process still read `42`,
+because they stringify at their own boundary, but JavaScript now sees a number
+under that name and a string under every name the shell set — so the same
+expression means two different things depending on who last wrote the variable:
+
+```sh
+X=3
+Bun.e; void ($.N = 42)
+Bun.e, [$.X + 1, $.N + 1]   # [ "31", 43 ]
+```
+
+Assign strings (`$.N = String(count)`) to keep one rule for every name.
+
+Two things to know:
+
+- `$` is bound only inside JavaScript mode, and only shadows the bare name.
+  `Bun.$`, Bun Shell's own API, is reached through the `Bun` object and is
+  unaffected.
+- Writing through `$` mutates the table directly, so it bypasses `readonly`.
+  `readonly R=locked` still refuses `R=other` from the shell, but
+  `$.R = "other"` goes through. That makes it an escape hatch, and a way to
+  break an invariant the shell was asked to hold.
+
 #### Use `Bun.sha` as a shared area (hack)
 
 `Bun.sha` is normally Bun's SHA hashing function. JavaScript functions are
