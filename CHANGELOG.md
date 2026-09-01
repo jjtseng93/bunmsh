@@ -43,6 +43,27 @@ All notable user-visible changes to bunmsh are documented here.
     and `--write-out` output are byte-for-byte identical, and `-i` matches once
     header order and casing — which `fetch` does not preserve — are normalised.
 
+- Add a `pspa` PATH-fallback builtin that lists every process as a PID and its
+  full command line, so a device with no process viewer still has one. POSIX
+  runs `ps -eo pid,args` and passes its output through untouched — reading it
+  over a pipe is also what stops procps from cutting long command lines at the
+  terminal width. Windows, which has no `ps`, queries `Win32_Process` through
+  PowerShell and lays the same two columns out itself, using the image name
+  for a system process that reports no command line. It takes no options; pipe
+  it into `grep` to narrow the listing and into `kill` to act on it.
+
+### Fixed
+
+- Make `kill` work on Windows. It went through the runtime's `process.kill`,
+  which there turns SIGTERM, SIGINT, and SIGKILL into an unconditional
+  `TerminateProcess`, refuses every other signal name outright, and in no case
+  reaches the target's children. A terminating signal is now sent as
+  `taskkill /PID PID /T /F` — the form bun-taskmgr verified on Windows 11 —
+  so every signal name works and a process tree goes down with its root. The
+  name is still not honoured as a signal, because Windows has none to deliver;
+  `-0` continues to probe through the runtime, since `taskkill` has no way to
+  ask whether a PID exists without killing it.
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

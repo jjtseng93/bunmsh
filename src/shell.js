@@ -1575,6 +1575,19 @@ const builtins = {
     let status = 0, stderr = "";
     for (; i < argv.length; i++) {
       const pid = Number(argv[i]);
+      //  Signal 0 asks whether a PID can be signalled without touching it,
+      //  which taskkill has no way to express — and which process.kill does
+      //  answer on Windows. Everything else goes through taskkill there.
+      if (process.platform === "win32" && signal !== 0) {
+        if (!Number.isInteger(pid) || pid <= 0) {
+          status = 1;
+          stderr += `bunmsh: kill: ${argv[i]}: arguments must be process ids\n`;
+          continue;
+        }
+        const failure = await runWindowsKill(pid);
+        if (failure) { status = 1; stderr += `bunmsh: kill: ${argv[i]}: ${failure}\n`; }
+        continue;
+      }
       try { process.kill(pid, signal); }
       catch (error) { status = 1; stderr += `bunmsh: kill: ${argv[i]}: ${error.message}\n`; }
     }
@@ -2375,6 +2388,111 @@ export function runUnameFallback(argv, system = {}) {
   return result(0, `${[..."snrvmp"].filter((flag) => flags.has(flag)).map((flag) => values[flag]).join(" ")}\n`);
 }
 
+//  Windows has no `ps`, so the same two columns come out of Win32_Process.
+//  bun-taskmgr reads `Select-Object ProcessId, CommandLine`, but that is
+//  formatted as a console table, which truncates a long command line with an
+//  ellipsis — exactly the part pspa exists to show. Building the line inside
+//  PowerShell instead keeps it whole, and falls back to the image name for a
+//  system process whose CommandLine is null.
+const PSPA_WINDOWS_QUERY = "Get-CimInstance Win32_Process | ForEach-Object { " +
+  "$_.ProcessId.ToString() + ' ' + $(if ($_.CommandLine) { $_.CommandLine } else { $_.Name }) }";
+
+export function parseWindowsProcessList(text) {
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(\d+) ?(.*)$/.exec(line);
+    //  A command line containing a newline arrives as continuation lines with
+    //  no PID of their own. There is nothing to attribute them to, so they are
+    //  dropped rather than guessed at.
+    if (match) rows.push({ pid: Number(match[1]), args: match[2].trim() });
+  }
+  return rows.sort((first, second) => first.pid - second.pid);
+}
+
+//  Laid out like `ps -eo pid,args`, so both platforms print the same shape:
+//  a right-aligned PID column at least as wide as procps' own, then the
+//  command line.
+export function formatProcessTable(rows) {
+  const width = rows.reduce((widest, row) => Math.max(widest, String(row.pid).length), 5);
+  const lines = [`${"PID".padStart(width)} COMMAND`];
+  for (const row of rows)
+    lines.push(`${String(row.pid).padStart(width)} ${row.args}`.trimEnd());
+  return `${lines.join("\n")}\n`;
+}
+
+//  Windows has no signals to deliver. libuv turns SIGTERM, SIGINT, and
+//  SIGKILL into an unconditional TerminateProcess, refuses every other name
+//  with ENOSYS, and in no case touches the target's children. `taskkill`
+//  reaches all of it, and `/T /F` is the form bun-taskmgr verified on
+//  Windows 11, so that is what a terminating signal becomes here.
+export function windowsKillCommand(pid) {
+  return ["taskkill", "/PID", String(pid), "/T", "/F"];
+}
+
+//  taskkill reports its own failures in prose ("ERROR: The process "123" not
+//  found."). Strip its prefix so the line reads as one of ours.
+export function taskkillFailure(status, stdout, stderr) {
+  if (status === 0) return null;
+  const message = (stderr.trim() || stdout.trim()).replace(/^ERROR:\s*/i, "");
+  return message || `taskkill exited with status ${status}`;
+}
+
+async function runWindowsKill(pid) {
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd: windowsKillCommand(pid),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (error) { return `taskkill: ${error.message}`; }
+  const [status, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return taskkillFailure(status, stdout, stderr);
+}
+
+//  `pspa` answers the question a shell with no process viewer keeps running
+//  into: which PID belongs to which command line. POSIX hands that to
+//  `ps -eo pid,args` and passes the output straight through — reading it over
+//  a pipe is also what stops procps from cutting long command lines at the
+//  terminal width, which it does when its stdout is a terminal.
+async function runPspaFallback(argv, state) {
+  if (argv.length > 1)
+    return result(2, "", `bunmsh: pspa: unexpected operand: ${argv[1]}\n`);
+  const windows = process.platform === "win32";
+  const command = windows
+    ? ["powershell", "-NoProfile", "-Command", PSPA_WINDOWS_QUERY]
+    : ["ps", "-eo", "pid,args"];
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd: command,
+      cwd: nativePath(state.cwd),
+      env: state.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (error) {
+    return result(127, "", `bunmsh: pspa: ${command[0]}: ${error.message}\n`);
+  }
+  const [status, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).text(),
+  ]);
+  const output = new Uint8Array(stdout);
+  if (status !== 0)
+    return result(status, "", stderr || `bunmsh: pspa: ${command[0]}: exited with status ${status}\n`);
+  return windows
+    ? result(0, formatProcessTable(parseWindowsProcessList(decoder.decode(output))), stderr)
+    : result(0, output, stderr);
+}
+
 const fallbackBuiltins = {
   basename: async (argv) => {
     const i = argv[1] === "--" ? 2 : 1;
@@ -2430,6 +2548,7 @@ const fallbackBuiltins = {
   ln: async (argv, state) => runLnFallback(argv, state),
   chmod: async (argv, state) => runChmodFallback(argv, state),
   uname: async (argv) => runUnameFallback(argv),
+  pspa: runPspaFallback,
   bunmsh: runBunmshFallback,
   bun: runBunFallback,
   serve: async (argv, state) => {

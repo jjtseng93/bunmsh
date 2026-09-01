@@ -9,10 +9,14 @@ import {
   decode,
   execute,
   executeArgv,
+  formatProcessTable,
   needsMoreInput,
   parse,
+  parseWindowsProcessList,
   runUnameFallback,
+  taskkillFailure,
   tokenize,
+  windowsKillCommand,
 } from "../src/shell.js";
 import {
   CommandIndex,
@@ -1774,5 +1778,95 @@ describe("CLI", () => {
     expect(transcript).toContain("\x1b[2mnt\x1b[0m");
     expect(transcript).toContain("\x1b[0Knt\r");
     expect(transcript).not.toContain(MOUSE_ON);
+  });
+});
+
+describe("pspa", () => {
+  test("lists every PID with its full command line", async () => {
+    const execution = await executeArgv(["builtin", "pspa"], createState(), { capture: true });
+    expect(execution.status).toBe(0);
+    const lines = decode(execution.stdout).split("\n");
+    //  POSIX passes `ps -eo pid,args` through untouched, so its header is the
+    //  header, and this test process has to be in the listing under itself.
+    expect(lines[0]).toMatch(/^\s*PID COMMAND$/);
+    const own = lines.find((line) => new RegExp(`^\\s*${process.pid} `).test(line));
+    expect(own).toBeDefined();
+    expect(own.length).toBeGreaterThan(String(process.pid).length + 1);
+  });
+
+  test("takes no operands", async () => {
+    const execution = await executeArgv(["builtin", "pspa", "extra"], createState(), { capture: true });
+    expect(execution.status).toBe(2);
+    expect(decode(execution.stderr)).toBe("bunmsh: pspa: unexpected operand: extra\n");
+  });
+
+  test("parses the Windows Win32_Process listing into sorted rows", () => {
+    //  What the PowerShell one-liner writes: PID, a space, then the command
+    //  line — or the image name when a system process has none.
+    const rows = parseWindowsProcessList(
+      "4 System\r\n" +
+      "9876 \"C:\\Program Files\\App\\app.exe\" --flag \"a b\"\r\n" +
+      "1200 C:\\Windows\\system32\\svchost.exe -k netsvcs\r\n" +
+      "\r\n",
+    );
+    expect(rows).toEqual([
+      { pid: 4, args: "System" },
+      { pid: 1200, args: "C:\\Windows\\system32\\svchost.exe -k netsvcs" },
+      { pid: 9876, args: '"C:\\Program Files\\App\\app.exe" --flag "a b"' },
+    ]);
+  });
+
+  test("drops the continuation lines a multi-line command line produces", () => {
+    expect(parseWindowsProcessList("42 one\nwrapped continuation\n88 two\n")).toEqual([
+      { pid: 42, args: "one" },
+      { pid: 88, args: "two" },
+    ]);
+  });
+
+  test("formats the Windows rows into the same two columns ps prints", () => {
+    expect(formatProcessTable([{ pid: 4, args: "System" }, { pid: 1200, args: "svchost.exe" }]))
+      .toBe("  PID COMMAND\n    4 System\n 1200 svchost.exe\n");
+    //  The column widens past procps' five columns for a longer PID.
+    expect(formatProcessTable([{ pid: 123456, args: "app.exe" }]))
+      .toBe("   PID COMMAND\n123456 app.exe\n");
+    expect(formatProcessTable([])).toBe("  PID COMMAND\n");
+  });
+});
+
+describe("kill", () => {
+  test("probes with signal 0 and reports an unknown pid", async () => {
+    expect(await executeArgv(["builtin", "kill", "-0", String(process.pid)], createState(), { capture: true }))
+      .toMatchObject({ status: 0 });
+    const missing = await executeArgv(["builtin", "kill", "-0", "999999"], createState(), { capture: true });
+    expect(missing.status).toBe(1);
+    expect(decode(missing.stderr)).toContain("bunmsh: kill: 999999:");
+    expect(await executeArgv(["builtin", "kill"], createState(), { capture: true }))
+      .toMatchObject({ status: 2 });
+  });
+
+  test.skipIf(process.platform === "win32")("signals a real process", async () => {
+    const proc = Bun.spawn({ cmd: ["sleep", "30"], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    try {
+      expect(await executeArgv(["builtin", "kill", String(proc.pid)], createState(), { capture: true }))
+        .toMatchObject({ status: 0 });
+      await proc.exited;
+      expect(proc.signalCode).toBe("SIGTERM");
+    } finally { proc.kill("SIGKILL"); }
+  });
+
+  test("builds the taskkill command a Windows kill goes through", () => {
+    //  /T reaches the children libuv's TerminateProcess leaves running, /F is
+    //  what makes it work on a console process with no message loop.
+    expect(windowsKillCommand(1234)).toEqual(["taskkill", "/PID", "1234", "/T", "/F"]);
+    expect(windowsKillCommand("1234")).toEqual(["taskkill", "/PID", "1234", "/T", "/F"]);
+  });
+
+  test("rewrites a taskkill failure as one of our own lines", () => {
+    expect(taskkillFailure(0, "SUCCESS: The process with PID 1234 has been terminated.\r\n", ""))
+      .toBeNull();
+    expect(taskkillFailure(128, "", 'ERROR: The process "1234" not found.\r\n'))
+      .toBe('The process "1234" not found.');
+    expect(taskkillFailure(1, "ERROR: Access is denied.\r\n", "")).toBe("Access is denied.");
+    expect(taskkillFailure(1, "", "")).toBe("taskkill exited with status 1");
   });
 });

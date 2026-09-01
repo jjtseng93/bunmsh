@@ -453,7 +453,7 @@ Run `builtin` with no arguments to print the registered names at runtime.
 | `.`, `source` | `FILE [ARG ...]` |
 | `realpath` | One or more paths |
 | `umask` | No operand to display, or an octal mask |
-| `kill` | `-l`, `-SIGNAL`, `-NUMBER` |
+| `kill` | `-l`, `-SIGNAL`, `-NUMBER`; on Windows, where the runtime can only `TerminateProcess` a subset of signals and never reaches the children, a terminating signal is sent as `taskkill /PID PID /T /F` instead, while `-0` still probes through the runtime |
 | `set` | No operand to list variables; `-- ARG ...` sets positional arguments |
 | `time` | Command and arguments; reports `real` elapsed time in milliseconds, with each decimal magnitude group shown in a different color |
 | `yes` | Optional output words; no flags |
@@ -743,6 +743,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `ln` | `-s`, `-f`, `-T`, combinable (including `-sfT`) |
 | `chmod` | Octal modes, `+x`, `a+x` |
 | `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, `-p`, combinable (including `-mprs`); uses Node's OS APIs on Windows without `/proc` |
+| `pspa` | Lists every process as a PID and its full command line, with no options; `ps -eo pid,args` passed through on POSIX, the same two columns queried from `Win32_Process` through PowerShell on Windows |
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
@@ -793,6 +794,7 @@ detailed compatibility snapshot.
 - A `curl` fallback built on `fetch`, covering downloads with resume, JSON and
   form request bodies, redirects, timeouts, retries, `--write-out` reporting,
   and curl's exit codes.
+- A `pspa` process listing that works the same way on POSIX and Windows.
 - Linux, Android/Termux, macOS, and Windows-aware paths, plus standalone builds
   and dynamic-linker re-execution support.
 
