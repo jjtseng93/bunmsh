@@ -251,6 +251,32 @@ Two things to know:
   `$.R = "other"` goes through. That makes it an escape hatch, and a way to
   break an invariant the shell was asked to hold.
 
+#### One line at a time
+
+JavaScript mode runs the line it was given. It does not continue across lines
+the way a shell command does, because the shell's continuation marker is not
+JavaScript: a bare `\` at the end of a line is a syntax error there, not a
+request for another line, so the prompt does not ask for one.
+
+The exception is the place where JavaScript has a line continuation of its
+own — inside a string or template literal — and there it works, because the
+prompt keeps collecting lines while the quote is open and JavaScript joins them
+itself:
+
+```sh
+Bun.e, "abc\
+def"
+```
+
+```text
+abcdef
+```
+
+An unbalanced bracket does not continue: the shell's parser is looking for
+shell syntax, not JavaScript's, so `Bun.e; function f() {` runs as typed and
+reports its own syntax error. For code that spans lines, put it in a file and
+`import` it, or keep the statements on one line separated by `;`.
+
 #### Use `Bun.sha` as a shared area (hack)
 
 `Bun.sha` is normally Bun's SHA hashing function. JavaScript functions are
@@ -399,6 +425,7 @@ on where the cursor is:
 | A command name | Builtins, aliases, and executables on `PATH` |
 | Inside `$(` | Command names again — a substitution starts a new command |
 | A `$` being typed | Shell variable names |
+| A JavaScript line | `$.` completes a variable name, a string literal a path |
 | Anywhere else | Files and directories, and history for the ghost |
 
 **Variables.** `$HO` suggests `$HOME`, and `${HO` suggests `${HOME}` — the
@@ -421,6 +448,26 @@ The suggestion follows the shell's own rules about when a `$` expands:
 
 Where both could apply, history wins the ghost: it completes the whole line,
 which reaches further than a single variable name.
+
+**On a JavaScript line** — one starting with `Bun.`, the same test the
+evaluator dispatches on — the line is read as JavaScript instead, because shell
+word-splitting says nothing useful about it. Two things complete there:
+
+```sh
+Bun.e, $.HO              # -> $.HOME
+Bun.e, Bun.file("/tm     # -> a path, completed inside the string
+```
+
+- After `$.`, shell variable names. A bare `$` completes nothing here: in
+  JavaScript it is the variable table itself, and a name only begins after the
+  dot.
+- Inside an unclosed string literal — `"`, `'`, or a template — the text back
+  to the opening quote is completed as a path. No trailing space is needed to
+  make the completer see it, and nothing has to be trimmed back off afterwards.
+- A template's `${...}` is code again, so `$.` completes inside it and the
+  path resumes after the closing brace.
+- Where neither applies, only the history ghost is offered; shell completion
+  would just produce noise on a JavaScript line.
 
 ### Keyboard shortcuts
 

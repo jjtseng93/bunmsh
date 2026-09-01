@@ -37,6 +37,28 @@ All notable user-visible changes to bunmsh are documented here.
   a file by that name; it now offers commands there, and files after the
   command, the way it does at the start of a line.
 
+- Complete on a JavaScript line too, reading it as JavaScript rather than as
+  shell text. After `$.` it offers shell variable names, and inside an unclosed
+  string literal it completes the text back to the opening quote as a path —
+  so `Bun.file("/tm` completes without the trailing space that used to be
+  needed to make the completer see a path at all, and without trimming that
+  space back off afterwards. A template's `${...}` counts as code again, so
+  `$.` completes inside it. A bare `$` completes nothing there, since in
+  JavaScript it is the variable table itself and a name only begins after the
+  dot. Where neither applies only the history ghost is offered.
+
+### Fixed
+
+- Stop asking a JavaScript line to continue when it cannot. A line ending in a
+  bare backslash used to get the shell's PS2 prompt, but a backslash outside a
+  string literal is a syntax error in JavaScript, so whatever was typed next
+  was guaranteed not to parse. An unterminated string or template still
+  continues, because that is JavaScript's own line continuation and the
+  evaluator does accept it — `Bun.e, "abc\` and `def"` on two lines prints
+  `abcdef`. The rule that decides JavaScript mode is now one exported
+  function, so the prompt, the completer and the evaluator cannot disagree
+  about what a line is.
+
 ## [0.3.1] - 2026-09-01
 
 ### Added
