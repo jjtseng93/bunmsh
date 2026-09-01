@@ -712,6 +712,7 @@ aliases that explicitly select the builtin commands:
 ```sh
 alias cat='builtin catfancy'
 alias ls='builtin lsfancy'
+alias ps='builtin pspac'
 ```
 
 After that, `cat README.md` renders Markdown with ANSI styling and terminal
@@ -744,6 +745,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `chmod` | Octal modes, `+x`, `a+x` |
 | `uname` | `-a`, `-s`, `-n`, `-r`, `-v`, `-m`, `-p`, combinable (including `-mprs`); uses Node's OS APIs on Windows without `/proc` |
 | `pspa` | Lists every process as a PID and its full command line, with no options; `ps -eo pid,args` passed through on POSIX, the same two columns queried from `Win32_Process` through PowerShell on Windows |
+| `pspac` | The same listing, coloured: the PID as a number, and the command line highlighted as shell syntax with micro's `syntax/sh.yaml` rules and `colorschemes/monokai.micro` colours, plus a dimmed leading directory and the program's own name coloured as the command it is. Always colours, like `catfancy`; strip the colour and the output is `pspa`'s |
 | `find` | Paths plus `-name`, `-iname`, `-path`, `-ipath`, `-type f/d/l`, `-mindepth`, `-maxdepth`, `-print`, `-print0`, `!`/`-not`, `-exec COMMAND {} \;`, `-exec COMMAND {} +`; regular builtin on Windows, PATH fallback elsewhere |
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
@@ -794,7 +796,8 @@ detailed compatibility snapshot.
 - A `curl` fallback built on `fetch`, covering downloads with resume, JSON and
   form request bodies, redirects, timeouts, retries, `--write-out` reporting,
   and curl's exit codes.
-- A `pspa` process listing that works the same way on POSIX and Windows.
+- A `pspa` process listing that works the same way on POSIX and Windows, and a
+  `pspac` that colours it as shell syntax.
 - Linux, Android/Termux, macOS, and Windows-aware paths, plus standalone builds
   and dynamic-linker re-execution support.
 
@@ -858,3 +861,27 @@ The original bunmsh JavaScript implementation is released under the
 
 mksh is a separate upstream project and is **not** relicensed under MIT. Its
 complete licence terms remain in [LICENSE-MKSH](LICENSE-MKSH).
+
+### Syntax highlighting
+
+The shell-syntax colouring `pspac` applies to the COMMAND column follows
+`runtime/syntax/sh.yaml` from [micro](https://github.com/zyedidia/micro), the
+Go terminal editor. Nothing is bundled: its rules — the keyword,
+command-name, flag, variable, string, and comment patterns, the word lists
+behind them, and the order they resolve in — were transcribed into
+`src/shell.js`. Micro's syntax files are MIT ("Expat"), Copyright (c) 2020:
+Zachary Yedidia, et al.; micro's own `syntax/README.md` records that they
+originate from Nano's [`nanorc`](https://github.com/scopatz/nanorc)
+collection.
+
+The colours those classes are painted in are the colour-links of micro's
+`runtime/colorschemes/monokai.micro` — micro itself is MIT, Copyright (c)
+2016-2020: Zachary Yedidia, et al. — which renders the Monokai palette created
+by Wimer Hazenberg. `catfancy` colours JSON keys, strings, numbers, escapes,
+and constants with five of the same values, so both commands read as one
+scheme rather than two.
+
+Micro's terms are in [LICENSE-MICRO](LICENSE-MICRO); upstream they are
+`runtime/syntax/LICENSE` and `LICENSE` in
+[zyedidia/micro](https://github.com/zyedidia/micro), which is where to trace
+either of them from.

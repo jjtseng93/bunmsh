@@ -8,12 +8,17 @@ import {
   createState,
   decode,
   execute,
+  colorProcessCommand,
+  colorProcessTable,
+  highlightShellCommand,
   executeArgv,
   formatProcessTable,
   needsMoreInput,
   parse,
+  parsePosixProcessList,
   parseWindowsProcessList,
   runUnameFallback,
+  SH_COLORS,
   taskkillFailure,
   tokenize,
   windowsKillCommand,
@@ -1868,5 +1873,95 @@ describe("kill", () => {
       .toBe('The process "1234" not found.');
     expect(taskkillFailure(1, "ERROR: Access is denied.\r\n", "")).toBe("Access is denied.");
     expect(taskkillFailure(1, "", "")).toBe("taskkill exited with status 1");
+  });
+});
+
+describe("pspac", () => {
+  const wrap = (name, value) => `${SH_COLORS[name]}${value}${SH_COLORS.reset}`;
+
+  test("reads the rows back out of the plain ps listing", () => {
+    expect(parsePosixProcessList("  PID COMMAND\n    1 /init\n12771 bash -l\n\n")).toEqual([
+      { pid: 1, args: "/init" },
+      { pid: 12771, args: "bash -l" },
+    ]);
+  });
+
+  test("dims the directory and names the program the first token really is", () => {
+    const line = colorProcessCommand("/usr/bin/bash --login -l notes.txt");
+    //  Colour is the only difference: the text itself is untouched.
+    expect(Bun.stripANSI(line)).toBe("/usr/bin/bash --login -l notes.txt");
+    expect(line).toContain(wrap("path", "/usr/bin/"));
+    expect(line).toContain(wrap("type", "bash"));
+    expect(line).toContain(wrap("statement", "--login"));
+    expect(line).toContain(wrap("statement", "-l"));
+    //  An ordinary operand is left alone.
+    expect(line).toContain(" notes.txt");
+    //  Word boundaries are micro's: the `sh` ending `script.sh` is one of
+    //  sh.yaml's command names, and it is painted like one here too.
+    expect(colorProcessCommand("bun run script.sh")).toContain(wrap("type", "sh"));
+
+    //  A program sh.yaml's word lists have never heard of is still the
+    //  command, because here the first token is known to be one.
+    expect(colorProcessCommand("fish")).toBe(wrap("type", "fish"));
+    expect(colorProcessCommand("")).toBe("");
+  });
+
+  test("applies sh.yaml's rules to the rest of the command line", () => {
+    const source = 'if test 42 = "$HOME"; then echo ok; fi # note';
+    const line = highlightShellCommand(source);
+    expect(Bun.stripANSI(line)).toBe(source);
+    expect(line).toContain(wrap("statement", "if"));
+    expect(line).toContain(wrap("statement", "then"));
+    expect(line).toContain(wrap("constant", "42"));
+    expect(line).toContain(wrap("type", "test"));
+    expect(line).toContain(wrap("special", "="));
+    //  The string is a region, so it swallows the $HOME inside it.
+    expect(line).toContain(wrap("string", '"$HOME"'));
+    expect(line).toContain(wrap("comment", "# note"));
+    expect(highlightShellCommand("run $HOME/bin ${PATH}"))
+      .toContain(wrap("identifier", "$HOME"));
+  });
+
+  test("resolves rule precedence the way micro does", () => {
+    //  The flag rule is listed after the command names, so it wins the
+    //  overlap: --cat is a flag, not the coreutils cat.
+    expect(highlightShellCommand("bun --cat run")).toContain(wrap("statement", "--cat"));
+    //  A # inside a quoted argument does not open a comment.
+    const quoted = highlightShellCommand('echo "a # b" done');
+    expect(quoted).toContain(wrap("string", '"a # b"'));
+    expect(quoted).toContain(wrap("statement", "done"));
+  });
+
+  test("lets a kernel thread and a quoted program keep their own colour", () => {
+    expect(colorProcessCommand("[kworker/0:1]")).toBe(wrap("path", "[kworker/0:1]"));
+    const windows = colorProcessCommand('"C:\\Program Files\\App\\app.exe" --flag');
+    expect(Bun.stripANSI(windows)).toBe('"C:\\Program Files\\App\\app.exe" --flag');
+    expect(windows).toContain(wrap("string", '"C:\\Program Files\\App\\app.exe"'));
+    expect(windows).toContain(wrap("statement", "--flag"));
+  });
+
+  test("strips back to exactly what pspa prints", () => {
+    const rows = [
+      { pid: 1, args: "/init" },
+      { pid: 4, args: "" },
+      { pid: 123456, args: "/usr/bin/bun run dev" },
+    ];
+    expect(Bun.stripANSI(colorProcessTable(rows))).toBe(formatProcessTable(rows));
+  });
+
+  test("lists the same processes pspa does, in colour", async () => {
+    const execution = await executeArgv(["builtin", "pspac"], createState(), { capture: true });
+    expect(execution.status).toBe(0);
+    const text = decode(execution.stdout);
+    expect(text).toContain("\x1b[");
+    const lines = Bun.stripANSI(text).split("\n");
+    expect(lines[0]).toMatch(/^\s*PID COMMAND$/);
+    expect(lines.some((line) => new RegExp(`^\\s*${process.pid} `).test(line))).toBe(true);
+  });
+
+  test("takes no operands", async () => {
+    const execution = await executeArgv(["builtin", "pspac", "extra"], createState(), { capture: true });
+    expect(execution.status).toBe(2);
+    expect(decode(execution.stderr)).toBe("bunmsh: pspac: unexpected operand: extra\n");
   });
 });

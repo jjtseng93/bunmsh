@@ -51,6 +51,26 @@ All notable user-visible changes to bunmsh are documented here.
   PowerShell and lays the same two columns out itself, using the image name
   for a system process that reports no command line. It takes no options; pipe
   it into `grep` to narrow the listing and into `kill` to act on it.
+- Add `pspac`, the same process listing with the PID and the command line
+  coloured. The COMMAND column is a shell command line, so it is highlighted
+  as one, following micro's `syntax/sh.yaml` rules and its
+  `colorschemes/monokai.micro` colour-links — the palette `catfancy` already
+  uses — down to its region handling (a `#` inside a quoted argument does not
+  open a comment) and its rule precedence (`--cat` is a flag, not the
+  coreutils `cat`). Two things a listing needs that a script does not: the
+  directory in front of the program is dimmed, and the program's own name is
+  coloured as a command whether or not sh.yaml's word lists have heard of it.
+  Like `catfancy` it always colours; strip the colour from its output and
+  `pspa`'s is what remains, which is what its tests assert.
+- Add `LICENSE-MICRO` and a "Syntax highlighting" section under the README's
+  licence heading, covering what the colouring inherits from
+  [micro](https://github.com/zyedidia/micro): `pspac` transcribes the rules of
+  its `runtime/syntax/sh.yaml` (MIT "Expat", Copyright (c) 2020: Zachary
+  Yedidia, et al.), and both `pspac` and `catfancy` paint with the
+  colour-links of its `runtime/colorschemes/monokai.micro` (micro itself: MIT,
+  Copyright (c) 2016-2020: Zachary Yedidia, et al.), which renders Wimer
+  Hazenberg's Monokai palette. No micro file is bundled, but the rules are
+  transcribed from one, so the licence notice ships with them.
 
 ### Fixed
 
