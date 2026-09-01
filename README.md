@@ -661,6 +661,48 @@ unquoted `=on` / `=/index.html` / `=1` forms above work directly from a
 shell, no manual `--define 'process.env.SERVE_AUTO_OPEN="/index.html"'`
 quoting required.
 
+### The `curl` command
+
+`curl [options] URL...` transfers a URL over HTTP or HTTPS on top of Bun's own
+`fetch`, so a device with no `curl` binary can still run the download and API
+scripts that expect one. It is a PATH-fallback builtin: a real `curl` in
+`PATH` wins unless it is invoked as `builtin curl ...`.
+
+- A URL with no scheme gets one — `http://` normally, `https://` when the port
+  is `443`, or whatever `--proto-default` names — so `curl localhost:8080` and
+  `curl example.com/page` work as they do with the real curl.
+- Downloads: `-o`, `-O`, `-J`, `--output-dir`, `--create-dirs`, `-a`, and
+  `-C -` resume through a `Range` request, appending on `206`, rewriting on a
+  `200` that ignored the range, and stopping cleanly on `416`.
+- Requests: `-X`, `-H`, `-d`/`--data-raw`/`--data-binary`/`--data-ascii`,
+  `--data-urlencode`, `--json`, `-G`, `-F`/`--form-string`, `-T`, `-u`,
+  `--oauth2-bearer`, `-A`, `-e`, `-b`, `-r`, `--compressed`, and `-x`.
+  `@file` and `@-` read a body from a file or stdin.
+- Responses: `-i`, `-I`, `-D`, `-w` with the usual `%{variable}` set, `-L`
+  with `--max-redirs` and the `301`/`302`/`303` POST-to-GET rule, `-f`,
+  `--fail-with-body`, `-k`, `-m`, `--connect-timeout`, and `--retry`.
+- Reporting: `-s`, `-S`, `-v`, `-#`, and a curl-shaped progress meter, shown
+  only when the body is not being painted on the terminal.
+- curl's exit codes are reproduced: `22` for `-f` on an HTTP error, `6` for an
+  unresolved host, `7` for a refused connection, `28` for a timeout, `47` for
+  too many redirects, `60` for a certificate problem, `2` for bad usage.
+- Bodies are streamed, so `curl -N` on a server-sent-events endpoint prints
+  each chunk as it arrives, and a large download never buffers in memory.
+
+Enough to drive a JSON API:
+
+```sh
+curl -sS https://api.openai.com/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Response headers come from `fetch`, which lower-cases them and hides the
+negotiated HTTP version, so `-i`/`-I`/`-v` rebuild the conventional casing and
+write `HTTP/1.1` status lines; Bun also adds a `Connection: keep-alive`
+request header of its own. `builtin curl --help` documents the rest.
+
 ### PATH-fallback builtins
 
 Fallback builtins normally let an executable in `PATH` win. To use the fancy
@@ -705,6 +747,7 @@ hyperlinks, while `ls` uses the emoji and terminal-width-aware listing. Use
 | `bunmsh` | Forwards all following arguments to this bunmsh entry point |
 | `bun` | Forwards all following arguments to the active Bun runtime |
 | `serve` | Auto-open, minapk WebView, and high-entropy random-URL flags; see [The `serve` command](#the-serve-command) above |
+| `curl` | HTTP/HTTPS transfers on Bun's `fetch`, with automatic scheme guessing; `-o`, `-O`, `-J`, `--output-dir`, `--create-dirs`, `-a`, `-C`, `-D`, `-i`, `-I`, `-w`, `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-ascii`, `--data-urlencode`, `--json`, `-G`, `-F`, `--form-string`, `-T`, `-u`, `--oauth2-bearer`, `-A`, `-e`, `-b`, `-r`, `--compressed`, `-x`, `-L`, `--location-trusted`, `--max-redirs`, `-f`, `--fail-with-body`, `-k`, `-m`, `--connect-timeout`, `--retry` and friends, `-s`, `-S`, `-v`, `-#`, `--no-progress-meter`, `-V`, `--url`, `--proto-default`, combinable short clusters (`-kLO`, `-fsSL`, `-kfsS`, `-#k`); TLS-material and connection-tuning options are parsed and ignored; see [The `curl` command](#the-curl-command) above |
 | `ls`, `lsfancy` | The `ls` fallback is `lsfancy`: emoji and terminal-width-aware directory listing; `-a`, `-A`, `-d`, `-l`, `-h`, `-t`, `-r`, `-R`, `-S`, `-1`, `-F`, combinable (including `-lh`, `-ltr`, and `-lSF`); `-l` shows a symlink's target (`link -> target`, including a broken one), and a symlink whose target can't be resolved (missing, or a cycle) gets a 🚫 icon instead of 🔗; `-F` appends a classify suffix (`/` directory, `@` symlink, `*` executable, `=` socket, `\|` FIFO); always reads the directory without using the completion cache |
 | `lsbun` | Bun Shell's own `ls`, kept reachable under this name now that the `ls` fallback is `lsfancy`; currently implements `-a`, `-A`, `-d`, `-l`, `-R` |
 | `mv` | Bun Shell currently accepts `-f`, `-h`, `-i`, `-n`, `-v`, but they do not change its behaviour; notably, `-i` and `-n` do not prevent overwriting |
@@ -747,6 +790,9 @@ detailed compatibility snapshot.
   fancy directory listings, and a `PS2` continuation prompt while a
   here-document, an open quote/substitution, or an unfinished compound
   command is still being typed.
+- A `curl` fallback built on `fetch`, covering downloads with resume, JSON and
+  form request bodies, redirects, timeouts, retries, `--write-out` reporting,
+  and curl's exit codes.
 - Linux, Android/Termux, macOS, and Windows-aware paths, plus standalone builds
   and dynamic-linker re-execution support.
 
@@ -771,6 +817,17 @@ bunmsh --changelog
 Both commands read their embedded copy first when running a standalone
 executable, then fall back to `README.md` or `CHANGELOG.md` in the repository
 during development.
+
+Every builtin's `--help` page lives in `help/`, and `help/README.md` is the
+concatenation of all of them. Regenerate it with the shell's own `cat` after
+adding or editing a page:
+
+```sh
+bun run genallhelp
+```
+
+which runs `builtin cat --exclude help/README.md help/*.md` and writes the
+result back over `help/README.md`.
 
 ## Standalone executable
 

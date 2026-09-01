@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "bun ./src/main.js",
-    "test": "bun test"
+    "test": "bun test",
+    "genallhelp": "bun ./src/main.js -c 'builtin cat --exclude help/README.md help/*.md' > help/README.md"
   },
   "keywords": [
     "bun",

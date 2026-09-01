@@ -44,6 +44,7 @@ import { findIsRegularBuiltin, runFind } from "./find.js";
 import { main as startFileServer, parseServeArguments, waitForInterrupt } from "../serve.js";
 import { main as catFancy } from "./cat-fancy.js";
 import { parseCatOperands } from "./cat-operands.js";
+import { runCurl } from "./curl.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1907,6 +1908,38 @@ async function runTrFallback(argv, _state, input) {
   return result(0, output);
 }
 
+//  `curl` only ever runs when the system has none, so it inherits the
+//  streaming rules the other fallbacks use: write straight through when the
+//  bytes are headed for the terminal or a pipeline stage, buffer when the
+//  caller is capturing them.
+async function runCurlFallback(argv, state, input, context = {}) {
+  const streamStdout = state.pipelineChild ||
+    (!context.captureStdout && !context.options?.stdoutSink);
+  const streamStderr = state.pipelineChild || !context.captureStderr;
+  const stdout = [];
+  const stderr = [];
+  const io = {
+    cwd: nativePath(state.cwd),
+    env: state.env,
+    stdoutIsTTY: streamStdout && Boolean(process.stdout.isTTY),
+    readStdin: () => readFallbackInput(input),
+    async writeStdout(chunk) {
+      const data = bytes(chunk);
+      if (streamStdout) await writeStream(process.stdout, data); else stdout.push(data);
+    },
+    async writeStderr(text) {
+      const data = bytes(text);
+      if (streamStderr) await writeStream(process.stderr, data); else stderr.push(data);
+    },
+  };
+  try {
+    const status = await runCurl(argv, io);
+    return result(status, concatBytes(stdout), concatBytes(stderr));
+  } catch (error) {
+    return result(2, concatBytes(stdout), concatBytes([...stderr, bytes(`curl: ${error.message}\n`)]));
+  }
+}
+
 async function runTeeFallback(argv, state, input) {
   let append = false, i = 1;
   if (argv[i] === "-a") append = true, i++;
@@ -2377,6 +2410,7 @@ const fallbackBuiltins = {
     return result(output.status, output.stdout, output.stderr);
   },
   cp: runBunShellCpFallback,
+  curl: runCurlFallback,
   head: runHeadFallback,
   tail: (argv, state, input) => runTextFilter(argv, state, input, "tail"),
   wc: runWcFallback,

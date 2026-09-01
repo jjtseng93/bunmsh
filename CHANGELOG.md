@@ -2,6 +2,47 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- Add a `curl` PATH-fallback builtin implemented on Bun's own `fetch`, so a
+  device that ships no `curl` binary can still run the download and API
+  scripts that expect one. A real `curl` in `PATH` still wins;
+  `builtin curl ...` selects this one. A URL with no scheme gets one —
+  `http://`, or `https://` when the port is `443`, or whatever
+  `--proto-default` names — so `curl localhost:8080` and `curl example.com`
+  behave the way they do with the real curl.
+  - Downloads: `-o`, `-O`, `-J`, `--output-dir`, `--create-dirs`, `-a`, and
+    `-C -`/`-C OFFSET` resume, which sizes the partial file, asks for the rest
+    with a `Range` header, appends when the server answers `206`, rewrites when
+    a `200` says the range was ignored, and treats `416` as "already complete".
+  - Request bodies: `-X`, `-H` (including curl's `'Name;'` empty-value and
+    `'Name:'` removal forms), `-d`, `--data-raw`, `--data-binary`,
+    `--data-ascii`, `--data-urlencode`, `--json`, `-G`, `-F`,
+    `--form-string`, `-T`, `-u`, `--oauth2-bearer`, `-A`, `-e`, `-b`, `-r`,
+    `--compressed`, and `-x`, with `@file` and `@-` reading a body from a file
+    or from stdin — enough to call a JSON API such as OpenAI's chat
+    completions endpoint from the shell.
+  - Responses and reporting: `-i`, `-I`, `-D`, `-w` with the usual
+    `%{variable}` set, `-L` with `--max-redirs` and the `301`/`302`/`303`
+    POST-to-GET rule, `-f`, `--fail-with-body`, `-k`, `-m`,
+    `--connect-timeout`, `--retry` and friends, `-s`, `-S`, `-v`, `-#`, and a
+    curl-shaped progress meter that appears only when the body is not being
+    painted on the terminal. curl's exit codes are reproduced, including `22`,
+    `6`, `7`, `28`, `47`, `60`, and `2`.
+  - Short clusters parse the way curl's do, so the invocations packaging
+    scripts use — `-kLO`, `-C - -kLO`, `-fsSL`, `-kfsS`, `-#k` — work
+    unchanged. TLS-material and connection-tuning options (`--cacert`,
+    `--cert`, `--interface`, `--limit-rate`, `-4`, `--http2`, and the rest)
+    are parsed and then ignored so a script does not die on them.
+  - Bodies stream, so `curl -N` on a server-sent-events endpoint prints each
+    chunk as it arrives and a large download never buffers in memory.
+  - `test/reference.test.js` compares the builtin against the system `curl`
+    over a local server: bodies, exit codes, redirect handling, request bodies,
+    and `--write-out` output are byte-for-byte identical, and `-i` matches once
+    header order and casing — which `fetch` does not preserve — are normalised.
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

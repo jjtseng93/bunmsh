@@ -373,7 +373,7 @@ describe("execution", () => {
     const files = { ":": "colon", ...titles };
     const optionDocs = new Set([
       "basename", "builtin", "bun", "bunmsh", "cat", "catfancy", "chmod", "command", "cp", "cut",
-      "date", "dirname", "echo", "env", "find", "getopts", "grep", "head", "kill",
+      "curl", "date", "dirname", "echo", "env", "find", "getopts", "grep", "head", "kill",
       "ln", "ls", "lsbun", "lsfancy", "mkdir", "mktemp", "mv", "print", "printf",
       "read", "readonly", "rm", "rmdir", "sed", "seq", "serve", "set", "sleep",
       "sort", "tab", "tac", "tail", "tee", "test", "touch", "tr", "unalias",
