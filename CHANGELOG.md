@@ -2,6 +2,22 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.3] - 2026-09-03
+
+### Fixed
+
+- Pass `--color` rather than `--color=auto` in the default `diff` alias.
+  Toybox's `diff` — the one Android answers `/system/bin/diff` with — spells
+  the option without a `=WHEN` argument and rejects the longer form outright
+  (`diff: Unknown option 'color=auto'`, status 2), so an unqualified `diff`
+  produced an error instead of a comparison. GNU diffutils accepts either
+  spelling, so nothing changes where that is the `diff` on `PATH`. The `ls` and
+  `grep` aliases keep `--color=auto`, which both of those do accept.
+
+  BusyBox `diff` has no colour option under either spelling and answers
+  `diff: unrecognized option: color`. Override the alias with `alias diff=diff`
+  where `diff` is BusyBox, as it is on Alpine.
+
 ## [0.3.2] - 2026-09-01
 
 ### Added
