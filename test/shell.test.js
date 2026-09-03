@@ -786,9 +786,10 @@ fi
 
   test("provides color aliases for common commands", () => {
     const state = createState();
+    // toybox diff takes a bare --color; it has no =auto form.
     expect(state.aliases).toEqual({
       ls: ["ls", "--color=auto"],
-      diff: ["diff", "--color=auto"],
+      diff: ["diff", "--color"],
       grep: ["grep", "--color=auto"],
     });
   });

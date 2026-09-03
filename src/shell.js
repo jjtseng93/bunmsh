@@ -50,8 +50,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEFAULT_ALIASES = {
   ls: ["ls", "--color=auto"],
-  diff: ["diff", "--color=auto"],
   grep: ["grep", "--color=auto"],
+  diff: ["diff", "--color"],
 };
 const DEFAULT_COMMAND_PATH = process.platform === "win32"
   ? (environmentValue(process.env, "PATH") ?? "")
