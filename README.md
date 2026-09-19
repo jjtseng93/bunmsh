@@ -78,6 +78,48 @@ bun ./bunmsh script.sh argv1 argv2
 already-quoted word, without another round of bunmsh parsing or expansion. The
 example calls the `echo` builtin and prints `hello world *.txt $HOME` literally.
 
+### Option 3: Run in a VM with Docker
+
+A third way in, for when the host should stay untouched: a Docker image that
+boots a Linux kernel under QEMU and hands the entire userspace to this
+repository — `bunmsh` runs as PID 1, with no init above it.
+
+A prebuilt image is on Docker Hub at
+[`hcyuser/bunmsh-vm`](https://hub.docker.com/r/hcyuser/bunmsh-vm)
+(`linux/amd64` and `linux/arm64`), so nothing has to be built to try it:
+
+```sh
+docker run --rm -it hcyuser/bunmsh-vm
+```
+
+That image is an unofficial build published from a fork of this repository;
+it adds the Docker/QEMU packaging and leaves the shell itself untouched. Its
+Docker Hub overview is [docker/DOCKERHUB.md](docker/DOCKERHUB.md). Building it
+yourself is two commands:
+
+```sh
+docker build -t bunmsh-vm .
+docker run --rm -it bunmsh-vm
+```
+
+`-it` is required: the shell is PID 1 on the guest's serial console, so it
+needs a terminal. `poweroff -f` stops the guest; leaving the shell panics the
+kernel by design, which still stops the container.
+
+`web` additionally starts a terminal in the browser beside it, on a random URL
+path read from the container log:
+
+```sh
+docker run -d --name bunmsh -p 8080:8080 hcyuser/bunmsh-vm web
+docker logs bunmsh | grep -A1 listening
+```
+
+That mode needs jsgotty, which lives in the npm `buninu` package rather than
+here; the guest downloads it at boot unless the image was built with
+`--build-arg BUNINU_VERSION=latest`. The environment variables the image reads
+and what PID 1 = bunmsh costs are in [docker/README.md](docker/README.md),
+beside the [Dockerfile](Dockerfile).
+
 ### Useful CLI options
 
 | Option | Effect |

@@ -3,11 +3,13 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   highlightJson,
+  listenOnFirstFreePort,
   main as startFileServer,
   openTargetUrl,
   parseServeArguments,
   randomServeRoute,
   resolveBunfsPath,
+  startPort,
 } from "../serve.js";
 
 const cwd = join(import.meta.dir, "serve");
@@ -143,6 +145,73 @@ test("serve --minapk-webview never consumes a following bare argument as its val
     .toMatchObject({ minapkWebview: "1", directory: "1" });
   expect(parseServeArguments(["--minapk-webview", "1", "dir"], {}, "/cwd"))
     .toMatchObject({ error: "too many directory operands" });
+});
+
+test("serve --port takes a value in either spelling, and -p is the short form", () => {
+  expect(parseServeArguments(["--port=8080"], {}, "/cwd")).toMatchObject({ port: 8080, directory: "/cwd" });
+  expect(parseServeArguments(["--port", "8080"], {}, "/cwd")).toMatchObject({ port: 8080, directory: "/cwd" });
+  expect(parseServeArguments(["-p", "8080", "public"], {}, "/cwd")).toMatchObject({ port: 8080, directory: "public" });
+  expect(parseServeArguments(["-p=8080"], {}, "/cwd")).toMatchObject({ port: 8080 });
+  // 0 means "any free port", so --port accepts it where --port-tries cannot.
+  expect(parseServeArguments(["--port=0"], {}, "/cwd")).toMatchObject({ port: 0 });
+  expect(parseServeArguments(["--port-tries=3"], {}, "/cwd")).toMatchObject({ portTries: 3 });
+  expect(parseServeArguments(["--strict-port"], {}, "/cwd")).toMatchObject({ strictPort: true });
+  expect(parseServeArguments(["--strict-port=off"], {}, "/cwd")).toMatchObject({ strictPort: false });
+});
+
+test("serve rejects a port that is not a plain number and a --port left without one", () => {
+  expect(parseServeArguments(["--port=http"], {}, "/cwd"))
+    .toMatchObject({ error: "invalid value for --port: http" });
+  expect(parseServeArguments(["--port", "http"], {}, "/cwd"))
+    .toMatchObject({ error: "invalid value for --port: http" });
+  expect(parseServeArguments(["--port-tries=0"], {}, "/cwd"))
+    .toMatchObject({ error: "invalid value for --port-tries: 0" });
+  expect(parseServeArguments(["--port"], {}, "/cwd"))
+    .toMatchObject({ error: "missing value for --port" });
+});
+
+test("serve takes its start port from --port, then PORT, then 3000", () => {
+  expect(startPort({ port: 8080 }, { PORT: "9000" })).toBe(8080);
+  expect(startPort({ port: null }, { PORT: "9000" })).toBe(9000);
+  expect(startPort({ port: null }, { PORT: "0" })).toBe(0);
+  expect(startPort({}, {})).toBe(3000);
+  // A junk PORT is ignored rather than fatal.
+  expect(startPort({}, { PORT: "http" })).toBe(3000);
+});
+
+test("serve walks forward from a busy port until one binds", () => {
+  const fetch = () => new Response("busy");
+  const blockers = [];
+  let start;
+  // Claim two consecutive ports, whichever pair the OS happens to hand out.
+  for (let base = 8080; base < 8180; base++) {
+    try {
+      const first = Bun.serve({ port: base, fetch });
+      try {
+        blockers.push(first, Bun.serve({ port: base + 1, fetch }));
+        start = base;
+        break;
+      } catch {
+        first.stop(true);
+      }
+    } catch { /* busy on this machine; try the next base */ }
+  }
+  expect(start).toBeNumber();
+
+  const scanned = listenOnFirstFreePort({ port: start, fetch }, {});
+  expect(scanned.port).toBe(start + 2);
+  scanned.stop(true);
+
+  // --strict-port keeps the requested port or fails.
+  expect(() => listenOnFirstFreePort({ port: start, fetch }, { strictPort: true })).toThrow();
+
+  // Out of tries, an ephemeral port still comes up rather than the call failing.
+  const fallback = listenOnFirstFreePort({ port: start, fetch }, { portTries: 2 });
+  expect(fallback.port).not.toBe(start);
+  expect(fallback.port).not.toBe(start + 1);
+  fallback.stop(true);
+
+  for (const blocker of blockers) blocker.stop(true);
 });
 
 test("serve random routes have high entropy and are URL-safe", () => {

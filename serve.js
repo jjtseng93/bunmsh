@@ -19,7 +19,15 @@ const OPTION_NAMES = {
   "--auto-open": "autoOpen",
   "--minapk-webview": "minapkWebview",
   "--random-url": "randomUrl",
+  "--port": "port",
+  "--port-tries": "portTries",
+  "--strict-port": "strictPort",
 };
+
+export const DEFAULT_PORT = 3000;
+// How many consecutive ports a busy start port may walk forward over:
+// 8080, 8081, 8082, ... The tenth is the last one tried.
+export const DEFAULT_PORT_TRIES = 10;
 
 const envEnabled = (value) => /^(?:1|true|yes|on)$/i.test(String(value ?? "").trim());
 // A bare CLI flag always means "on"; `=off`/`=no`/`=false`/`=` always means an
@@ -44,17 +52,55 @@ function autoOpenEnvDefault(value) {
   return trimmed.startsWith("/") ? trimmed : envEnabled(trimmed);
 }
 
+// PORT, --port and --port-tries all take a plain positive integer; --port
+// additionally accepts 0, which asks the OS for any free port.
+const parseNumericOption = (value, { allowZero = false } = {}) => {
+  if (!/^\d+$/.test(String(value ?? "").trim())) return null;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) return null;
+  if (number === 0) return allowZero ? 0 : null;
+  return number;
+};
+
 export function parseServeArguments(args, env = process.env, cwd = process.cwd()) {
   const options = {
     autoOpen: autoOpenEnvDefault(ENV_FLAGS.autoOpen),
     minapkWebview: minapkWebviewEnvDefault(ENV_FLAGS.minapkWebview),
     randomUrl: envEnabled(ENV_FLAGS.randomUrl),
+    port: null,
+    portTries: null,
+    strictPort: false,
   };
   const operands = [];
   let parseOptions = true;
+  // --port/--port-tries are the only options that also take a space-separated
+  // value. They are unambiguous in a way the boolean flags are not: a bare
+  // `--minapk-webview` is itself a valid "on", so a following "1" has to stay
+  // a directory, while a bare `--port` means nothing at all.
+  let pendingValueFor = null;
   for (const argument of args) {
+    if (pendingValueFor) {
+      const flag = pendingValueFor;
+      pendingValueFor = null;
+      const number = parseNumericOption(argument, { allowZero: flag === "--port" });
+      if (number === null) return { error: `invalid value for ${flag}: ${argument}` };
+      options[OPTION_NAMES[flag]] = number;
+      continue;
+    }
     if (parseOptions && argument === "--") {
       parseOptions = false;
+      continue;
+    }
+    if (parseOptions && (argument === "-p" || argument.startsWith("-p="))) {
+      // -p is the short spelling of --port, in both `-p 8080` and `-p=8080`.
+      const equals = argument.indexOf("=");
+      if (equals === -1) {
+        pendingValueFor = "--port";
+        continue;
+      }
+      const number = parseNumericOption(argument.slice(equals + 1), { allowZero: true });
+      if (number === null) return { error: `invalid value for --port: ${argument.slice(equals + 1)}` };
+      options.port = number;
       continue;
     }
     if (parseOptions && argument.startsWith("--")) {
@@ -63,7 +109,15 @@ export function parseServeArguments(args, env = process.env, cwd = process.cwd()
       const value = equals === -1 ? undefined : argument.slice(equals + 1);
       const name = OPTION_NAMES[flag];
       if (!name) return { error: `unknown option: ${argument}` };
-      if (name === "minapkWebview") {
+      if (name === "port" || name === "portTries") {
+        if (value === undefined) {
+          pendingValueFor = flag;
+          continue;
+        }
+        const number = parseNumericOption(value, { allowZero: name === "port" });
+        if (number === null) return { error: `invalid value for ${flag}: ${value}` };
+        options[name] = number;
+      } else if (name === "minapkWebview") {
         if (value === undefined) options.minapkWebview = "1";
         else if (isOffValue(value)) options.minapkWebview = null;
         else if (/^\d+$/.test(value)) options.minapkWebview = value;
@@ -80,6 +134,7 @@ export function parseServeArguments(args, env = process.env, cwd = process.cwd()
     }
     operands.push(argument);
   }
+  if (pendingValueFor) return { error: `missing value for ${pendingValueFor}` };
   if (operands.length > 1) return { error: "too many directory operands" };
   return { directory: operands[0] ?? cwd, ...options, env };
 }
@@ -398,24 +453,57 @@ function openServeUrl(url, minapkWebview, env = process.env) {
   }
 }
 
+const isAddressInUse = (error) => error?.code === "EADDRINUSE" ||
+  /EADDRINUSE|address already in use/i.test(String(error?.message ?? error));
+
+// The port to start from: --port wins, then PORT, then 3000. An unparseable
+// PORT is ignored rather than fatal -- the scan below lands somewhere usable.
+export function startPort(options = {}, env = options.env ?? process.env) {
+  if (options.port !== null && options.port !== undefined) return options.port;
+  const fromEnv = parseNumericOption(env.PORT, { allowZero: true });
+  return fromEnv === null ? DEFAULT_PORT : fromEnv;
+}
+
+// Walk forward from `port` -- 8080, 8081, 8082, ... -- and return the first
+// one that binds. Port 0 (any free port) is honoured as-is and never walked.
+// When every candidate is busy the last resort is port 0, so a server always
+// comes up; --strict-port turns that whole fallback off and fails on the
+// requested port instead, which is what a fixed published port or an OAuth
+// redirect URL needs.
+export function listenOnFirstFreePort(serverOptions, options = {}) {
+  const port = serverOptions.port;
+  const tries = port === 0 || options.strictPort
+    ? 1
+    : Math.max(1, options.portTries ?? DEFAULT_PORT_TRIES);
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const candidate = port + attempt;
+    if (candidate > 65535) break;
+    try {
+      const server = Bun.serve({ ...serverOptions, port: candidate });
+      if (attempt > 0) console.log(`Port ${port} is in use; serving on ${candidate} instead`);
+      return server;
+    } catch (error) {
+      // A busy port is the only reason to keep walking; anything else -- a
+      // permission error, a bad option -- is the caller's to see.
+      if (!isAddressInUse(error) || options.strictPort) throw error;
+    }
+  }
+  const server = Bun.serve({ ...serverOptions, port: 0 });
+  const last = Math.min(port + tries - 1, 65535);
+  console.log(`Ports ${port}-${last} are in use; serving on ${server.port} instead`);
+  return server;
+}
+
 export function main(directory = process.cwd(), options = {}) {
   // The virtual mount itself is not stat-able. import.meta.dirname points at
   // its real root on each platform: /$bunfs/root or B:/~BUN/root.
   root = resolve(resolveBunfsPath(directory) ?? directory);
   randomRoute = options.randomUrl ? randomServeRoute() : "";
   const serverOptions = {
-    port: Number((options.env ?? process.env).PORT ?? 3000),
+    port: startPort(options),
     fetch: safeHandleRequest,
   };
-  let server;
-  try {
-    server = Bun.serve(serverOptions);
-  } catch (error) {
-    const addressInUse = error?.code === "EADDRINUSE" ||
-      /EADDRINUSE|address already in use/i.test(String(error?.message ?? error));
-    if (serverOptions.port !== 3000 || !addressInUse) throw error;
-    server = Bun.serve({ ...serverOptions, port: 0 });
-  }
+  const server = listenOnFirstFreePort(serverOptions, options);
   const url = randomRoute ? new URL(randomRoute, server.url) : server.url;
   publicUrls.set(server, url);
   console.log(`Serving ${root}\n  ${url.href}`);

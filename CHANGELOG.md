@@ -2,6 +2,20 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `serve -p PORT` / `--port PORT` sets the port without going through `PORT`,
+  and a busy port is no longer fatal: the server walks forward over the next
+  ports — 8080, 8081, 8082, ... — and serves on the first free one, saying so
+  when it moves. `--port-tries=N` sets how far it walks (10 by default) and
+  `--strict-port` turns the search off for cases that need the exact port.
+- `docker/run.sh` runs the VM image on the first free host port, publishing it
+  and setting `BUNMSH_PORT` to the same number, since `docker run -p` fails
+  outright when the port is taken. The image's entrypoint also accepts
+  `--port PORT` as a shorter spelling of `BUNMSH_PORT`.
+
 ## [0.3.6] - 2026-09-15
 
 ### Added
