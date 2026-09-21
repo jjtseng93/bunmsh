@@ -2,6 +2,17 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.8] - 2026-09-21
+
+### Added
+
+- Make `Ctrl-U` and `Ctrl-K` toggle their edits in the interactive line
+  editor. `Ctrl-U` saves the text removed before the cursor and restores it
+  when pressed again at the beginning of the line; `Ctrl-K` does the same for
+  text after the cursor when pressed again at the end. Each shortcut keeps an
+  independent saved value, and control bytes inside bracketed paste remain
+  literal pasted content rather than triggering either action.
+
 ## [0.3.7] - 2026-09-20
 
 ### Fixed
