@@ -655,6 +655,30 @@ describe("execution", () => {
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
+  test("builtin ls lists glob-expanded files as files, not directory sections", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bunmsh-ls-glob-"));
+    try {
+      await Bun.write(join(cwd, "first.sh"), "#!/bin/sh\n");
+      await Bun.write(join(cwd, "final.sh"), "#!/bin/sh\n");
+      await Bun.write(join(cwd, "other.txt"), "other\n");
+      const output = await run("builtin ls f*.sh", { cwd });
+      expect(output).toMatchObject({ status: 0, stderr: "" });
+      expect(output.stdout).toContain("first.sh");
+      expect(output.stdout).toContain("final.sh");
+      expect(output.stdout).not.toContain("other.txt");
+      expect(output.stdout).not.toContain("first.sh:");
+      expect(output.stdout).not.toContain("final.sh:");
+      expect(output.stdout).not.toContain("\n\n");
+
+      mkdirSync(join(cwd, ".hidden-target"));
+      await Bun.write(join(cwd, ".hidden-target", "through-link.js"), "export {};\n");
+      symlinkSync(".hidden-target", join(cwd, "class-link"));
+      const throughLink = await run("builtin ls ./*/*.js", { cwd });
+      expect(throughLink).toMatchObject({ status: 0, stderr: "" });
+      expect(throughLink.stdout).toContain("through-link.js");
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
   test("fallback find filters paths and supports both -exec modes", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bunmsh-find-"));
     try {

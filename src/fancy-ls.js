@@ -142,15 +142,21 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
   if (!operands.length) operands.push(".");
   let status = 0, stdout = "", stderr = "";
   const visited = new Set();
-  const show = (operand, heading = operands.length > 1) => {
+  let previousWasDirectory = false;
+  const show = (operand, heading = operands.length > 1, separate = true) => {
     const path = isAbsolute(operand) ? operand : resolve(state.cwd, operand);
     try {
       const stats = lstatSync(path);
+      const listingDirectory = stats.isDirectory() && !options.directory;
+      // Multiple file operands are one listing, not a series of directory
+      // sections. Only actual directory contents receive `name:` headings
+      // and blank section separators.
+      if (separate && stdout && (listingDirectory || previousWasDirectory)) stdout += "\n";
       let entries;
-      if (!stats.isDirectory() || options.directory)
+      if (!listingDirectory)
         entries = [{ name: basename(operand) || operand, stats, path }];
       else entries = listDirectory(path, options);
-      if (heading) stdout += `${operand}:\n`;
+      if (heading && listingDirectory) stdout += `${operand}:\n`;
       const rendered = entries.map((entry) => displayEntry(entry, options));
       if (options.long) {
         for (let i = 0; i < entries.length; i++) {
@@ -170,17 +176,15 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
           if (visited.has(child)) continue;
           visited.add(child);
           stdout += "\n";
-          show(`${operand.replace(/\/$/, "")}/${entry.name}`, true);
+          show(`${operand.replace(/\/$/, "")}/${entry.name}`, true, false);
         }
       }
+      previousWasDirectory = listingDirectory;
     } catch (error) {
       status = 1;
       stderr += `bunmsh: ${argv[0]}: ${operand}: ${error.message}\n`;
     }
   };
-  for (let i = 0; i < operands.length; i++) {
-    if (i) stdout += "\n";
-    show(operands[i]);
-  }
+  for (const operand of operands) show(operand);
   return { status, stdout, stderr };
 }
