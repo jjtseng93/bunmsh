@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readdirSync, readlinkSync } from "node:fs";
-import { basename, isAbsolute, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, readlinkSync, statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 
 const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic"]);
 const MUSIC = new Set(["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "mid", "midi"]);
@@ -120,9 +120,11 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
     recursive: false, time: false, reverse: false, size: false, one: false, classify: false,
   };
   const operands = [];
+  let parseOptions = true;
   for (const argument of argv.slice(1)) {
-    if (argument === "--color=auto" || argument === "--color" || argument === "--") continue;
-    if (/^-[^-]/.test(argument)) {
+    if (parseOptions && argument === "--") { parseOptions = false; continue; }
+    if (parseOptions && (argument === "--color=auto" || argument === "--color")) continue;
+    if (parseOptions && /^-[^-]/.test(argument)) {
       for (const flag of argument.slice(1)) {
         if (flag === "a") options.all = true;
         else if (flag === "A") options.almostAll = true;
@@ -147,14 +149,23 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
     const path = isAbsolute(operand) ? operand : resolve(state.cwd, operand);
     try {
       const stats = lstatSync(path);
-      const listingDirectory = stats.isDirectory() && !options.directory;
+      let listingDirectory = stats.isDirectory() && !options.directory;
+      // GNU/POSIX-style ls follows a command-line symlink to a directory for
+      // an ordinary listing and for -R. -d, -l, and -F request information
+      // about the link itself instead. A broken link simply cannot qualify.
+      if (stats.isSymbolicLink() && !options.directory && !options.long && !options.classify) {
+        try { listingDirectory = statSync(path).isDirectory(); } catch {}
+      }
       // Multiple file operands are one listing, not a series of directory
       // sections. Only actual directory contents receive `name:` headings
       // and blank section separators.
       if (separate && stdout && (listingDirectory || previousWasDirectory)) stdout += "\n";
       let entries;
       if (!listingDirectory)
-        entries = [{ name: basename(operand) || operand, stats, path }];
+        // Preserve the operand spelling just like traditional ls. A glob such
+        // as ./*/*.js has already expanded to paths, and reducing each one to
+        // basename would lose the information that distinguishes its parent.
+        entries = [{ name: operand, stats, path }];
       else entries = listDirectory(path, options);
       if (heading && listingDirectory) stdout += `${operand}:\n`;
       const rendered = entries.map((entry) => displayEntry(entry, options));
@@ -170,7 +181,7 @@ export function fancyLs(argv, state, terminal = Boolean(process.stdout.isTTY)) {
       } else stdout += terminal && !options.one
         ? columns(rendered, process.stdout.columns ?? 80)
         : `${rendered.join("\n")}${rendered.length ? "\n" : ""}`;
-      if (options.recursive && stats.isDirectory() && !options.directory) {
+      if (options.recursive && listingDirectory) {
         for (const entry of entries) if (entry.stats.isDirectory() && entry.name !== "." && entry.name !== "..") {
           const child = resolve(path, entry.name);
           if (visited.has(child)) continue;

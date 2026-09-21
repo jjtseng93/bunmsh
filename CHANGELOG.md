@@ -19,7 +19,13 @@ All notable user-visible changes to bunmsh are documented here.
   correctly, but multiple operands unconditionally received `filename:`
   headings and blank separators. Only directories whose contents are being
   listed now receive section headings; multiple ordinary files form one
-  continuous listing.
+  continuous listing and retain their full operand paths rather than being
+  reduced to basenames.
+
+- Honor `--` in `ls`/`lsfancy`, so names such as `-odd` after it are operands
+  rather than option clusters. Also follow a command-line symlink to a
+  directory for ordinary and recursive listings, as traditional `ls` does;
+  `-d`, `-l`, and `-F` continue to inspect the symlink itself.
 
 ## [0.3.8] - 2026-09-21
 

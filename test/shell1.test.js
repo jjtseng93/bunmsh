@@ -606,6 +606,7 @@ describe("execution", () => {
       mkdirSync(join(cwd, "targetdir"));
       symlinkSync("target.txt", join(cwd, "link_ok"));
       symlinkSync("targetdir", join(cwd, "link_dir"));
+      await Bun.write(join(cwd, "targetdir", "inside.js"), "export {};\n");
       symlinkSync("/nonexistent/path", join(cwd, "link_broken"));
       symlinkSync("loop_b", join(cwd, "loop_a"));
       symlinkSync("loop_a", join(cwd, "loop_b"));
@@ -628,6 +629,15 @@ describe("execution", () => {
       const plain = await run("builtin lsfancy", { cwd });
       expect(plain.stdout).toContain("🔗 link_ok");
       expect(plain.stdout).toContain("🚫 link_broken");
+
+      // A command-line link to a directory is followed for an ordinary
+      // listing, but -l, -d, and -F inspect/classify the link itself.
+      const followed = await run("builtin lsfancy link_dir", { cwd });
+      expect(followed.stdout).toContain("inside.js");
+      const linkLong = await run("builtin lsfancy -l link_dir", { cwd });
+      expect(linkLong.stdout).toContain("link_dir -> targetdir");
+      expect((await run("builtin lsfancy -d link_dir", { cwd })).stdout).toContain("🔗 link_dir");
+      expect((await run("builtin lsfancy -F link_dir", { cwd })).stdout).toContain("link_dir@");
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
@@ -670,12 +680,17 @@ describe("execution", () => {
       expect(output.stdout).not.toContain("final.sh:");
       expect(output.stdout).not.toContain("\n\n");
 
+      await Bun.write(join(cwd, "-odd"), "odd\n");
+      const afterDoubleDash = await run("builtin ls -- -odd", { cwd });
+      expect(afterDoubleDash).toMatchObject({ status: 0, stderr: "" });
+      expect(afterDoubleDash.stdout).toContain("-odd");
+
       mkdirSync(join(cwd, ".hidden-target"));
       await Bun.write(join(cwd, ".hidden-target", "through-link.js"), "export {};\n");
       symlinkSync(".hidden-target", join(cwd, "class-link"));
       const throughLink = await run("builtin ls ./*/*.js", { cwd });
       expect(throughLink).toMatchObject({ status: 0, stderr: "" });
-      expect(throughLink.stdout).toContain("through-link.js");
+      expect(throughLink.stdout).toContain("./class-link/through-link.js");
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
