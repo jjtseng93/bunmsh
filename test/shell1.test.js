@@ -53,6 +53,7 @@ import { fancyLs } from "../src/fancy-ls.js";
 import { MOUSE_OFF, MOUSE_ON, mouseInput } from "../src/mouse.js";
 import { canonicalEnvironment, environmentValue, homeRelativePath } from "../src/environment.js";
 import { findIsRegularBuiltin } from "../src/find.js";
+import { toggleSavedText } from "../src/line-edit.js";
 
 async function run(source, options = {}) {
   const state = createState({
@@ -179,6 +180,36 @@ describe("completion", () => {
       "tab", "tab-left", "lsfancy", "lsfancy-parent", "lsfancy-parent",
       "tab-close",
     ]);
+  });
+
+  test("toggles independently saved Ctrl-U heads and Ctrl-K tails", () => {
+    const cutHead = toggleSavedText("headtail", 4, "", "head");
+    expect(cutHead).toEqual({ line: "tail", cursor: 0, saved: "head", changed: true });
+    expect(toggleSavedText(cutHead.line, cutHead.cursor, cutHead.saved, "head"))
+      .toEqual({ line: "headtail", cursor: 4, saved: "", changed: true });
+
+    const cutTail = toggleSavedText("headtail", 4, "", "tail");
+    expect(cutTail).toEqual({ line: "head", cursor: 4, saved: "tail", changed: true });
+    expect(toggleSavedText(cutTail.line, cutTail.cursor, cutTail.saved, "tail"))
+      .toEqual({ line: "headtail", cursor: 4, saved: "", changed: true });
+  });
+
+  test("intercepts Ctrl-U and Ctrl-K outside bracketed paste", async () => {
+    const edits = [];
+    const pasted = [];
+    let forwarded = "";
+    const input = mouseInput(() => {}, () => {}, () => {},
+      (text) => pasted.push(text),
+      (side) => edits.push({ side, forwarded }));
+    input.on("data", (chunk) => { forwarded += chunk.toString(); });
+    input.end("abc\x15def\x0b\x1b[200~x\x15y\x0bz\x1b[201~");
+    await new Promise((resolve) => input.once("end", resolve));
+    expect(edits).toEqual([
+      { side: "head", forwarded: "abc" },
+      { side: "tail", forwarded: "abcdef" },
+    ]);
+    expect(forwarded).toBe("abcdef");
+    expect(pasted).toEqual(["x\x15y\x0bz"]);
   });
 
   test("imports Bash and Fish history by default and can be disabled", async () => {
