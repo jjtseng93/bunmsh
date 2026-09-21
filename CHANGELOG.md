@@ -2,6 +2,25 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## [0.3.9] - 2026-09-22
+
+### Fixed
+
+- Make pathname expansion follow directory symbolic links used as intermediate
+  path components, matching traditional shell behaviour. `Bun.Glob` disables
+  that traversal by default, so patterns such as `./*/*.js` silently skipped
+  a matching directory symlink, and sysfs patterns such as
+  `/sys/class/net/*/device` failed to pass through class-device links. bunmsh
+  now enables `followSymlinks` while scanning; a symlink matched as the final
+  component is still passed to the command as a symlink.
+
+- Stop the fallback `ls`/`lsfancy` from printing every glob-expanded file as
+  a directory section. `builtin ls L*` previously expanded the glob
+  correctly, but multiple operands unconditionally received `filename:`
+  headings and blank separators. Only directories whose contents are being
+  listed now receive section headings; multiple ordinary files form one
+  continuous listing.
+
 ## [0.3.8] - 2026-09-21
 
 ### Added
