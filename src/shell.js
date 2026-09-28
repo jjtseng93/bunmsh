@@ -283,7 +283,6 @@ export function tokenize(source, options = {}) {
       while (i < source.length && source[i] !== "\n") i++;
       continue;
     }
-
     const two = source.slice(i, i + 2);
     const fdDup = source.slice(i, i + 4);
     const operatorAhead =
@@ -448,6 +447,7 @@ function emptyCommand() {
 }
 
 export function parse(source) {
+  source = normalizeSource(source);
   const tokens = tokenize(source);
   const jobs = [];
   let i = 0;
@@ -513,8 +513,8 @@ export function parse(source) {
         throw new ShellSyntaxError("! requires a command", firstWord.offset);
       negate = true;
     }
-    jobs.push({ connector, pipeline, negate });
     const separator = tokens[i]?.value;
+    jobs.push({ connector, pipeline, negate, background: false });
     if (!separator) break;
     if (![";", "&&", "||"].includes(separator))
       throw new ShellSyntaxError(`unexpected operator ${separator}`, tokens[i].offset);
@@ -522,6 +522,20 @@ export function parse(source) {
     i++;
     skipSemicolons();
     if (i >= tokens.length) break;
+  }
+  const lastJob = jobs.at(-1);
+  const lastCommand = lastJob?.pipeline.at(-1);
+  const lastWord = lastCommand?.words.at(-1);
+  const lastToken = tokens.findLast((token) =>
+    token.type !== "op" || token.value !== ";" || source[token.offset] !== "\n");
+  if (lastWord === lastToken &&
+      lastWord?.fragments.length === 1 &&
+      lastWord.fragments[0].quote === "none" &&
+      lastWord.fragments[0].text === "&") {
+    lastCommand.words.pop();
+    if (lastCommand.words.length === 0 && lastCommand.redirects.length === 0)
+      throw new ShellSyntaxError("expected a command", lastWord.offset);
+    lastJob.background = true;
   }
   return jobs;
 }
@@ -3210,15 +3224,22 @@ async function runExternal(
     cmd: spawnArgv,
     cwd: nativePath(state.cwd),
     env: state.env,
-    stdin: input === null ? "inherit" : input,
-    stdout: captureStdout || stdoutSink ? "pipe" : "inherit",
-    stderr: captureStderr || runtimeOptions.stderrSink ? "pipe" : "inherit",
+    stdin: runtimeOptions.background ? "ignore" : input === null ? "inherit" : input,
+    stdout: runtimeOptions.background ? "inherit" : captureStdout || stdoutSink ? "pipe" : "inherit",
+    stderr: runtimeOptions.background ? "inherit" : captureStderr || runtimeOptions.stderrSink ? "pipe" : "inherit",
     onExit(proc, exitCode, signalCode, error) {
       runtimeOptions.onExit?.(proc, exitCode, signalCode, error);
     },
   };
   try {
     const proc = Bun.spawn(options);
+    if (runtimeOptions.background) {
+      if (!Array.isArray(Bun.sha.procs)) Bun.sha.procs = [];
+      Bun.sha.procs.push(proc);
+      proc.unref();
+      const index = Bun.sha.procs.length - 1;
+      return result(0, "", `[${index + 1}] ${proc.pid} Bun.sha.procs[${index}]\n`);
+    }
     const pipelineKillSignal = runtimeOptions.pipelineKillSignal ?? "SIGPIPE";
     // A downstream pipeline stage that closes early (for example `head -n 3`)
     // leaves nothing reading the other end of `stdoutSink`/`stderrSink` (a
@@ -3379,6 +3400,15 @@ async function runCommandArgv(
     if(argv[0] === "&")
       commandArgv = argv.slice(1) ;
   }
+
+  if (options.background && (
+    options.pipelineStage ||
+    ["command", "builtin", "__builtin", "time", "yes"].includes(commandArgv[0]) ||
+    Object.hasOwn(state.functions, commandArgv[0]) ||
+    Object.hasOwn(builtins, commandArgv[0]) ||
+    (!commandArgv[0].includes("/") && Object.hasOwn(fallbackBuiltins, commandArgv[0]) &&
+      !findExecutable(commandArgv[0], state))
+  )) return result(2, "", "bunmsh: &: only a single external command is supported\n");
   
   let commandState = state;
   if (options.pipelineStage && runsInPipelineSubprocess(commandArgv, commandState))
@@ -3674,6 +3704,7 @@ async function runCommand(command, state, options = {}) {
       stderrSink: stderrRedirect,
       onSpawn: options.onSpawn,
       onExit: options.onExit,
+      background: Boolean(options.background),
     },
   );
 
@@ -3690,10 +3721,13 @@ async function runCommand(command, state, options = {}) {
 }
 
 async function runPipeline(pipeline, state, options = {}) {
+  if (options.background && (pipeline.length !== 1 || pipeline[0].redirects.length !== 0))
+    return result(2, "", "bunmsh: &: only a single external command without redirections is supported\n");
   if (pipeline.length === 1)
     return runCommand(pipeline[0], state, {
       captureStdout: Boolean(options.capture),
       captureStderr: Boolean(options.capture),
+      background: Boolean(options.background),
     });
 
   const links = Array.from(
@@ -3876,7 +3910,10 @@ export async function execute(source, state = createState(), io = {}) {
   for (const job of jobs) {
     if (job.connector === "&&" && execution.status !== 0) continue;
     if (job.connector === "||" && execution.status === 0) continue;
-    execution = await runPipeline(job.pipeline, state, { capture: io.capture });
+    execution = await runPipeline(job.pipeline, state, {
+      capture: io.capture,
+      background: job.background,
+    });
     if (job.negate) execution.status = execution.status === 0 ? 1 : 0;
     state.lastStatus = execution.status;
     if (execution.stdout.byteLength) {
