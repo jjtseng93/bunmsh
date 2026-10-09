@@ -618,6 +618,66 @@ function globPatternRegex(pattern, anchoredStart, anchoredEnd, greedy) {
   return new RegExp(`${anchoredStart ? "^" : ""}${source}${anchoredEnd ? "$" : ""}`);
 }
 
+async function casePatternRegex(pattern, state) {
+  let marked = "";
+  const literal = (value) => {
+    for (const ch of value) marked += `\u0000${ch}`;
+  };
+  for (let i = 0; i < pattern.length;) {
+    if (pattern[i] === "\\") {
+      if (i + 1 < pattern.length) literal(pattern[i + 1]);
+      i += 2;
+      continue;
+    }
+    if (pattern[i] === "'") {
+      const end = pattern.indexOf("'", i + 1);
+      if (end < 0) throw new ShellSyntaxError("unterminated single quote in case pattern");
+      literal(pattern.slice(i + 1, end));
+      i = end + 1;
+      continue;
+    }
+    if (pattern[i] === '"') {
+      let end = i + 1;
+      while (end < pattern.length && pattern[end] !== '"') {
+        if (pattern[end] === "\\") end++;
+        end++;
+      }
+      if (end >= pattern.length) throw new ShellSyntaxError("unterminated double quote in case pattern");
+      literal(stripExpansionMarkers(await expandText(pattern.slice(i + 1, end), state)));
+      i = end + 1;
+      continue;
+    }
+    let end = i;
+    while (end < pattern.length && !["\\", "'", '"'].includes(pattern[end])) end++;
+    marked += stripExpansionMarkers(await expandText(pattern.slice(i, end), state));
+    i = end;
+  }
+  let source = "";
+  for (let i = 0; i < marked.length; i++) {
+    if (marked[i] === "\u0000") {
+      source += (marked[++i] ?? "").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    } else if (marked[i] === "*") source += ".*";
+    else if (marked[i] === "?") source += ".";
+    else if (marked[i] === "[") {
+      let end = i + 1;
+      if (marked[end] === "!" || marked[end] === "^") end++;
+      if (marked[end] === "]") end++;
+      while (end < marked.length && marked[end] !== "]") end++;
+      if (end >= marked.length) source += "\\[";
+      else {
+        let body = marked.slice(i + 1, end);
+        const negate = body[0] === "!" || body[0] === "^";
+        if (negate) body = body.slice(1);
+        body = body.replaceAll("\\", "\\\\");
+        source += `[${negate ? "^" : ""}${body}]`;
+        i = end;
+      }
+    }
+    else source += marked[i].replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`);
+}
+
 async function parameterExpansion(body, state) {
   if (/^[!%][A-Za-z_][A-Za-z0-9_]*$/.test(body)) {
     const value = parameterValue(body.slice(1), state);
@@ -2925,6 +2985,9 @@ function compoundLogicalSource(source) {
       breaks.add(token.offset);
     if (["elif", "else", "fi", "done", "esac"].includes(word))
       breaks.add(token.offset);
+    if (["fi", "done", "esac"].includes(word) && tokens[index + 1]?.value === ";" &&
+        tokens[index + 2] && tokens[index + 2].value !== ";")
+      breaks.add(tokens[index + 2].offset);
     if (["then", "do", "else"].includes(word) && tokens[index + 1])
       breaks.add(tokens[index + 1].offset);
     commandStart = ["if", "while", "until", "elif", "then", "do", "else"].includes(word);
@@ -2961,7 +3024,115 @@ function growHeredocLine(lines, index) {
   }
 }
 
-function parseCompoundScript(source) {
+function splitCasePatterns(source) {
+  const patterns = [];
+  let start = 0;
+  let quote = null;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "\\") { i++; continue; }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === "$" && (source[i + 1] === "(" || source[i + 1] === "{")) {
+      i = (source[i + 1] === "(" ? substitutionEnd(source, i) : parameterEnd(source, i)) - 1;
+      continue;
+    }
+    if (ch === "`") { i = substitutionEnd(source, i) - 1; continue; }
+    if (ch === "|") { patterns.push(source.slice(start, i).trim()); start = i + 1; }
+  }
+  patterns.push(source.slice(start).trim());
+  return patterns;
+}
+
+// Scan case clauses in the same lexical spirit as mksh's CASEPAT/KEYWORD
+// modes. In particular, clause boundaries are shell tokens, not line
+// boundaries: Autoconf commonly writes an entire clause on one line.
+function parseCaseArms(source) {
+  const arms = [];
+  let i = 0;
+  const skipSpace = () => {
+    while (/\s/.test(source[i] ?? "")) i++;
+  };
+  while (i < source.length) {
+    skipSpace();
+    if (i >= source.length) break;
+    if (source[i] === "#") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (source[i] === "(") { i++; skipSpace(); }
+    const patternStart = i;
+    let quote = null;
+    let extensionDepth = 0;
+    for (; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === "\\") { i++; continue; }
+      if (quote) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "$" && (source[i + 1] === "(" || source[i + 1] === "{")) {
+        i = (source[i + 1] === "(" ? substitutionEnd(source, i) : parameterEnd(source, i)) - 1;
+        continue;
+      }
+      if (ch === "`") { i = substitutionEnd(source, i) - 1; continue; }
+      if (ch === "(" && /[?*+@!]/.test(source[i - 1] ?? "")) { extensionDepth++; continue; }
+      if (ch === ")" && extensionDepth) { extensionDepth--; continue; }
+      if (ch === ")") break;
+    }
+    if (i >= source.length) throw new ShellSyntaxError("case pattern requires )");
+    const patterns = splitCasePatterns(source.slice(patternStart, i));
+    if (!patterns.length || patterns.some((pattern) => !pattern))
+      throw new ShellSyntaxError("case requires a pattern");
+    i++;
+
+    const bodyStart = i;
+    quote = null;
+    let nestedCases = 0;
+    let word = "";
+    let terminator = null;
+    const finishWord = () => {
+      if (word === "case") nestedCases++;
+      else if (word === "esac" && nestedCases) nestedCases--;
+      word = "";
+    };
+    for (; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === "\\") { word = ""; i++; continue; }
+      if (quote) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { finishWord(); quote = ch; continue; }
+      if (ch === "$" && (source[i + 1] === "(" || source[i + 1] === "{")) {
+        finishWord();
+        i = (source[i + 1] === "(" ? substitutionEnd(source, i) : parameterEnd(source, i)) - 1;
+        continue;
+      }
+      if (ch === "`") { finishWord(); i = substitutionEnd(source, i) - 1; continue; }
+      if (/[A-Za-z_]/.test(ch)) { word += ch; continue; }
+      finishWord();
+      if (!nestedCases && ch === ";" && [";", "&", "|"].includes(source[i + 1])) {
+        terminator = source.slice(i, i + 2);
+        break;
+      }
+    }
+    // POSIX allows the final clause to omit `;;` immediately before esac.
+    if (!terminator) {
+      if (source.slice(bodyStart, i).trim() || arms.length) terminator = ";;";
+      else throw new ShellSyntaxError("unterminated case clause");
+    }
+    arms.push({ patterns, body: parseCompoundScript(source.slice(bodyStart, i).trim()), terminator });
+    if (i < source.length) i += 2;
+  }
+  return arms;
+}
+
+export function parseCompoundScript(source) {
   const lines = compoundLogicalSource(source.replace(/\\\r?\n/g, "")).split(/\r?\n/);
   const parseSequence = (start, stops = []) => {
     const nodes = [];
@@ -3054,33 +3225,24 @@ function parseCompoundScript(source) {
       }
       if (/^case(?:\s|$)/.test(trimmed)) {
         let header = trimmed;
-        while (!/\s+in\s*$/.test(header) && ++i < lines.length)
+        while (!/\s+in(?:\s|$)/.test(header) && ++i < lines.length)
           header += ` ${lines[i].trim()}`;
-        const match = /^case\s+(.+?)\s+in\s*$/.exec(header);
+        const match = /^case\s+(.+?)\s+in(?:\s+(.*))?$/.exec(header);
         if (!match) throw new ShellSyntaxError("case requires in");
-        const arms = [];
+        const bodyLines = match[2] ? [match[2]] : [];
         i++;
-        while (i < lines.length && !/^esac\s*;?$/.test(lines[i].trim())) {
-          if (!lines[i].trim() || lines[i].trim().startsWith("#")) { i++; continue; }
-          const arm = /^(.+?)\)\s*$/.exec(lines[i].trim());
-          if (!arm) throw new ShellSyntaxError("case pattern requires )");
-          const bodyLines = [];
-          i++;
-          while (i < lines.length && !/^esac\s*;?$/.test(lines[i].trim())) {
-            const current = lines[i];
-            const terminator = current.indexOf(";;");
-            if (terminator >= 0) {
-              if (current.slice(0, terminator).trim()) bodyLines.push(current.slice(0, terminator));
-              i++;
-              break;
-            }
-            bodyLines.push(current);
-            i++;
+        let nestedCases = 0;
+        while (i < lines.length) {
+          const current = lines[i].trim();
+          if (/^case(?:\s|$)/.test(current)) nestedCases++;
+          if (/^esac\s*;?$/.test(current)) {
+            if (!nestedCases) break;
+            nestedCases--;
           }
-          arms.push({ patterns: arm[1].split("|").map((pattern) => pattern.trim()), body: parseCompoundScript(bodyLines.join("\n")) });
+          bodyLines.push(lines[i++]);
         }
         if (!/^esac\s*;?$/.test(lines[i]?.trim() ?? "")) throw new ShellSyntaxError("unterminated case");
-        nodes.push({ type: "case", word: match[1], arms });
+        nodes.push({ type: "case", word: match[1], arms: parseCaseArms(bodyLines.join("\n")) });
         i++;
         continue;
       }
@@ -3218,16 +3380,17 @@ async function executeNodeList(nodes, state, options = {}) {
       const parsed = parse(`__case ${node.word}`)[0]?.pipeline[0];
       const value = (await expandWord(parsed.words[1], state, { single: true }))[0] ?? "";
       execution = result();
+      let fallThrough = false;
       for (const arm of node.arms) {
-        let matches = false;
-        for (let pattern of arm.patterns) {
-          pattern = pattern.replace(/^(['"])(.*)\1$/, "$2");
-          pattern = stripExpansionMarkers(await expandText(pattern, state));
-          if (globPatternRegex(pattern, true, true, true).test(value)) { matches = true; break; }
+        let matches = fallThrough;
+        if (!matches) for (const pattern of arm.patterns) {
+          if ((await casePatternRegex(pattern, state)).test(value)) { matches = true; break; }
         }
         if (!matches) continue;
         execution = await executeNodeList(arm.body, state, { capture });
         append(execution);
+        if (arm.terminator === ";&") { fallThrough = true; continue; }
+        if (arm.terminator === ";|") { fallThrough = false; continue; }
         break;
       }
       state.lastStatus = execution.status;

@@ -420,6 +420,41 @@ describe("execution", () => {
     });
   });
 
+  test("parses POSIX case clauses independently of physical lines", async () => {
+    expect(await run('case "a b" in a\\ b|no) echo escaped;; *) echo bad;; esac')).toMatchObject({
+      status: 0,
+      stdout: "escaped\n",
+      stderr: "",
+    });
+    expect(await run("case x in (no) echo bad ;; (x) echo parenthesized\nesac")).toMatchObject({
+      status: 0,
+      stdout: "parenthesized\n",
+      stderr: "",
+    });
+    expect(await run("case x in x) case y in y) echo nested;; esac ;; *) echo bad;; esac")).toMatchObject({
+      status: 0,
+      stdout: "nested\n",
+      stderr: "",
+    });
+    expect(await run("case x in x) echo case;; esac; echo after")).toMatchObject({
+      status: 0,
+      stdout: "case\nafter\n",
+      stderr: "",
+    });
+    expect(await run("case b in [!ac]) echo bracket;; *) echo bad;; esac; case '*' in '*') echo quoted;; esac")).toMatchObject({
+      stdout: "bracket\nquoted\n",
+    });
+  });
+
+  test("implements mksh case fall-through terminators", async () => {
+    expect(await run("case b in a) echo a ;& b) echo b ;& c) echo c ;; esac")).toMatchObject({
+      stdout: "b\nc\n",
+    });
+    expect(await run("case b in a) echo a ;| b) echo b ;| *) echo star ;; esac")).toMatchObject({
+      stdout: "b\nstar\n",
+    });
+  });
+
   test("provides basic fallback text and utility commands", async () => {
     expect(await run("printf 'c\\na\\nb\\n' | builtin sort")).toMatchObject({ stdout: "a\nb\nc\n" });
     expect(await run("printf 'one two\\nthree\\n' | builtin wc -lwc")).toMatchObject({ stdout: "2 3 14\n" });
