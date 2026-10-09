@@ -436,6 +436,11 @@ describe("execution", () => {
       stdout: "nested\n",
       stderr: "",
     });
+    expect(await run("case outer in outer) case inner in inner) echo autoconf;; esac;; *) echo bad;; esac")).toMatchObject({
+      status: 0,
+      stdout: "autoconf\n",
+      stderr: "",
+    });
     expect(await run("case x in x) echo case;; esac; echo after")).toMatchObject({
       status: 0,
       stdout: "case\nafter\n",
@@ -452,6 +457,29 @@ describe("execution", () => {
     });
     expect(await run("case b in a) echo a ;| b) echo b ;| *) echo star ;; esac")).toMatchObject({
       stdout: "b\nstar\n",
+    });
+  });
+
+  test("accepts POSIX for headers with do on the next line", async () => {
+    expect(await run("for value in one two\ndo\n echo $value\ndone")).toMatchObject({
+      status: 0,
+      stdout: "one\ntwo\n",
+      stderr: "",
+    });
+    expect(await run("set -- left right; for arg\ndo echo $arg; done")).toMatchObject({
+      status: 0,
+      stdout: "left\nright\n",
+      stderr: "",
+    });
+    expect(await run("set -- a b; for arg; do printf '<%s>\\n' \"$arg\"; done")).toMatchObject({
+      status: 0,
+      stdout: "<a>\n<b>\n",
+      stderr: "",
+    });
+    expect(await run("for value in; do echo bad; done; echo empty")).toMatchObject({
+      status: 0,
+      stdout: "empty\n",
+      stderr: "",
     });
   });
 
@@ -968,6 +996,7 @@ fi
   test("expands variables while respecting single quotes", async () => {
     const output = await run(`X=world; print -r -- "hello $X"; print -r -- '$X'`);
     expect(output.stdout).toBe("hello world\n$X\n");
+    expect((await run("printf '%s\\n' \"literal\\`backtick\"")).stdout).toBe("literal`backtick\n");
   });
 
   test("supports status connectors", async () => {

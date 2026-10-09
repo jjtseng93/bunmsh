@@ -363,7 +363,7 @@ export function tokenize(source, options = {}) {
         }
         if (source[i] === "\\" && i + 1 < source.length) {
           const next = source[i + 1];
-          if (next === "$" || next === '"' || next === "\\") {
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
             text += `\u0000${next}`;
             i += 2;
             continue;
@@ -3126,7 +3126,16 @@ function parseCaseArms(source) {
       if (source.slice(bodyStart, i).trim() || arms.length) terminator = ";;";
       else throw new ShellSyntaxError("unterminated case clause");
     }
-    arms.push({ patterns, body: parseCompoundScript(source.slice(bodyStart, i).trim()), terminator });
+    const bodySource = source.slice(bodyStart, i).trim();
+    let body;
+    try {
+      body = parseCompoundScript(bodySource);
+    } catch (error) {
+      if (error instanceof ShellSyntaxError)
+        error.message += ` in case arm ${patterns.join("|")}`;
+      throw error;
+    }
+    arms.push({ patterns, body, terminator });
     if (i < source.length) i += 2;
   }
   return arms;
@@ -3212,11 +3221,25 @@ export function parseCompoundScript(source) {
       }
       if (/^for(?:\s|$)/.test(trimmed)) {
         let header = trimmed;
-        while (!/;\s*do\s*$/.test(header) && ++i < lines.length)
+        let bodyStart = -1;
+        while (i < lines.length) {
+          if (/;\s*do\s*$/.test(header)) {
+            header = header.replace(/;\s*do\s*$/, "");
+            bodyStart = i + 1;
+            break;
+          }
+          if (lines[i + 1]?.trim() === "do") {
+            bodyStart = i + 2;
+            i++;
+            break;
+          }
+          if (++i >= lines.length) break;
           header += ` ${lines[i].trim()}`;
-        const match = /^for\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in\s+(.*?))?\s*;\s*do\s*$/.exec(header);
+        }
+        const match = /^for\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in(?:\s+(.*?))?)?\s*;?$/.exec(header);
         if (!match) throw new ShellSyntaxError("invalid for command");
-        const body = parseSequence(i + 1, [/^done\s*;?$/]);
+        if (bodyStart < 0) throw new ShellSyntaxError("for requires do");
+        const body = parseSequence(bodyStart, [/^done\s*;?$/]);
         if (!/^done\s*;?$/.test(lines[body.index]?.trim() ?? ""))
           throw new ShellSyntaxError("unterminated for");
         nodes.push({ type: "for", name: match[1], words: match[2] ?? null, body: body.nodes });
@@ -3235,7 +3258,11 @@ export function parseCompoundScript(source) {
         while (i < lines.length) {
           const current = lines[i].trim();
           if (/^case(?:\s|$)/.test(current)) nestedCases++;
-          if (/^esac\s*;?$/.test(current)) {
+          // In an enclosing case arm, mksh tokenises `esac;;` as two
+          // independent tokens: ESAC followed by the enclosing arm's BREAK.
+          // Count that as the end of the nested case while retaining the
+          // whole line for parseCaseArms to assign the `;;` to its parent.
+          if (/^esac(?:\s*(?:;;|;&|;\|))?\s*;?$/.test(current)) {
             if (!nestedCases) break;
             nestedCases--;
           }
