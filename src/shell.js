@@ -284,23 +284,22 @@ export function tokenize(source, options = {}) {
       continue;
     }
     const two = source.slice(i, i + 2);
-    const fdDup = source.slice(i, i + 4);
+    const fdDup = /^(\d+>&\d+)/.exec(source.slice(i))?.[1] ?? "";
     const operatorAhead =
       ["|", ";", "<", ">"].includes(ch) ||
       two === "&&" ||
       two === "||" ||
       two === "2>" ||
-      fdDup === "1>&2" ||
-      fdDup === "2>&1";
+      Boolean(fdDup);
     if (current && operatorAhead) {
       finishWord();
       continue;
     }
     // A descriptor duplication begins with the shorter `2>` redirect token,
     // so it must win before ordinary file redirects are considered.
-    if (!current && (fdDup === "1>&2" || fdDup === "2>&1")) {
+    if (!current && fdDup) {
       tokens.push({ type: "op", value: fdDup, offset: i });
-      i += 4;
+      i += fdDup.length;
       atWordBoundary = true;
       continue;
     }
@@ -418,8 +417,7 @@ export function tokenize(source, options = {}) {
         source.slice(i, i + 2) === "&&" ||
         source.slice(i, i + 2) === "||" ||
         source.slice(i, i + 2) === "2>" ||
-        source.slice(i, i + 4) === "1>&2" ||
-        source.slice(i, i + 4) === "2>&1";
+        /^\d+>&\d+/.test(source.slice(i));
       if (isSpace(c) || c === "\n" || c === "'" || c === '"' || c === "\\" || maybeOp)
         break;
       text += c;
@@ -466,7 +464,7 @@ export function parse(source) {
         const token = tokens[i];
         if (token.type === "op" && ["|", ";", "&&", "||"].includes(token.value))
           break;
-        if (token.type === "op" && ["1>&2", "2>&1"].includes(token.value)) {
+        if (token.type === "op" && /^\d+>&\d+$/.test(token.value)) {
           command.redirects.push({ op: token.value, target: null });
           i++;
           continue;
@@ -2999,14 +2997,12 @@ function compoundLogicalSource(source) {
   return logical;
 }
 
-// A leaf command line inside a compound body (if/while/for/case) is scanned
-// one physical line at a time, but a here-document's body lives on the lines
-// that follow it. Grow the line by re-tokenizing with more lines appended
-// until the heredoc(s) it opens are fully resolved, so the folded lines never
-// get misread as separate commands or as clauses of the surrounding compound.
-function growHeredocLine(lines, index) {
+// A leaf command inside a compound body may continue across physical lines
+// inside quotes, substitutions, or a here-document. Keep those lines together
+// until mksh-style lexical tokenization says the command is complete, so
+// keywords inside a multiline word are never mistaken for compound syntax.
+function growLogicalCommand(lines, index) {
   const line = lines[index];
-  if (!line.includes("<<")) return { source: line, next: index + 1 };
   let end = index;
   let candidate = line;
   while (true) {
@@ -3015,7 +3011,7 @@ function growHeredocLine(lines, index) {
       return { source: candidate, next: end + 1 };
     } catch (error) {
       if (!(error instanceof ShellSyntaxError) ||
-          !error.message.startsWith("unterminated here-document"))
+          !/^(?:unterminated (?:here-document|single quote|double quote|command substitution|substitution))/.test(error.message))
         throw error;
       end++;
       if (end >= lines.length) throw error;
@@ -3046,6 +3042,7 @@ function makeCompoundPostfix(compound, suffix, source, nextLine) {
 }
 
 function findShellKeyword(source, keyword) {
+  if (source.trimStart().startsWith("#")) return -1;
   let quote = null;
   for (let i = 0; i < source.length;) {
     const ch = source[i];
@@ -3063,11 +3060,13 @@ function findShellKeyword(source, keyword) {
     if (ch === "\\") { i += 2; continue; }
     if (ch === "'" || ch === '"') { quote = ch; i++; continue; }
     if (ch === "`" || (ch === "$" && source[i + 1] === "(")) {
-      i = substitutionEnd(source, i);
+      try { i = substitutionEnd(source, i); }
+      catch { return -1; } // This physical line may continue the substitution.
       continue;
     }
     if (ch === "$" && source[i + 1] === "{") {
-      i = parameterEnd(source, i);
+      try { i = parameterEnd(source, i); }
+      catch { return -1; }
       continue;
     }
     if (/[A-Za-z_]/.test(ch)) {
@@ -3146,7 +3145,8 @@ function parseCaseArms(source) {
       if (ch === ")" && extensionDepth) { extensionDepth--; continue; }
       if (ch === ")") break;
     }
-    if (i >= source.length) throw new ShellSyntaxError("case pattern requires )");
+    if (i >= source.length)
+      throw new ShellSyntaxError(`case pattern requires ): ${source.slice(patternStart, Math.min(source.length, patternStart + 120))}`);
     const patterns = splitCasePatterns(source.slice(patternStart, i));
     if (!patterns.length || patterns.some((pattern) => !pattern))
       throw new ShellSyntaxError("case requires a pattern");
@@ -3164,6 +3164,10 @@ function parseCaseArms(source) {
     };
     for (; i < source.length; i++) {
       const ch = source[i];
+      if (ch === "#" && !word && (i === bodyStart || /[\s;|&]/.test(source[i - 1] ?? ""))) {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
       if (ch === "\\") { word = ""; i++; continue; }
       if (quote) {
         if (ch === quote) quote = null;
@@ -3175,7 +3179,12 @@ function parseCaseArms(source) {
         i = (source[i + 1] === "(" ? substitutionEnd(source, i) : parameterEnd(source, i)) - 1;
         continue;
       }
-      if (ch === "`") { finishWord(); i = substitutionEnd(source, i) - 1; continue; }
+      if (ch === "`") {
+        finishWord();
+        try { i = substitutionEnd(source, i) - 1; }
+        catch (error) { error.message += ` near ${JSON.stringify(source.slice(Math.max(0, i - 100), i + 180))}`; throw error; }
+        continue;
+      }
       if (/[A-Za-z_]/.test(ch)) { word += ch; continue; }
       finishWord();
       if (!nestedCases && ch === ";" && [";", "&", "|"].includes(source[i + 1])) {
@@ -3234,22 +3243,26 @@ export function parseCompoundScript(source) {
         const compoundStart = i;
         const branches = [];
         let header = trimmed;
-        while (!/;\s*then\s*$/.test(header) && ++i < lines.length)
+        while (!/(?:;\s*|\s+)then(?:\s+.*)?$/.test(header) && ++i < lines.length)
           header += ` ${lines[i].trim()}`;
-        if (!/;\s*then\s*$/.test(header)) throw new ShellSyntaxError("if requires then");
-        let condition = header.replace(/^if\s*/, "").replace(/;\s*then\s*$/, "");
+        let then = /(?:;\s*|\s+)then(?:\s+(.*))?$/.exec(header);
+        if (!then) throw new ShellSyntaxError("if requires then");
+        let condition = header.slice(0, then.index).replace(/^if\s*/, "").trim();
+        let thenCommand = then[1]?.trim() ?? "";
         i++;
         while (true) {
           const body = parseSequence(i, [/^elif(?:\s|$)/, /^else\s*;?$/, /^fi\b/]);
-          branches.push({ condition, body: body.nodes });
+          branches.push({ condition, body: body.nodes, thenCommand });
           i = body.index;
           const stop = lines[i]?.trim() ?? "";
           if (/^elif(?:\s|$)/.test(stop)) {
             header = stop;
-            while (!/;\s*then\s*$/.test(header) && ++i < lines.length)
+            while (!/(?:;\s*|\s+)then(?:\s+.*)?$/.test(header) && ++i < lines.length)
               header += ` ${lines[i].trim()}`;
-            if (!/;\s*then\s*$/.test(header)) throw new ShellSyntaxError("elif requires then");
-            condition = header.replace(/^elif\s*/, "").replace(/;\s*then\s*$/, "");
+            then = /(?:;\s*|\s+)then(?:\s+(.*))?$/.exec(header);
+            if (!then) throw new ShellSyntaxError("elif requires then");
+            condition = header.slice(0, then.index).replace(/^elif\s*/, "").trim();
+            thenCommand = then[1]?.trim() ?? "";
             i++;
             continue;
           }
@@ -3279,10 +3292,10 @@ export function parseCompoundScript(source) {
         const compoundStart = i;
         const kind = trimmed.startsWith("until") ? "until" : "while";
         let header = trimmed;
-        while (!/;\s*do\s*$/.test(header) && ++i < lines.length)
+        while (!/(?:;\s*|\s+)do\s*$/.test(header) && ++i < lines.length)
           header += ` ${lines[i].trim()}`;
-        if (!/;\s*do\s*$/.test(header)) throw new ShellSyntaxError(`${kind} requires do`);
-        const condition = header.replace(new RegExp(`^${kind}\\s*`), "").replace(/;\s*do\s*$/, "");
+        if (!/(?:;\s*|\s+)do\s*$/.test(header)) throw new ShellSyntaxError(`${kind} requires do`);
+        const condition = header.replace(new RegExp(`^${kind}\\s*`), "").replace(/(?:;\s*|\s+)do\s*$/, "");
         const body = parseSequence(i + 1, [/^done\b/]);
         const done = /^done(?:\s*<\s*(.+?))?\s*;?\s*((?:\|\||&&|\||;).*)?$/.exec(lines[body.index]?.trim() ?? "");
         if (!done)
@@ -3319,7 +3332,7 @@ export function parseCompoundScript(source) {
         if (bodyStart < 0) throw new ShellSyntaxError("for requires do");
         const body = parseSequence(bodyStart, [/^done\b/]);
         if (!/^done\b/.test(lines[body.index]?.trim() ?? ""))
-          throw new ShellSyntaxError("unterminated for");
+          throw new ShellSyntaxError(`unterminated for: ${lines[compoundStart]?.trim()} (stopped at ${lines[body.index]?.trim()})`);
         const compound = {
           type: "for", name: match[1], words: match[2] ?? null, body: body.nodes,
           source: [...lines.slice(compoundStart, body.index), "done"].join("\n"),
@@ -3371,7 +3384,8 @@ export function parseCompoundScript(source) {
           }
           bodyLines.push(lines[i++]);
         }
-        if (!/^esac\b/.test(lines[i]?.trim() ?? "")) throw new ShellSyntaxError("unterminated case");
+        if (!/^esac\b/.test(lines[i]?.trim() ?? ""))
+          throw new ShellSyntaxError(`unterminated case: ${trimmed} (at ${lines[i]?.trim() ?? "EOF"})`);
         const compound = {
           type: "case", word: match[1], arms: parseCaseArms(bodyLines.join("\n")),
           source: [...lines.slice(compoundStart, i), "esac"].join("\n"),
@@ -3382,7 +3396,7 @@ export function parseCompoundScript(source) {
         i = result.nextLine;
         continue;
       }
-      const grown = growHeredocLine(lines, i);
+      const grown = growLogicalCommand(lines, i);
       nodes.push({ type: "command", source: grown.source });
       i = grown.next;
     }
@@ -3588,13 +3602,22 @@ async function executeNodeList(nodes, state, options = {}) {
       continue;
     }
     let selected = null;
+    let selectedThen = "";
     for (const branch of node.branches) {
       let condition = branch.condition.trim();
       let negate = false;
       while (/^!\s+/.test(condition)) { negate = !negate; condition = condition.replace(/^!\s+/, ""); }
       const checked = await execute(condition, state, { capture, simple: true });
       append(checked);
-      if ((checked.status === 0) !== negate) { selected = branch.body; break; }
+      if ((checked.status === 0) !== negate) {
+        selected = branch.body;
+        selectedThen = branch.thenCommand ?? "";
+        break;
+      }
+    }
+    if (selectedThen) {
+      const initial = await execute(selectedThen, state, { capture });
+      append(initial);
     }
     execution = selected
       ? await executeNodeList(selected, state, { capture })
@@ -3717,6 +3740,79 @@ function pipelineCompoundArgv(source) {
   return IS_COMPILED
     ? [...EXECUTABLE_COMMAND, "-c", source]
     : [...BUN_RUNTIME_COMMAND, BUNMSH_ENTRY, "-c", source];
+}
+
+function leadingSubshell(source) {
+  const leading = source.length - source.trimStart().length;
+  if (source[leading] !== "(") return null;
+  let depth = 0, quote = null;
+  for (let i = leading; i < source.length; i++) {
+    const ch = source[i];
+    if (quote === "'") { if (ch === "'") quote = null; continue; }
+    if (quote === '"') {
+      if (ch === "\\" && /[\\"$`\n]/.test(source[i + 1] ?? "")) { i++; continue; }
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === "\\") { i++; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === "`") {
+      try { i = substitutionEnd(source, i) - 1; } catch { return null; }
+      continue;
+    }
+    if (ch === "$" && source[i + 1] === "(") {
+      try { i = substitutionEnd(source, i) - 1; } catch { return null; }
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")" && --depth === 0)
+      return { body: source.slice(leading + 1, i), suffix: source.slice(i + 1) };
+  }
+  return null;
+}
+
+function rewriteSubshells(source, state) {
+  let output = "", quote = null;
+  for (let i = 0; i < source.length;) {
+    const ch = source[i];
+    if (quote === "'") {
+      output += ch;
+      if (ch === "'") quote = null;
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      output += ch;
+      if (ch === "\\" && /[\\"$`\n]/.test(source[i + 1] ?? "")) output += source[++i];
+      else if (ch === '"') quote = null;
+      i++;
+      continue;
+    }
+    if (ch === "\\") { output += source.slice(i, i + 2); i += 2; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; output += ch; i++; continue; }
+    if (ch === "`") {
+      try { const end = substitutionEnd(source, i); output += source.slice(i, end); i = end; continue; }
+      catch { output += ch; i++; continue; }
+    }
+    if (ch === "$" && source[i + 1] === "(") {
+      try { const end = substitutionEnd(source, i); output += source.slice(i, end); i = end; continue; }
+      catch { output += ch; i++; continue; }
+    }
+    const boundary = i === 0 || /[\s;|&]/.test(source[i - 1]);
+    if (ch === "(" && boundary) {
+      const group = leadingSubshell(source.slice(i));
+      if (group) {
+        const argv = pipelineCompoundArgv(group.body);
+        const serialized = pipelineBuiltinState(state).env[PIPELINE_STATE_ENV];
+        output += `BUNMSH_INTERNAL_PIPELINE_STATE=${quoteShellWord(serialized)} ${argv.map(quoteShellWord).join(" ")}`;
+        i += group.body.length + 2;
+        continue;
+      }
+    }
+    output += ch;
+    i++;
+  }
+  return output;
 }
 
 function pipelineBuiltinState(state) {
@@ -4027,6 +4123,7 @@ async function runCommand(command, state, options = {}) {
   for (const redirect of command.redirects) {
     if (redirect.op === "1>&2") { stdoutToStderr = true; continue; }
     if (redirect.op === "2>&1") { stderrToStdout = true; continue; }
+    if (/^\d+>&\d+$/.test(redirect.op)) continue;
     if (redirect.op === "<<" || redirect.op === "<<-") {
       const heredoc = redirect.heredoc ?? { body: "", expand: false };
       const content = heredoc.expand
@@ -4222,6 +4319,47 @@ export async function execute(source, state = createState(), io = {}) {
     return execution;
   }
   const rawSource = source.trimStart();
+  const group = leadingSubshell(source);
+  if (group) {
+    let suffix = group.suffix;
+    let discardStdout = false, discardStderr = false;
+    while (true) {
+      const redirect = /^\s*(?:(\d+)?(>>?|<)\s*([^\s;&|]+)|(\d+>&\d+))/.exec(suffix);
+      if (!redirect) break;
+      if (redirect[2] === ">" || redirect[2] === ">>") {
+        if (redirect[1] === "2") discardStderr ||= redirect[3] === "/dev/null";
+        else discardStdout ||= redirect[3] === "/dev/null";
+      }
+      suffix = suffix.slice(redirect[0].length);
+    }
+    const child = await runExternal(
+      pipelineCompoundArgv(group.body),
+      pipelineBuiltinState(state),
+      io.input ?? null,
+      true,
+      true,
+    );
+    let execution = result(child.status,
+      discardStdout ? "" : child.stdout,
+      discardStderr ? "" : child.stderr);
+    const connector = /^\s*(\|\||&&|;)\s*([\s\S]*)$/.exec(suffix);
+    if (connector) {
+      const shouldRun = connector[1] === ";" ||
+        (connector[1] === "&&" ? execution.status === 0 : execution.status !== 0);
+      if (shouldRun) {
+        const tail = await execute(connector[2], state, io);
+        execution = result(tail.status,
+          concatBytes([execution.stdout, tail.stdout]),
+          concatBytes([execution.stderr, tail.stderr]));
+      }
+    }
+    state.lastStatus = execution.status;
+    if (!io.capture) {
+      if (execution.stdout.byteLength) await writeStream(process.stdout, execution.stdout);
+      if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
+    }
+    return execution;
+  }
   if (isJavaScriptMode(rawSource)) {
     let execution;
     const previousCwd = process.cwd();
@@ -4305,6 +4443,12 @@ export async function execute(source, state = createState(), io = {}) {
       if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
     }
     return execution;
+  }
+
+  const withSubshells = rewriteSubshells(source, state);
+  if (withSubshells !== source) {
+    source = withSubshells;
+    return execute(source, state, io);
   }
 
   let jobs;
