@@ -6,6 +6,9 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Added and fixed
 
+- Add offline system diff/sed reference fixtures so isolated tests can compare
+  output and exit status without depending on host executables in the guest.
+
 - Add file diff using the jsmdcui Myers line alignment, with separate insertion,
   deletion and replacement hunks, binary notices and missing-final-newline markers.
 - Expand parameters and substitutions inside arithmetic, including Autoconf `$(( $* ))`.

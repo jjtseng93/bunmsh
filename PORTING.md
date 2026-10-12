@@ -258,3 +258,16 @@ GNU make 4.4.1 configure validation is ongoing; no complete run is claimed.
 Its LINENO/re-exec blockers and large unexported test-source environment values
 have dedicated regressions. Autoconf's multiline case wildcard now detects the
 listed posix option and enables it. Further utility/parser blockers may remain.
+
+Independent utility references can be recorded outside the bootstrap guest with
+`node test/utility-reference-cases.mjs OUTPUT.json`, using `/usr/bin/diff` and
+`/usr/bin/sed`. Make only that JSON data accessible inside the guest, then run
+`BUNMSH_UTILITY_REFERENCE=/guest/OUTPUT.json bun test test/utility-reference.test.js`.
+The test compares status, stdout and stderr from explicit bunmsh builtins; it
+does not invoke or mount host reference executables. Without the environment
+variable, the reference fixture suite is skipped explicitly.
+
+The current 13 file-diff and 12 sed cases passed under musl Bun/bunproot against
+GNU diffutils 3.10 and GNU sed 4.9. They cover middle edits, repeated lines,
+newline boundaries, UTF-8, sed script files, addresses, branches and hold space.
+These are selected compatibility cases, not a claim of complete GNU behavior.
