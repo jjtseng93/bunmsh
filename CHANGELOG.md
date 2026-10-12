@@ -2,6 +2,21 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
+## Unreleased
+
+### Added and fixed
+
+- Accept inline and next-line function braces, brace groups with redirects and
+  pipelines, multiline pipelines, and nested case clauses with here-documents.
+- Implement return and counted break/continue with function/source/loop boundaries.
+- Add persistent numeric fd bindings for exec, ordered duplication, scoped
+  restoration, and descriptor inheritance for external and subshell commands.
+- Add conditional errexit, nounset/noglob, xtrace, option queries, EXIT handlers
+  and deferred signal traps. See PORTING.md for the remaining POSIX boundaries.
+- Preserve the minimal background-command contract: original Bun.Subprocess
+  objects, append-only stable Bun.sha.procs indices, immediate return and unref;
+  no implicit waiting, killing or widening of accepted background syntax.
+
 ## [0.3.11] - 2026-10-12
 
 ### Fixed

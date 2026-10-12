@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmdirSync,
   readFileSync,
+  writeSync,
   realpathSync,
   statSync,
   symlinkSync,
@@ -33,7 +34,7 @@ import {
   isAbsolute,
   resolve as resolvePath,
 } from "node:path";
-import { Readable, Writable } from "node:stream";
+import { Readable } from "node:stream";
 import { format as formatValue } from "node:util";
 import { EXECUTABLE_COMMAND, IS_COMPILED } from "../single-exe/compiled.js";
 import { readAssetText } from "../single-exe/assetsHelper.js";
@@ -283,24 +284,22 @@ export function tokenize(source, options = {}) {
       while (i < source.length && source[i] !== "\n") i++;
       continue;
     }
+    const fullDup = /^\d+>&\d+(?=$|[\s;|&<>])/.exec(source.slice(i))?.[0];
+    if (!current && fullDup) { tokens.push({type:"op",value:fullDup,offset:i}); i += fullDup.length; atWordBoundary=true; continue; }
+    const ioOperator = /^(?:[0-9]+)?(?:>&|<&|<>|>>|>(?!>)|<(?!<))/.exec(source.slice(i))?.[0];
+    if (!current && ioOperator) {
+      tokens.push({type:"op", value:ioOperator, offset:i});
+      i += ioOperator.length;
+      atWordBoundary = true;
+      continue;
+    }
     const two = source.slice(i, i + 2);
-    const fdDup = /^(\d+>&\d+)/.exec(source.slice(i))?.[1] ?? "";
     const operatorAhead =
       ["|", ";", "<", ">"].includes(ch) ||
       two === "&&" ||
-      two === "||" ||
-      two === "2>" ||
-      Boolean(fdDup);
+      two === "||";
     if (current && operatorAhead) {
       finishWord();
-      continue;
-    }
-    // A descriptor duplication begins with the shorter `2>` redirect token,
-    // so it must win before ordinary file redirects are considered.
-    if (!current && fdDup) {
-      tokens.push({ type: "op", value: fdDup, offset: i });
-      i += fdDup.length;
-      atWordBoundary = true;
       continue;
     }
     if (!current && ["&&", "||", ">>", "2>", "2>>"].includes(
@@ -415,9 +414,7 @@ export function tokenize(source, options = {}) {
       const maybeOp =
         ["|", ";", "<", ">"].includes(c) ||
         source.slice(i, i + 2) === "&&" ||
-        source.slice(i, i + 2) === "||" ||
-        source.slice(i, i + 2) === "2>" ||
-        /^\d+>&\d+/.test(source.slice(i));
+        source.slice(i, i + 2) === "||";
       if (isSpace(c) || c === "\n" || c === "'" || c === '"' || c === "\\" || maybeOp)
         break;
       text += c;
@@ -469,7 +466,7 @@ export function parse(source) {
           i++;
           continue;
         }
-        if (token.type === "op" && ["<", ">", ">>", "2>", "2>>", "<<", "<<-", "<<<"].includes(token.value)) {
+        if (token.type === "op" && (/^\d*(?:>&|<&|<>|>>|>|<)$/.test(token.value) || ["<<", "<<-", "<<<"].includes(token.value))) {
           const target = tokens[i + 1];
           if (!target || target.type !== "word")
             throw new ShellSyntaxError(
@@ -495,6 +492,7 @@ export function parse(source) {
 
       if (tokens[i]?.value === "|") {
         i++;
+        while (tokens[i]?.value === ";" && source[tokens[i].offset] === "\n") i++;
         if (!tokens[i])
           throw new ShellSyntaxError("pipeline requires a command", source.length);
         continue;
@@ -542,11 +540,21 @@ function parameterValue(name, state) {
   if (name === "?") return String(state.lastStatus);
   if (name === "$") return String(process.pid);
   if (name === "#") return String(Math.max(0, state.args.length - 1));
-  if (name === "-") return "";
+  if (name === "-") return Object.entries(state.shellOptions ?? {}).filter(([,v])=>v).map(([k])=>k).join("");
   if (name === "0") return state.args[0] ?? "bunmsh";
   if (name === "@" || name === "*") return state.args.slice(1).join((state.env.IFS ?? " ")[0] ?? " ");
   if (/^[1-9][0-9]*$/.test(name)) return state.args[Number(name)] ?? "";
   return state.env[name] ?? "";
+}
+
+function checkedParameter(name,state) {
+  const unset = /^\d+$/.test(name) ? Number(name) >= state.args.length : /^[A-Za-z_]/.test(name) && !Object.hasOwn(state.env,name);
+  if (state.shellOptions.u && unset) {
+    state.exitRequested = true;
+    state.exitStatus = 1;
+    throw new ShellSyntaxError(`${name}: parameter not set`);
+  }
+  return parameterValue(name,state);
 }
 
 function tildeDirectory(name, state) {
@@ -720,7 +728,7 @@ async function parameterExpansion(body, state) {
   const value = parameterValue(name, state);
   const unset = !Object.hasOwn(state.env, name) && !/^[?$#@*0-9]$/.test(name);
   const empty = value === "";
-  if (!operator) return value;
+  if (!operator) return checkedParameter(name,state);
   const useEmpty = operator.startsWith(":");
   const op = operator.at(-1);
   const missing = unset || (useEmpty && empty);
@@ -759,10 +767,14 @@ async function commandSubstitution(source, state) {
     tabs: [...state.tabs],
     exitRequested: false,
     exitStatus: 0,
+    flow:null, loopDepth:0, returnDepth:0,
+    shellOptions:{...state.shellOptions}, fdBindings:{...state.fdBindings},
+    traps:{}, trapListeners:new Map(), pendingTraps:[], ownedFds:new Set(),
   };
   const output = await execute(source, child, { capture: true });
-  state.expansionStatus = output.status;
-  return decode(output.stdout).replace(/\n+$/, "");
+  const final = await finishShell(child,output.status,{capture:true});
+  state.expansionStatus = final.status;
+  return decode(concatBytes([output.stdout,final.stdout])).replace(/\n+$/, "");
 }
 
 async function expandText(text, state) {
@@ -803,14 +815,14 @@ async function expandText(text, state) {
     }
     const next = text[i + 1];
     if (["?", "$", "#", "@", "*", "-"].includes(next) || /[0-9]/.test(next ?? "")) {
-      output += markedExpansion(parameterValue(next, state));
+      output += markedExpansion(checkedParameter(next, state));
       i += 2;
       continue;
     }
     if (isNameStart(next)) {
       let end = i + 2;
       while (isNameChar(text[end])) end++;
-      output += markedExpansion(parameterValue(text.slice(i + 1, end), state));
+      output += markedExpansion(checkedParameter(text.slice(i + 1, end), state));
       i = end;
       continue;
     }
@@ -931,7 +943,7 @@ export async function expandWord(word, state, options = {}) {
   const fields = splitFields(segments, state);
   const output = [];
   for (const field of fields)
-    for (const expanded of braceFields(field)) output.push(...await pathnameFields(expanded, state));
+    for (const expanded of braceFields(field)) output.push(...(state.shellOptions.f ? [expanded.map(part=>part.ch).join("")] : await pathnameFields(expanded, state)));
   return output;
 }
 
@@ -1057,10 +1069,16 @@ async function sourceFile(argv, state) {
   try {
     const source = await Bun.file(path).text();
     const previousArgs = state.args;
+    const previousLoopDepth = state.loopDepth;
+    state.loopDepth = 0;
     if (argv.length > 2) state.args = [previousArgs[0], ...argv.slice(2)];
+    state.returnDepth++;
     try {
       return await execute(source, state, { capture: true });
     } finally {
+      state.returnDepth--;
+      state.loopDepth = previousLoopDepth;
+      if (state.flow?.kind === "return") state.flow = null;
       state.args = previousArgs;
     }
   } catch (error) {
@@ -1125,7 +1143,112 @@ function evaluateTest(argv, state) {
   throw new Error("unsupported expression");
 }
 
+function loopControl(kind, argv, state) {
+  const levels = argv[1] === undefined ? 1 : Number(argv[1]);
+  if (argv.length > 2 || !Number.isInteger(levels) || levels < 1)
+    return result(2, "", `bunmsh: ${kind}: expected a positive integer\n`);
+  if (!state.loopDepth) return result(2, "", `bunmsh: ${kind}: not in a loop\n`);
+  state.flow = { kind, levels: Math.min(levels, state.loopDepth) };
+  return result();
+}
+
+function trapName(value) {
+  if (value === "0" || value === "EXIT") return "EXIT";
+  const name = /^\d+$/.test(value)
+    ? Object.keys(osConstants.signals).find(key => osConstants.signals[key] === Number(value))
+    : value.startsWith("SIG") ? value : `SIG${value}`;
+  return name && osConstants.signals[name] && !["SIGKILL","SIGSTOP"].includes(name) ? name : null;
+}
+
+function setTrap(argv, state) {
+  let args = argv.slice(1);
+  if (args[0] === "--") args.shift();
+  if (!args.length) return result(0,Object.entries(state.traps).map(([name,command]) => `trap -- ${quoteShellWord(command)} ${name === "EXIT" ? "0" : name.slice(3)}\n`).join(""));
+  let action = args.shift();
+  if (/^\d+$/.test(action)) { args.unshift(action); action = "-"; }
+  if (!args.length) return result(2,"","bunmsh: trap: expected a signal\n");
+  for (const value of args) {
+    const name = trapName(value);
+    if (!name) return result(2,"",`bunmsh: trap: ${value}: invalid or uncatchable signal\n`);
+    const listener = state.trapListeners.get(name);
+    if (listener) process.off(name,listener);
+    state.trapListeners.delete(name);
+    if (action === "-") { delete state.traps[name]; continue; }
+    state.traps[name] = action;
+    if (name !== "EXIT") {
+      // Like mksh's pending-trap flag: callbacks enqueue only. Shell code
+      // runs at command boundaries, never reentrantly from a signal callback.
+      const handler = () => { if (state.traps[name] && !state.pendingTraps.includes(name)) state.pendingTraps.push(name); };
+      process.on(name,handler);
+      state.trapListeners.set(name,handler);
+    }
+  }
+  return result();
+}
+
+async function runPendingTraps(state, io) {
+  if (state.inTrap) return result();
+  const stdout = [], stderr = [];
+  while (state.pendingTraps.length) {
+    const name = state.pendingTraps.shift();
+    const source = state.traps[name];
+    if (!source) continue;
+    const savedStatus = state.lastStatus;
+    state.inTrap = true;
+    try {
+      const execution = await execute(source,state,io);
+      stdout.push(execution.stdout); stderr.push(execution.stderr);
+    } finally { state.inTrap = false; state.lastStatus = savedStatus; }
+    if (state.exitRequested) break;
+  }
+  return result(state.lastStatus,concatBytes(stdout),concatBytes(stderr));
+}
+
+export async function finishShell(state, status = state.lastStatus, io = {}) {
+  if (state.finished) return result(status);
+  state.finished = true;
+  let execution = result(status);
+  try {
+    const handler = state.traps.EXIT;
+    delete state.traps.EXIT;
+    if (handler) {
+      state.exitRequested = false;
+      state.flow = null;
+      state.lastStatus = status;
+      execution = await execute(handler,state,io);
+      execution.status = state.exitRequested ? state.exitStatus : status;
+    }
+    return execution;
+  } finally {
+    for (const [signal,listener] of state.trapListeners) process.off(signal,listener);
+    state.trapListeners.clear();
+    for (const fd of state.ownedFds) { try { closeSync(fd); } catch {} }
+    state.ownedFds.clear();
+    // Background processes deliberately remain unref'ed and accessible by
+    // stable index in Bun.sha.procs. No waiting, killing or registry cleanup.
+  }
+}
+
+function consumeLoopFlow(state) {
+  if (!state.flow) return false;
+  if (state.flow.kind === "return") return true;
+  const kind = state.flow.kind;
+  if (--state.flow.levels > 0) return true;
+  state.flow = null;
+  return kind === "break";
+}
+
 const builtins = {
+  return: async (argv, state) => {
+    if (!state.returnDepth) return result(2, "", "bunmsh: return: not in a function or sourced script\n");
+    const status = argv[1] === undefined ? state.lastStatus : Number(argv[1]);
+    if (argv.length > 2 || !Number.isInteger(status))
+      return result(2, "", "bunmsh: return: expected an integer status\n");
+    state.flow = { kind: "return" };
+    return result(status & 255);
+  },
+  break: async (argv, state) => loopControl("break", argv, state),
+  continue: async (argv, state) => loopControl("continue", argv, state),
   ":": async () => result(),
   true: async () => result(),
   false: async () => result(1),
@@ -1677,14 +1800,32 @@ const builtins = {
     }
     return result(status, "", stderr);
   },
+  trap: async (argv,state) => setTrap(argv,state),
   set: async (argv, state) => {
     if (argv.length === 1)
       return result(0, Object.entries(state.env).sort().map(([k, v]) => `${k}=${JSON.stringify(v)}\n`).join(""));
-    if (argv[1] === "--") {
-      state.args = [state.args[0], ...argv.slice(2)];
-      return result();
+    const names = {errexit:"e",nounset:"u",noglob:"f",xtrace:"x",verbose:"v"};
+    let i = 1;
+    for (; i < argv.length; i++) {
+      const item = argv[i];
+      if (item === "--") { i++; break; }
+      if (!/^[+-]/.test(item) || item === "-") break;
+      const enabled = item[0] === "-";
+      if (item === "-o" || item === "+o") {
+        if (argv[i+1] === undefined) return result(0,Object.entries(names).map(([name,key]) => enabled ? `${name} ${state.shellOptions[key] ? "on" : "off"}\n` : `set ${state.shellOptions[key] ? "-" : "+"}o ${name}\n`).join(""));
+        const name = argv[++i];
+        if (name === "posix") continue;
+        if (!names[name]) return result(2,"",`bunmsh: set: unknown option ${name}\n`);
+        state.shellOptions[names[name]] = enabled;
+      } else {
+        for (const key of item.slice(1)) {
+          if (!"eufxv".includes(key)) return result(2,"",`bunmsh: set: unknown option ${key}\n`);
+          state.shellOptions[key] = enabled;
+        }
+      }
     }
-    return result(2, "", "bunmsh: set: option handling is not implemented yet\n");
+    if (i < argv.length || argv.at(-1) === "--") state.args = [state.args[0],...argv.slice(i)];
+    return result();
   },
 };
 
@@ -2943,11 +3084,22 @@ export function createState(options = {}) {
     exitRequested: false,
     exitStatus: 0,
     pipelineChild: options.pipelineChild ?? false,
+    flow: null,
+    loopDepth: 0,
+    returnDepth: 0,
+    fdBindings: {...(options.fdBindings ?? {})},
+    ownedFds: new Set(),
+    shellOptions: {...(options.shellOptions ?? {})},
+    ignoreErrexit: options.ignoreErrexit ?? 0,
+    traps: {},
+    trapListeners: new Map(),
+    pendingTraps: [],
+    inTrap: false,
   };
 }
 
 function hasCompoundSyntax(source) {
-  if (/(^|\n)\s*(?:\(|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{)/.test(source)) return true;
+  if (/(^|\n)\s*(?:\(|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))/.test(source)) return true;
   let commandStart = true;
   for (const token of tokenize(source)) {
     if (token.type === "op") {
@@ -2956,7 +3108,7 @@ function hasCompoundSyntax(source) {
     }
     const word = token.fragments.length === 1 && token.fragments[0].quote === "none"
       ? token.fragments[0].text : null;
-    if (commandStart && ["if", "while", "until", "for", "case"].includes(word)) return true;
+    if (commandStart && ["if", "while", "until", "for", "case", "{"].includes(word)) return true;
     if (!(commandStart && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word ?? ""))) commandStart = false;
   }
   return false;
@@ -2975,6 +3127,21 @@ function compoundLogicalSource(source) {
       continue;
     }
     const word = literal(token);
+    // Function headers allow linebreaks before the opening brace. Braces
+    // elsewhere remain ordinary arguments unless at a command boundary.
+    const functionBrace = word === "{" && /[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*$/.test(source.slice(0, token.offset));
+    if ((commandStart || functionBrace) && word === "{") {
+      if (!functionBrace) breaks.add(token.offset);
+      if (tokens[index + 1]) breaks.add(tokens[index + 1].offset);
+      commandStart = true;
+      continue;
+    }
+    if (commandStart && word === "}") {
+      breaks.add(token.offset);
+      if (tokens[index + 1]?.value === ";" && tokens[index + 2]) breaks.add(tokens[index + 2].offset);
+      commandStart = false;
+      continue;
+    }
     if (!commandStart) continue;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word ?? "")) continue;
     // Like mksh's KEYWORD lexer mode, these words are special only where a
@@ -3007,7 +3174,16 @@ function growLogicalCommand(lines, index) {
   let candidate = line;
   while (true) {
     try {
-      tokenize(candidate, { strict: true });
+      const tokens = tokenize(candidate, { strict: true });
+      const last = tokens.at(-1);
+      if (last?.type === "op" && ["|", "&&", "||"].includes(last.value) && end + 1 < lines.length) {
+        // Leave a following compound node for parseSequence to attach, but
+        // grow ordinary pipelines and AND/OR continuations across newlines.
+        if (!/^\s*(?:\{|if\b|for\b|while\b|until\b|case\b)/.test(lines[end + 1])) {
+          candidate += `\n${lines[++end]}`;
+          continue;
+        }
+      }
       return { source: candidate, next: end + 1 };
     } catch (error) {
       if (!(error instanceof ShellSyntaxError) ||
@@ -3021,9 +3197,21 @@ function growLogicalCommand(lines, index) {
 }
 
 function makeCompoundPostfix(compound, suffix, source, nextLine) {
+  const tokens = tokenize(suffix ?? "");
+  const connector = tokens.find(t => t.type === "op" && [";","&&","||","|"].includes(t.value));
+  const redirectionText = (suffix ?? "").slice(0,connector?.offset ?? undefined).trim();
+  if (redirectionText && !redirectionText.startsWith("#")) {
+    if (redirectionText === "&") throw new ShellSyntaxError("&: only a single external command is supported");
+    const parsed = parse(`: ${redirectionText}`)[0]?.pipeline[0];
+    if (!parsed || parsed.words.length !== 1) throw new ShellSyntaxError(`unexpected compound suffix: ${redirectionText}`);
+    compound = {type:"redirected", compound, redirects:parsed.redirects, source:compound.source + " " + redirectionText};
+    suffix = connector ? suffix.slice(connector.offset) : "";
+  }
+
   const match = /^\s*(\|\||&&|\||;)\s*(.*)$/.exec(suffix ?? "");
   if (!match) return { node: compound, nextLine };
   let command = match[2].trim();
+  if (match[1] === ";" && (!command || command.startsWith("#"))) return { node: compound, nextLine };
   while (!command && nextLine < source.length) {
     command = source[nextLine++].trim();
     if (!command || command.startsWith("#")) command = "";
@@ -3111,6 +3299,26 @@ function splitCasePatterns(source) {
 // Scan case clauses in the same lexical spirit as mksh's CASEPAT/KEYWORD
 // modes. In particular, clause boundaries are shell tokens, not line
 // boundaries: Autoconf commonly writes an entire clause on one line.
+function shellLiteral(token) {
+  return token?.type === "word" && token.fragments.length === 1 && token.fragments[0].quote === "none" ? token.fragments[0].text : null;
+}
+
+function caseKeywords(tokens) {
+  const words = new Map();
+  let start = true;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i], word = shellLiteral(token);
+    if (token.type === "op") {
+      if ([";", "|", "&&", "||"].includes(token.value)) start = true;
+      continue;
+    }
+    if (start && word === "case" && shellLiteral(tokens[i + 2]) === "in") words.set(token.offset, "case");
+    if (start && word === "esac") words.set(token.offset, "esac");
+    start = ["then", "do", "else", "{"].includes(word) || Boolean(word?.endsWith(")"));
+  }
+  return words;
+}
+
 function parseCaseArms(source) {
   const arms = [];
   let i = 0;
@@ -3153,43 +3361,23 @@ function parseCaseArms(source) {
     i++;
 
     const bodyStart = i;
-    quote = null;
     let nestedCases = 0;
-    let word = "";
     let terminator = null;
-    const finishWord = () => {
+    const bodyTokens = tokenize(source.slice(bodyStart));
+    const keywords = caseKeywords(bodyTokens);
+    i = source.length;
+    for (let t = 0; t < bodyTokens.length; t++) {
+      const token = bodyTokens[t];
+      const word = keywords.get(token.offset);
       if (word === "case") nestedCases++;
       else if (word === "esac" && nestedCases) nestedCases--;
-      word = "";
-    };
-    for (; i < source.length; i++) {
-      const ch = source[i];
-      if (ch === "#" && !word && (i === bodyStart || /[\s;|&]/.test(source[i - 1] ?? ""))) {
-        while (i < source.length && source[i] !== "\n") i++;
-        continue;
-      }
-      if (ch === "\\") { word = ""; i++; continue; }
-      if (quote) {
-        if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === "'" || ch === '"') { finishWord(); quote = ch; continue; }
-      if (ch === "$" && (source[i + 1] === "(" || source[i + 1] === "{")) {
-        finishWord();
-        i = (source[i + 1] === "(" ? substitutionEnd(source, i) : parameterEnd(source, i)) - 1;
-        continue;
-      }
-      if (ch === "`") {
-        finishWord();
-        try { i = substitutionEnd(source, i) - 1; }
-        catch (error) { error.message += ` near ${JSON.stringify(source.slice(Math.max(0, i - 100), i + 180))}`; throw error; }
-        continue;
-      }
-      if (/[A-Za-z_]/.test(ch)) { word += ch; continue; }
-      finishWord();
-      if (!nestedCases && ch === ";" && [";", "&", "|"].includes(source[i + 1])) {
-        terminator = source.slice(i, i + 2);
-        break;
+      if (!nestedCases && token.type === "op" && token.value === ";") {
+        const offset = bodyStart + token.offset;
+        if ([";", "&", "|"].includes(source[offset + 1]) && source[offset] === ";") {
+          terminator = source.slice(offset, offset + 2);
+          i = offset;
+          break;
+        }
       }
     }
     // POSIX allows the final clause to omit `;;` immediately before esac.
@@ -3223,12 +3411,26 @@ export function parseCompoundScript(source) {
       if (stops.some((stop) => stop.test(trimmed))) break;
       if (!trimmed || trimmed.startsWith("#")) { i++; continue; }
 
-      const functionMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{\s*$/.exec(trimmed);
+      const functionMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*(\{)?\s*(?:#.*)?$/.exec(trimmed);
       if (functionMatch) {
-        const body = parseSequence(i + 1, [/^}\s*;?$/]);
+        if (!functionMatch[2]) {
+          do { i++; } while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith("#")));
+          if (lines[i]?.trim() !== "{") throw new ShellSyntaxError(`unterminated function ${functionMatch[1]}: expected {`);
+        }
+        const body = parseSequence(i + 1, [/^}(?:\s|;|$)/]);
         if (body.index >= lines.length) throw new ShellSyntaxError(`unterminated function ${functionMatch[1]}`);
         nodes.push({ type: "function", name: functionMatch[1], body: body.nodes });
         i = body.index + 1;
+        continue;
+      }
+
+      if (trimmed === "{") {
+        const body = parseSequence(i + 1, [/^}(?:\s|;|$)/]);
+        if (body.index >= lines.length) throw new ShellSyntaxError(`unterminated brace group near ${lines.slice(i, i + 5).join("\n")}`);
+        const compound = { type: "group", body: body.nodes, source: [...lines.slice(i, body.index), "}"].join("\n") };
+        const postfix = makeCompoundPostfix(compound, lines[body.index].trim().slice(1), lines, body.index + 1);
+        nodes.push(postfix.node);
+        i = postfix.nextLine;
         continue;
       }
 
@@ -3344,61 +3546,36 @@ export function parseCompoundScript(source) {
         continue;
       }
       if (/^case(?:\s|$)/.test(trimmed)) {
-        const compoundStart = i;
-        let header = trimmed;
-        while (!/\s+in(?:\s|$)/.test(header) && ++i < lines.length)
-          header += ` ${lines[i].trim()}`;
-        const match = /^case\s+(.+?)\s+in(?:\s+(.*))?$/.exec(header);
-        if (!match) throw new ShellSyntaxError("case requires in");
-        const inlineEsac = findShellKeyword(match[2] ?? "", "esac");
-        if (inlineEsac >= 0) {
-          const inlineArms = match[2].slice(0, inlineEsac);
-          const suffix = match[2].slice(inlineEsac + "esac".length);
-          const compound = {
-            type: "case",
-            word: match[1],
-            arms: parseCaseArms(inlineArms),
-            source: `case ${match[1]} in\n${inlineArms}\nesac`,
-          };
-          const result = makeCompoundPostfix(compound, suffix, lines, i + 1);
-          nodes.push(result.node);
-          i = result.nextLine;
-          continue;
-        }
-        const bodyLines = match[2] ? [match[2]] : [];
-        i++;
-        let nestedCases = 0;
-        while (i < lines.length) {
-          const current = lines[i].trim();
-          const nestedCase = findShellKeyword(current, "case");
-          if (nestedCase >= 0 && /\s/.test(current[nestedCase + "case".length] ?? ""))
-            nestedCases++;
-          // In an enclosing case arm, mksh tokenises `esac;;` as two
-          // independent tokens: ESAC followed by the enclosing arm's BREAK.
-          // Count that as the end of the nested case while retaining the
-          // whole line for parseCaseArms to assign the `;;` to its parent.
-          const closingCase = findShellKeyword(current, "esac");
-          if (closingCase >= 0) {
-            if (!nestedCases) break;
-            nestedCases--;
+        const remaining = lines.slice(i).join("\n");
+        const header = /^case\s+(.+?)\s+in(?:\s|$)/.exec(remaining);
+        if (!header) throw new ShellSyntaxError("case requires in");
+        const start = header[0].length;
+        let depth = 0, end = -1;
+        for (const [offset, word] of caseKeywords(tokenize(remaining.slice(start)))) {
+          if (word === "case") depth++;
+          if (word === "esac") {
+            if (!depth) { end = start + offset; break; }
+            depth--;
           }
-          bodyLines.push(lines[i++]);
         }
-        if (!/^esac\b/.test(lines[i]?.trim() ?? ""))
-          throw new ShellSyntaxError(`unterminated case: ${trimmed} (at ${lines[i]?.trim() ?? "EOF"})`);
-        const compound = {
-          type: "case", word: match[1], arms: parseCaseArms(bodyLines.join("\n")),
-          source: [...lines.slice(compoundStart, i), "esac"].join("\n"),
-        };
-        const close = /^esac\b(.*)$/.exec(lines[i].trim());
-        const result = makeCompoundPostfix(compound, close?.[1] ?? "", lines, i + 1);
-        nodes.push(result.node);
-        i = result.nextLine;
+        if (end < 0) throw new ShellSyntaxError(`unterminated case: ${trimmed}`);
+        const compound = {type:"case", word:header[1], arms:parseCaseArms(remaining.slice(start,end)), source:remaining.slice(0,end+4)};
+        const nextLine = i + remaining.slice(0,end+4).split("\n").length;
+        const suffix = remaining.slice(end+4).split("\n")[0];
+        const postfix = makeCompoundPostfix(compound,suffix,lines,nextLine);
+        nodes.push(postfix.node);
+        i = postfix.nextLine;
         continue;
       }
       const grown = growLogicalCommand(lines, i);
       nodes.push({ type: "command", source: grown.source });
       i = grown.next;
+    }
+    for (let n = nodes.length - 2; n >= 0; n--) {
+      if (nodes[n].type !== "command") continue;
+      const logical = /^(.*?)(\&\&|\|\|)\s*$/s.exec(nodes[n].source);
+      if (!logical) continue;
+      nodes.splice(n,2,{type:"compoundPostfix",compound:{type:"command",source:logical[1]},operator:logical[2],right:nodes[n+1]});
     }
     return { nodes, index: i };
   };
@@ -3439,14 +3616,30 @@ export function needsMoreInput(source) {
 async function executeNodeList(nodes, state, options = {}) {
   const capture = options.capture ?? true;
   const stdout = [], stderr = [];
-  let execution = result(state.lastStatus);
+  let execution = result();
   const append = (value) => {
     if (!capture) return;
     if (value.stdout.byteLength) stdout.push(value.stdout);
     if (value.stderr.byteLength) stderr.push(value.stderr);
   };
   for (const node of nodes) {
+    if (state.exitRequested || state.flow) break;
+    append(await runPendingTraps(state,{capture}));
     if (state.exitRequested) break;
+    if (node.type === "redirected") {
+      execution = await runCommand({words:parse(":")[0].pipeline[0].words,redirects:node.redirects,body:[node.compound]},state,{captureStdout:capture,captureStderr:capture,input:options.input});
+      append(execution);
+      if (!capture) {
+        if (execution.stdout.byteLength) await writeStream(process.stdout,execution.stdout);
+        if (execution.stderr.byteLength) await writeStream(process.stderr,execution.stderr);
+      }
+      continue;
+    }
+    if (node.type === "group") {
+      execution = await executeNodeList(node.body, state, options);
+      append(execution);
+      continue;
+    }
     if (node.type === "compoundPostfix") {
       if (node.operator === "|") {
         const link = new TransformStream();
@@ -3480,15 +3673,18 @@ async function executeNodeList(nodes, state, options = {}) {
         const left = await leftPromise;
         execution = result(right.status, right.stdout, concatBytes([left.stderr, right.stderr]));
       } else {
-        execution = await executeNodeList([node.compound], state, { capture });
+        const previousIgnore = state.ignoreErrexit;
+        if (["&&","||"].includes(node.operator)) state.ignoreErrexit++;
+        try { execution = await executeNodeList([node.compound], state, { capture }); }
+        finally { state.ignoreErrexit=previousIgnore; }
         append(execution);
         const shouldRun = node.operator === "&&"
           ? execution.status === 0
           : node.operator === "||"
             ? execution.status !== 0
             : true;
-        if (shouldRun) {
-          execution = await execute(node.command, state, { capture });
+        if (shouldRun && !state.flow && !state.exitRequested) {
+          execution = node.right ? await executeNodeList([node.right],state,{capture}) : await execute(node.command, state, { capture });
           append(execution);
         }
         state.lastStatus = execution.status;
@@ -3504,6 +3700,7 @@ async function executeNodeList(nodes, state, options = {}) {
     }
     if (node.type === "function") {
       state.functions[node.name] = node.body;
+      state.lastStatus = 0; execution = result();
       continue;
     }
     if (node.type === "command") {
@@ -3512,18 +3709,7 @@ async function executeNodeList(nodes, state, options = {}) {
       continue;
     }
     if (node.type === "subshell") {
-      const child = {
-        ...state,
-        env: { ...state.env },
-        aliases: { ...state.aliases },
-        functions: { ...state.functions },
-        readonly: new Set(state.readonly),
-        directoryHistory: [...state.directoryHistory],
-        tabs: [...state.tabs],
-        exitRequested: false,
-        exitStatus: 0,
-      };
-      execution = await execute(node.source, child, { capture });
+      execution = await execute(`(${node.source})`,state,{capture,input:options.input});
       append(execution);
       state.lastStatus = execution.status;
       continue;
@@ -3531,6 +3717,7 @@ async function executeNodeList(nodes, state, options = {}) {
     if (node.type === "loop") {
       const previousReadLines = state.readLines;
       let ranBody = false;
+      state.loopDepth++;
       try {
         if (node.input !== null) {
           const parsed = parse(`__input ${node.input}`)[0]?.pipeline[0];
@@ -3541,7 +3728,7 @@ async function executeNodeList(nodes, state, options = {}) {
           if (state.readLines.at(-1) === "") state.readLines.pop();
         }
         while (true) {
-          const checked = await execute(node.condition, state, { capture, simple: true });
+          const checked = await execute(node.condition, state, { capture, errexitIgnored:true });
           append(checked);
           const proceed = node.kind === "until" ? checked.status !== 0 : checked.status === 0;
           if (!proceed || state.exitRequested) {
@@ -3551,12 +3738,13 @@ async function executeNodeList(nodes, state, options = {}) {
           execution = await executeNodeList(node.body, state, { capture });
           ranBody = true;
           append(execution);
-          if (state.exitRequested) break;
+          if (state.exitRequested || consumeLoopFlow(state)) break;
         }
       } catch (error) {
         execution = result(1, "", `bunmsh: ${error.message}\n`);
         append(execution);
       } finally {
+        state.loopDepth--;
         state.readLines = previousReadLines;
       }
       state.lastStatus = execution.status;
@@ -3571,13 +3759,14 @@ async function executeNodeList(nodes, state, options = {}) {
         for (const word of parsed?.words.slice(1) ?? []) values.push(...await expandWord(word, state));
       }
       execution = result();
-      for (const value of values) {
+      state.loopDepth++;
+      try { for (const value of values) {
         if (state.readonly.has(node.name)) { execution = readonlyError(node.name); break; }
         state.env[node.name] = value;
         execution = await executeNodeList(node.body, state, { capture });
         append(execution);
-        if (state.exitRequested) break;
-      }
+        if (state.exitRequested || consumeLoopFlow(state)) break;
+      } } finally { state.loopDepth--; }
       state.lastStatus = execution.status;
       continue;
     }
@@ -3607,7 +3796,7 @@ async function executeNodeList(nodes, state, options = {}) {
       let condition = branch.condition.trim();
       let negate = false;
       while (/^!\s+/.test(condition)) { negate = !negate; condition = condition.replace(/^!\s+/, ""); }
-      const checked = await execute(condition, state, { capture, simple: true });
+      const checked = await execute(condition, state, { capture, errexitIgnored:true });
       append(checked);
       if ((checked.status === 0) !== negate) {
         selected = branch.body;
@@ -3630,9 +3819,17 @@ async function executeNodeList(nodes, state, options = {}) {
 
 async function executeFunction(name, argv, state) {
   const previousArgs = state.args;
+  const previousLoopDepth = state.loopDepth;
+  state.loopDepth = 0;
   state.args = [previousArgs[0], ...argv.slice(1)];
+  state.returnDepth++;
   try { return await executeNodeList(state.functions[name], state); }
-  finally { state.args = previousArgs; }
+  finally {
+    state.returnDepth--;
+    state.loopDepth = previousLoopDepth;
+    if (state.flow?.kind === "return") state.flow = null;
+    state.args = previousArgs;
+  }
 }
 
 async function runExternal(
@@ -3661,6 +3858,19 @@ async function runExternal(
     },
   };
   try {
+    if (!runtimeOptions.background) {
+      options.stdout = runtimeOptions.stdoutFd ?? options.stdout;
+      options.stderr = runtimeOptions.stderrFd ?? options.stderr;
+      const extra = Object.keys(state.fdBindings ?? {}).map(Number).filter(n => n > 2);
+      if (extra.length) {
+        options.stdio = [options.stdin, options.stdout, options.stderr];
+        for (let n = 3; n <= Math.max(...extra); n++) {
+          const endpoint = state.fdBindings[n];
+          options.stdio[n] = endpoint?.fd ?? endpoint?.channel ?? "ignore";
+        }
+        delete options.stdin; delete options.stdout; delete options.stderr;
+      }
+    }
     const proc = Bun.spawn(options);
     if (runtimeOptions.background) {
       if (!Array.isArray(Bun.sha.procs)) Bun.sha.procs = [];
@@ -3826,6 +4036,9 @@ function pipelineBuiltinState(state) {
         readonly: [...state.readonly],
         args: state.args,
         pathSearch: state.pathSearch,
+        shellOptions:state.shellOptions,
+        ignoreErrexit:state.ignoreErrexit,
+        fdBindings: Object.fromEntries(Object.entries(state.fdBindings ?? {}).filter(([n]) => Number(n)>2).map(([n,v]) => [n, v.fd === undefined ? v : {fd:Number(n)}])),
       }),
     },
   };
@@ -3919,7 +4132,12 @@ async function runCommandArgv(
   )) return result(2, "", "bunmsh: &: only a single external command is supported\n");
   
   let commandState = state;
-  if (options.pipelineStage && runsInPipelineSubprocess(commandArgv, commandState))
+  const ioCommand = ["builtin", "__builtin", "command"].includes(commandArgv[0])
+    ? commandArgv.slice(1).filter(arg => arg !== "--")[0] : commandArgv[0];
+  const redirectedStream = (options.stdoutFd !== undefined || options.stderrFd !== undefined) &&
+    !Object.hasOwn(state.functions, ioCommand) &&
+    (ioCommand === "yes" || Object.hasOwn(fallbackBuiltins, ioCommand));
+  if ((options.pipelineStage || redirectedStream) && runsInPipelineSubprocess(commandArgv, commandState))
     return runExternal(
       pipelineBuiltinArgv(commandArgv),
       pipelineBuiltinState(commandState),
@@ -3929,6 +4147,8 @@ async function runCommandArgv(
       options.stdoutSink,
       { ...options, pipelineKillSignal: "SIGTERM" },
     );
+  if (typeof input === "number" && runsInPipelineSubprocess(commandArgv,commandState))
+    input = Readable.toWeb(createReadStream("",{fd:input,autoClose:false}));
   while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
     if (requestsBuiltinHelp(commandArgv) && hasBuiltinHelp(commandArgv[0]))
       return builtinHelp(commandArgv[0]);
@@ -4034,16 +4254,6 @@ async function runCommandArgv(
   );
 }
 
-function redirectInput(path) {
-  const fd = openSync(path, "r");
-  return Readable.toWeb(createReadStream(path, { fd, autoClose: true }));
-}
-
-function redirectOutput(path, append) {
-  const fd = openSync(path, append ? "a" : "w");
-  return Writable.toWeb(createWriteStream(path, { fd, autoClose: true }));
-}
-
 // Mirrors the double-quote scanning in tokenize(): an unquoted heredoc body
 // only lets backslash escape $, `, \, and a trailing newline before the rest
 // goes through the normal $/`` expansion pipeline.
@@ -4108,125 +4318,124 @@ async function runCommand(command, state, options = {}) {
     for (const name of Object.keys(localEnv))
       if (state.readonly.has(name)) return readonlyError(name);
     Object.assign(state.env, localEnv);
-    return result(state.expansionStatus ?? 0);
+    if (!command.redirects.length) return result(state.expansionStatus ?? 0);
+    expanded.push(":");
   }
   const alias = aliasEligible ? state.aliases[expanded[0]] : null;
   if (alias) expanded.splice(0, 1, ...alias);
 
+  const previousBindings = state.fdBindings;
+  const bindings = {...previousBindings};
+  if (options.stdoutSink) bindings[1] = {channel:1};
+  if (options.input !== null && options.input !== undefined) delete bindings[0];
+  const opened = [];
+  const redirectedFds = new Set();
   let input = options.input ?? null;
-  let stdoutPath = null;
-  let stdoutAppend = false;
-  let stderrPath = null;
-  let stderrAppend = false;
-  let stdoutToStderr = false;
-  let stderrToStdout = false;
-  for (const redirect of command.redirects) {
-    if (redirect.op === "1>&2") { stdoutToStderr = true; continue; }
-    if (redirect.op === "2>&1") { stderrToStdout = true; continue; }
-    if (/^\d+>&\d+$/.test(redirect.op)) continue;
-    if (redirect.op === "<<" || redirect.op === "<<-") {
-      const heredoc = redirect.heredoc ?? { body: "", expand: false };
-      const content = heredoc.expand
-        ? stripExpansionMarkers(
-            (await expandText(heredocLiteralPass(heredoc.body), state)).replaceAll("\u0000", ""),
-          )
-        : heredoc.body;
-      if (input instanceof ReadableStream) {
-        try { await input.cancel(); } catch {}
-      }
-      input = redirectHeredoc(content);
-      continue;
-    }
-    if (redirect.op === "<<<") {
-      const [word] = await expandWord(redirect.target, state, { single: true, noTilde: true });
-      if (input instanceof ReadableStream) {
-        try { await input.cancel(); } catch {}
-      }
-      input = redirectHeredoc(`${word}\n`);
-      continue;
-    }
-    const targets = await expandWord(redirect.target, state, { single: true });
-    const target = targets[0];
-    const path = target.startsWith("/") ? target : `${state.cwd}/${target}`;
-    if (redirect.op === "<") {
-      try {
-        if (input instanceof ReadableStream) {
-          try { await input.cancel(); } catch {}
-        }
-        input = redirectInput(path);
-      } catch (error) {
-        return result(1, "", `bunmsh: ${target}: ${error.message}\n`);
-      }
-    } else if (redirect.op === ">" || redirect.op === ">>") {
-      stdoutPath = path;
-      stdoutAppend = redirect.op === ">>";
-    } else {
-      stderrPath = path;
-      stderrAppend = redirect.op === "2>>";
-    }
-  }
-
-
-  let stdoutRedirect = null;
-  let stderrRedirect = null;
+  let persistent = expanded[0] === "exec" && expanded.length === 1;
   try {
-    if (stdoutPath !== null) {
-      // A command-level redirect replaces the pipeline's stdout connection.
-      // Close that unused connection now so the next stage observes EOF.
-      if (options.stdoutSink) {
-        try { await options.stdoutSink.getWriter().close(); } catch {}
+    for (const redirect of command.redirects) {
+      if (["<<", "<<-", "<<<"].includes(redirect.op)) {
+        redirectedFds.add(0);
+        let content;
+        if (redirect.op === "<<<") content = `${(await expandWord(redirect.target,state,{single:true,noTilde:true}))[0]}\n`;
+        else {
+          const heredoc = redirect.heredoc ?? {body:"",expand:false};
+          content = heredoc.expand ? stripExpansionMarkers((await expandText(heredocLiteralPass(heredoc.body),state)).replaceAll("\u0000","")) : heredoc.body;
+        }
+        bindings[0] = {content};
+        continue;
       }
-      stdoutRedirect = redirectOutput(stdoutPath, stdoutAppend);
+      const dup = /^(\d+)([<>]&)(\d+|-)$/.exec(redirect.op);
+      const match = /^(\d*)(>&|<&|<>|>>|>|<)$/.exec(redirect.op);
+      if (!dup && !match) throw new Error(`unsupported redirection ${redirect.op}`);
+      const op = dup ? dup[2] : match[2];
+      const fd = Number((dup ? dup[1] : match[1]) || (op.startsWith("<") ? 0 : 1));
+      redirectedFds.add(fd);
+      if (fd > 1023) throw new Error("file descriptor out of range");
+      const target = dup ? dup[3] : (await expandWord(redirect.target,state,{single:true}))[0];
+      if (op.endsWith("&")) {
+        if (target === "-") bindings[fd] = {closed:true};
+        else {
+          if (!/^\d+$/.test(target)) throw new Error(`${target}: bad file descriptor`);
+          const from = bindings[Number(target)] ?? (Number(target) <= 2 ? {channel:Number(target)} : null);
+          if (!from || from.closed) throw new Error(`${target}: bad file descriptor`);
+          bindings[fd] = from;
+        }
+      } else {
+        const path = isAbsolute(nativePath(target)) ? nativePath(target) : resolvePath(nativePath(state.cwd),nativePath(target));
+        const handle = openSync(path, op === "<" ? "r" : op === ">>" ? "a" : op === "<>" ? fsConstants.O_RDWR | fsConstants.O_CREAT : "w");
+        opened.push(handle);
+        bindings[fd] = {fd:handle};
+      }
     }
-    if (stderrPath !== null)
-      stderrRedirect = redirectOutput(stderrPath, stderrAppend);
-  } catch (error) {
-    return result(1, "", `bunmsh: ${stdoutPath ?? stderrPath}: ${error.message}\n`);
-  }
-
-  const commandState = options.subshell
-    ? {
-        ...state,
-        env: { ...state.env, ...localEnv },
-        directoryHistory: [...state.directoryHistory],
-        tabs: [...state.tabs],
-        readonly: new Set(state.readonly),
+    const commandState = options.subshell ? {...state,env:{...state.env,...localEnv},fdBindings:bindings,flow:null,loopDepth:0,returnDepth:0} : state;
+    if (!options.subshell) {
+      for (const name of Object.keys(localEnv)) if (state.readonly.has(name)) return readonlyError(name);
+      Object.assign(commandState.env,localEnv);
+    }
+    commandState.fdBindings = bindings;
+    if (persistent) {
+      for (const fd of opened) state.ownedFds.add(fd);
+      return result();
+    }
+    const stdin = bindings[0];
+    if (stdin?.content !== undefined) input = redirectHeredoc(stdin.content);
+    else if (stdin?.closed) input = redirectHeredoc("");
+    else if (stdin?.fd !== undefined) input = stdin.fd;
+    if (state.shellOptions.x) {
+      const line = bytes(`${state.env.PS4 ?? "+ "}${expanded.join(" ")}\n`);
+      const traceFd = bindings[2];
+      if (traceFd?.fd !== undefined) writeSync(traceFd.fd,line);
+      else await writeStream(process.stderr,line);
+    }
+    const nested = Boolean(command.body) || Object.hasOwn(commandState.functions,expanded[0]) || ["eval",".","source"].includes(expanded[0]);
+    const stdout = bindings[1] ?? {channel:1};
+    const stderr = bindings[2] ?? {channel:2};
+    const direct = (endpoint) => endpoint.fd !== undefined || endpoint.closed;
+    const execution = command.body ? await executeNodeList(command.body,commandState,{capture:true,input}) : await runCommandArgv(expanded,commandState,input,
+      direct(stdout) ? false : Boolean(options.captureStdout || stdout.channel !== 1),
+      direct(stderr) ? false : Boolean(options.captureStderr || stderr.channel !== 2), {
+        ...options,
+        pipelineStage: Boolean(options.pipelineStage),
+        stdoutSink: direct(stdout) ? null : options.stdoutSink,
+        stdoutFd: stdout.fd ?? (stdout.closed ? "ignore" : undefined),
+        stderrFd: stderr.fd ?? (stderr.closed ? "ignore" : undefined),
+      });
+    if (!nested) {
+      const output = [], errors = [];
+      for (const [endpoint,data] of [[stdout,execution.stdout],[stderr,execution.stderr]]) {
+        if (!data.byteLength) continue;
+        if (endpoint.closed) { execution.status = 1; errors.push(bytes("bunmsh: bad file descriptor\n")); }
+        else if (endpoint.fd !== undefined) writeSync(endpoint.fd,data);
+        else (endpoint.channel === 2 ? errors : output).push(data);
       }
-    : state;
-  if (!options.subshell) {
-    for (const name of Object.keys(localEnv))
-      if (commandState.readonly.has(name)) return readonlyError(name);
-    Object.assign(commandState.env, localEnv);
+      execution.stdout = concatBytes(output);
+      execution.stderr = concatBytes(errors);
+    }
+    return execution;
+  } catch (error) {
+    persistent = false;
+    return result(1,"",`bunmsh: ${error.message}\n`);
+  } finally {
+    if (!persistent) {
+      if (options.subshell) state.fdBindings = previousBindings;
+      else if (command.redirects.length) {
+        // Restore just the redirected descriptors (mksh's savedfd scope),
+        // not descriptors opened independently by exec inside the body.
+        const restored = {...state.fdBindings};
+        for (const fd of redirectedFds) {
+          if (Object.hasOwn(previousBindings,fd)) restored[fd] = previousBindings[fd];
+          else delete restored[fd];
+        }
+        state.fdBindings = restored;
+      }
+      for (const fd of opened) {
+        if (Object.values(state.fdBindings).some(endpoint => endpoint.fd === fd)) state.ownedFds.add(fd);
+        else { try { closeSync(fd); } catch {} }
+      }
+    }
   }
 
-  const captureStdout = (options.captureStdout || stdoutToStderr) && stdoutRedirect === null;
-  const captureStderr = (options.captureStderr || stderrToStdout) && stderrRedirect === null;
-  const execution = await runCommandArgv(
-    expanded,
-    commandState,
-    input,
-    captureStdout,
-    captureStderr,
-    {
-      pipelineStage: Boolean(options.pipelineStage || stdoutRedirect || stderrRedirect),
-      stdoutSink: stdoutRedirect ?? options.stdoutSink ?? null,
-      stderrSink: stderrRedirect,
-      onSpawn: options.onSpawn,
-      onExit: options.onExit,
-      background: Boolean(options.background),
-    },
-  );
-
-  if (stdoutToStderr && execution.stdout.byteLength) {
-    execution.stderr = concatBytes([execution.stderr, execution.stdout]);
-    execution.stdout = bytes();
-  }
-  if (stderrToStdout && execution.stderr.byteLength) {
-    execution.stdout = concatBytes([execution.stdout, execution.stderr]);
-    execution.stderr = bytes();
-  }
-
-  return execution;
 }
 
 async function runPipeline(pipeline, state, options = {}) {
@@ -4247,9 +4456,9 @@ async function runPipeline(pipeline, state, options = {}) {
   );
   const linksConnected = links.map((_, i) => {
     const stdoutRedirected = pipeline[i].redirects.some((redirect) =>
-      redirect.op === ">" || redirect.op === ">>");
+      /^(?:1)?>(?:>|&.*)?$/.test(redirect.op));
     const stdinRedirected = pipeline[i + 1].redirects.some((redirect) =>
-      ["<", "<<", "<<-", "<<<"].includes(redirect.op));
+      /^(?:0)?<(?:<<?-?|&.*|>)?$/.test(redirect.op));
     return !stdoutRedirected && !stdinRedirected;
   });
   const processes = Array(pipeline.length).fill(null);
@@ -4311,6 +4520,18 @@ async function runPipeline(pipeline, state, options = {}) {
 }
 
 export async function execute(source, state = createState(), io = {}) {
+  const previous = state.ignoreErrexit;
+  if (io.errexitIgnored) state.ignoreErrexit++;
+  try { return await executeInternal(source,state,io); }
+  catch (error) {
+    const failure = result(state.exitRequested ? state.exitStatus : 2,"",`bunmsh: ${error.message}\n`);
+    if (!io.capture) await writeStream(process.stderr,failure.stderr);
+    return failure;
+  }
+  finally { state.ignoreErrexit = previous; }
+}
+
+async function executeInternal(source, state, io) {
   source = normalizeSource(source);
   if (source === "?") {
     const execution = result(0, `${state.lastStatus}\n`);
@@ -4321,44 +4542,12 @@ export async function execute(source, state = createState(), io = {}) {
   const rawSource = source.trimStart();
   const group = leadingSubshell(source);
   if (group) {
-    let suffix = group.suffix;
-    let discardStdout = false, discardStderr = false;
-    while (true) {
-      const redirect = /^\s*(?:(\d+)?(>>?|<)\s*([^\s;&|]+)|(\d+>&\d+))/.exec(suffix);
-      if (!redirect) break;
-      if (redirect[2] === ">" || redirect[2] === ">>") {
-        if (redirect[1] === "2") discardStderr ||= redirect[3] === "/dev/null";
-        else discardStdout ||= redirect[3] === "/dev/null";
-      }
-      suffix = suffix.slice(redirect[0].length);
+    const previous = state.env[PIPELINE_STATE_ENV];
+    try { return await execute(rewriteSubshells(source,state),state,io); }
+    finally {
+      if (previous === undefined) delete state.env[PIPELINE_STATE_ENV];
+      else state.env[PIPELINE_STATE_ENV] = previous;
     }
-    const child = await runExternal(
-      pipelineCompoundArgv(group.body),
-      pipelineBuiltinState(state),
-      io.input ?? null,
-      true,
-      true,
-    );
-    let execution = result(child.status,
-      discardStdout ? "" : child.stdout,
-      discardStderr ? "" : child.stderr);
-    const connector = /^\s*(\|\||&&|;)\s*([\s\S]*)$/.exec(suffix);
-    if (connector) {
-      const shouldRun = connector[1] === ";" ||
-        (connector[1] === "&&" ? execution.status === 0 : execution.status !== 0);
-      if (shouldRun) {
-        const tail = await execute(connector[2], state, io);
-        execution = result(tail.status,
-          concatBytes([execution.stdout, tail.stdout]),
-          concatBytes([execution.stderr, tail.stderr]));
-      }
-    }
-    state.lastStatus = execution.status;
-    if (!io.capture) {
-      if (execution.stdout.byteLength) await writeStream(process.stdout, execution.stdout);
-      if (execution.stderr.byteLength) await writeStream(process.stderr, execution.stderr);
-    }
-    return execution;
   }
   if (isJavaScriptMode(rawSource)) {
     let execution;
@@ -4416,7 +4605,7 @@ export async function execute(source, state = createState(), io = {}) {
           if (execution.stdout.byteLength) stdout.push(execution.stdout);
           if (execution.stderr.byteLength) stderr.push(execution.stderr);
         }
-        if (state.exitRequested) break;
+        if (state.exitRequested || state.flow) break;
       }
       return io.capture
         ? result(execution.status, concatBytes(stdout), concatBytes(stderr))
@@ -4466,15 +4655,24 @@ export async function execute(source, state = createState(), io = {}) {
   let execution = result(state.lastStatus);
   const capturedStdout = [];
   const capturedStderr = [];
-  for (const job of jobs) {
+  for (const [jobIndex,job] of jobs.entries()) {
+    const trapped = await runPendingTraps(state,io);
+    if (io.capture) { capturedStdout.push(trapped.stdout); capturedStderr.push(trapped.stderr); }
+    if (state.exitRequested || state.flow) break;
     if (job.connector === "&&" && execution.status !== 0) continue;
     if (job.connector === "||" && execution.status === 0) continue;
-    execution = await runPipeline(job.pipeline, state, {
+    const ignored = state.ignoreErrexit || job.negate || ["&&","||"].includes(jobs[jobIndex+1]?.connector);
+    const previousIgnore = state.ignoreErrexit;
+    if (ignored) state.ignoreErrexit++;
+    try { execution = await runPipeline(job.pipeline, state, {
       capture: io.capture,
       background: job.background,
       input: io.input ?? null,
       stdoutSink: io.stdoutSink ?? null,
-    });
+    }); } catch (error) {
+      execution = result(state.exitRequested ? state.exitStatus : 2,"",`bunmsh: ${error.message}\n`);
+    } finally { state.ignoreErrexit = previousIgnore; }
+    if (!ignored && state.shellOptions.e && execution.status && !state.flow) { state.exitRequested=true; state.exitStatus=execution.status; }
     if (job.negate) execution.status = execution.status === 0 ? 1 : 0;
     state.lastStatus = execution.status;
     if (execution.stdout.byteLength) {
@@ -4485,7 +4683,7 @@ export async function execute(source, state = createState(), io = {}) {
       if (io.capture) capturedStderr.push(execution.stderr);
       else await writeStream(process.stderr, execution.stderr);
     }
-    if (state.exitRequested) break;
+    if (state.exitRequested || state.flow) break;
   }
   return io.capture
     ? result(execution.status, concatBytes(capturedStdout), concatBytes(capturedStderr))
@@ -4527,6 +4725,9 @@ export function pipelineChildState() {
       args: inherited.args,
       pathSearch: inherited.pathSearch,
       pipelineChild: true,
+      fdBindings: inherited.fdBindings,
+      shellOptions:inherited.shellOptions,
+      ignoreErrexit:inherited.ignoreErrexit,
     });
   } catch {
     return createState();

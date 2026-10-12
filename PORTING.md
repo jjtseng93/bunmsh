@@ -38,8 +38,22 @@ pseudo-terminal tests.
   Background pipelines, builtins, functions, and all redirections are rejected
   before files are opened. General asynchronous command lists, job control,
   and coprocesses are not implemented.
-- Brace command groups, `select`, arithmetic commands, and `[[ ... ]]` are
-  not implemented.
+  Compatibility invariant: keep the original `Bun.Subprocess` objects in an
+  append-only `Bun.sha.procs` array with stable indices, immediate return and
+  `unref()`. POSIX foreground work must not add implicit waiting, killing,
+  removal of completed entries, or a job-wrapper replacement.
+- Brace command groups run in the current shell, including scoped redirects
+  and group pipelines. `select`, arithmetic commands, and `[[ ... ]]` remain
+  unimplemented. Function opening braces may be on the same or next line;
+  inline bodies and nested case clauses are supported.
+- `return` stops at the function/source boundary; `break N` and `continue N`
+  unwind enclosing loops. Functions and sourced files establish their own
+  loop boundary, following mksh STOP_BRKCONT.
+- `set -e` uses a dynamically inherited error-ignore context for conditions,
+  non-final AND/OR commands and negation, following mksh XERROK. `set -u`,
+  `set -f`, `set -x`, option queries and corresponding CLI flags are supported.
+  `-v` currently prints initial CLI input only; it is not an incremental reader.
+  `set -o posix` is accepted but does not imply full POSIX conformance.
 - Functions and subshells cover practical cases but do not yet reproduce every
   mksh scoping, local-variable, trap, and diagnostic edge case.
 - Pipelines isolate builtin/function state through subprocess copies. Changes
@@ -75,9 +89,17 @@ pseudo-terminal tests.
   pathname expansion, or tilde expansion, and a trailing newline is appended.
   It follows the same dash/`/bin/sh` comparison harness as everything else in
   this codebase, except `<<<` itself, since dash does not implement it.
-- Arbitrary descriptor allocation/manipulation, descriptor variables,
-  heredocs targeting a descriptor other than stdin, and every ordering edge
-  case remain incomplete.
+- Numeric file descriptors support file open, append, read/write (`<>`),
+  duplication and shell-level closure, with left-to-right redirect ordering.
+  `exec` without a command persists bindings. Compound/function redirections
+  restore only the descriptors they changed; native open handles retained by
+  another binding stay alive. External/pipeline children inherit extra fds
+  through Bun.spawn stdio. No native compiler or host shell is required.
+- Descriptor variables and heredocs targeting non-stdin fds are not implemented.
+  Closing a descriptor denies subsequent shell duplication/use, but Bun.spawn
+  maps a closed child stdio slot to `ignore` (/dev/null), not native EBADF.
+  Aliases of captured stdout/stderr passed as extra fds to an arbitrary external
+  program do not yet reproduce every pipe/capture ordering case.
 - External processes use `Bun.spawn`; regular and fallback builtins may execute
   in-process or in a self-spawned bunmsh pipeline child depending on streaming
   and state-isolation requirements.
@@ -96,13 +118,16 @@ pseudo-terminal tests.
 - Ctrl-D on an empty readline input sends EOF and exits the interactive shell.
   This is deliberately distinct from Ctrl-C, following the same high-level
   editor/main-loop separation used by mksh.
-- The current implementation handles SIGINT through readline while editing and
-  through a process signal listener while a foreground operation owns the
-  terminal. It does not yet have mksh's general pending-signal table and safe
-  trap checkpoints.
-- There is no `trap` builtin or support for user handlers for signals, `EXIT`,
-  or `ERR`. Signal handlers therefore cannot yet execute shell source, be
-  listed, ignored, reset, or inherited with POSIX/mksh semantics.
+- `trap` supports listing, reset (`-`), shell-local ignore (empty action),
+  EXIT/0 and catchable signal names/numbers. Signal callbacks enqueue handlers;
+  shell source runs at command boundaries, following mksh's pending-trap model.
+  Handlers preserve `$?`; EXIT runs once and can explicitly override status.
+  Shell finalization releases its fd resources and listeners, never background
+  subprocesses or Bun.sha.procs entries.
+- Complete native signal semantics are not claimed: ignored handlers do not
+  establish inherited SIG_IGN in external children, handlers waiting at an idle
+  interactive prompt run at the next command boundary, and there is no ERR trap,
+  process-group forwarding, `wait` integration or general builtin cancellation.
 - Status 130 is defined for an interrupted `serve`, and its SIGTERM path uses
   143. Signal-derived statuses are not yet normalised consistently for every
   external command, builtin, pipeline stage, and command substitution.
@@ -182,11 +207,11 @@ pseudo-terminal tests.
 
 ## Remaining major work
 
-1. Background jobs, process groups, complete signal-status handling, traps,
+1. General background jobs, process groups, complete signal/trap inheritance,
    general builtin cancellation, and `jobs`/`fg`/`bg`/`wait`.
-2. Shell options such as `errexit`, `nounset`, `pipefail`, `xtrace`, and POSIX
+2. Full shell-option edge cases, `pipefail`, incremental verbose input and POSIX
    mode, plus startup/login/restricted-shell files and modes.
-3. Brace groups, `[[ ... ]]`, arithmetic commands,
+3. `[[ ... ]]`, arithmetic commands,
    extended globs, process substitution, and fuller mksh expansion semantics.
 4. Arrays, associative arrays, namerefs, `typeset`/scope semantics, and more
    complete special builtins.
@@ -194,3 +219,22 @@ pseudo-terminal tests.
    `fc`, and automatic history policy.
 6. Broader POSIX conformance testing, mksh `check.t` coverage, exact diagnostics,
    and exit-status compatibility for edge cases.
+
+## Bootstrap compatibility verification (2026-10-13)
+
+Implementation reference: sibling `mksh/syn.c` (`function_body`/brace grammar),
+`exec.c` (TBRACE, XERROK, E_LOOP), `funcs.c` (c_exitreturn, c_brkcont, c_trap),
+and `histrap.c` (runtrap/cleartraps). The JavaScript execution and descriptor
+model is adapted to Bun; no C code or native signal/job-control layer is copied.
+
+`test/posix-bootstrap.test.js` covers finite control-flow, descriptor, trap,
+option and background-registry cases without requiring a reference shell.
+Tests were run with musl Bun 1.4.2 in `bunproot -r rfs1`. The guest's `/bin/sh`
+is itself bunmsh, so reference.test.js comparisons there would not constitute
+an independent POSIX oracle.
+
+GNU make 4.4.1 configure still does not complete: its LINENO fallback needs sed
+labels/branches/multiline pattern-space operations not implemented by the
+current fallback sed. Shell LINENO tracking is not implemented either.
+The Autoconf `${1+"$@"}` re-exec idiom also needs expansion work to retain
+argument boundaries. These are remaining blockers, not a successful configure.
