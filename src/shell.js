@@ -8,6 +8,8 @@ import {
   lstatSync,
   linkSync,
   mkdirSync,
+  mkdtempSync,
+  writeFileSync,
   openSync,
   readdirSync,
   rmdirSync,
@@ -20,6 +22,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import {
+  tmpdir,
   arch as osArch,
   constants as osConstants,
   hostname as osHostname,
@@ -457,6 +460,7 @@ export function parse(source) {
     const pipeline = [];
     while (true) {
       const command = emptyCommand();
+      command.lineNumber = source.slice(0, tokens[i]?.offset ?? 0).split("\n").length;
       while (i < tokens.length) {
         const token = tokens[i];
         if (token.type === "op" && ["|", ";", "&&", "||"].includes(token.value))
@@ -537,10 +541,11 @@ export function parse(source) {
 }
 
 function parameterValue(name, state) {
+  if (name === "LINENO") return String(state.lineNumber ?? 1);
   if (name === "?") return String(state.lastStatus);
   if (name === "$") return String(process.pid);
   if (name === "#") return String(Math.max(0, state.args.length - 1));
-  if (name === "-") return Object.entries(state.shellOptions ?? {}).filter(([,v])=>v).map(([k])=>k).join("");
+  if (name === "-") return Object.entries(state.shellOptions ?? {}).filter(([k,v])=>v && k.length === 1).map(([k])=>k).join("");
   if (name === "0") return state.args[0] ?? "bunmsh";
   if (name === "@" || name === "*") return state.args.slice(1).join((state.env.IFS ?? " ")[0] ?? " ");
   if (/^[1-9][0-9]*$/.test(name)) return state.args[Number(name)] ?? "";
@@ -548,7 +553,7 @@ function parameterValue(name, state) {
 }
 
 function checkedParameter(name,state) {
-  const unset = /^\d+$/.test(name) ? Number(name) >= state.args.length : /^[A-Za-z_]/.test(name) && !Object.hasOwn(state.env,name);
+  const unset = name === "LINENO" ? false : /^\d+$/.test(name) ? Number(name) >= state.args.length : /^[A-Za-z_]/.test(name) && !Object.hasOwn(state.env,name);
   if (state.shellOptions.u && unset) {
     state.exitRequested = true;
     state.exitStatus = 1;
@@ -681,10 +686,10 @@ async function casePatternRegex(pattern, state) {
     }
     else source += marked[i].replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
   }
-  return new RegExp(`^${source}$`);
+  return new RegExp(`^${source}$`, "s");
 }
 
-async function parameterExpansion(body, state) {
+async function parameterExpansion(body, state, quoted = false) {
   if (/^[!%][A-Za-z_][A-Za-z0-9_]*$/.test(body)) {
     const value = parameterValue(body.slice(1), state);
     return body[0] === "!" ? parameterValue(value, state) : String([...value].length);
@@ -726,13 +731,14 @@ async function parameterExpansion(body, state) {
   if (!match) throw new ShellSyntaxError(`unsupported parameter expansion: \${${body}}`);
   const [, name, operator, operand = ""] = match;
   const value = parameterValue(name, state);
-  const unset = !Object.hasOwn(state.env, name) && !/^[?$#@*0-9]$/.test(name);
+  const unset = /^\d+$/.test(name) ? Number(name) >= state.args.length :
+    name !== "LINENO" && !Object.hasOwn(state.env, name) && !/^[?$#@*-]$/.test(name);
   const empty = value === "";
   if (!operator) return checkedParameter(name,state);
   const useEmpty = operator.startsWith(":");
   const op = operator.at(-1);
   const missing = unset || (useEmpty && empty);
-  const expandedOperand = async () => stripExpansionMarkers(await expandText(operand, state));
+  const expandedOperand = () => expandParameterOperand(operand, state, quoted);
   if (op === "-") return missing ? expandedOperand() : value;
   if (op === "+") return missing ? "" : expandedOperand();
   if (op === "=") {
@@ -740,7 +746,7 @@ async function parameterExpansion(body, state) {
       if (!/^[A-Za-z_]/.test(name)) throw new ShellSyntaxError("cannot assign positional parameter");
       if (state.readonly?.has(name)) throw new ShellSyntaxError(`${name}: is read only`);
       const expanded = await expandedOperand();
-      state.env[name] = expanded;
+      state.env[name] = stripExpansionMarkers(expanded);
       return expanded;
     }
     return value;
@@ -754,7 +760,44 @@ function markedExpansion(value) {
 }
 
 function stripExpansionMarkers(value) {
-  return value.replace(/[\u0001\u0002]/g, "");
+  return value.replace(/\u0005/g, " ").replace(/[\u0001-\u0004\u0006\u0007]/g, "");
+}
+
+// Like mksh eval.c's XARG/XARGSEP, retain quote and argument boundaries
+// until field splitting. A selected ${...word} is shell word syntax, not text.
+async function expandParameterOperand(source, state, outerQuoted) {
+  let output = "", plain = "", quote = "none";
+  const flush = async () => {
+    if (quote === "single") output += `\u0003${plain}\u0006\u0004`;
+    else {
+      const value = await expandText(plain, state, outerQuoted || quote === "double");
+      output += quote === "double" ? `\u0003${value}${value === "\u0007" ? "" : "\u0006"}\u0004` : value;
+    }
+    plain = "";
+  };
+  for (let i = 0; i < source.length;) {
+    const ch = source[i];
+    if (quote === "single") {
+      if (ch === "'") { await flush(); quote = "none"; i++; }
+      else plain += source[i++];
+      continue;
+    }
+    if ((ch === '"' && quote !== "single") || (ch === "'" && quote === "none" && !outerQuoted)) {
+      await flush(); quote = quote === "none" ? (ch === '"' ? "double" : "single") : "none"; i++; continue;
+    }
+    if (ch === "\\" && i + 1 < source.length) {
+      if (quote === "none" && !outerQuoted || '$`"\\'.includes(source[i + 1])) {
+        plain += `\u0000${source[i + 1]}`; i += 2; continue;
+      }
+    }
+    if (ch === "`" || ch === "$" && ["{", "("].includes(source[i + 1])) {
+      const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+      plain += source.slice(i, end); i = end; continue;
+    }
+    plain += source[i++];
+  }
+  await flush();
+  return output;
 }
 
 async function commandSubstitution(source, state) {
@@ -763,6 +806,7 @@ async function commandSubstitution(source, state) {
     env: { ...state.env },
     aliases: { ...state.aliases },
     readonly: new Set(state.readonly),
+    exported: new Set(state.exported),
     directoryHistory: [...state.directoryHistory],
     tabs: [...state.tabs],
     exitRequested: false,
@@ -771,13 +815,15 @@ async function commandSubstitution(source, state) {
     shellOptions:{...state.shellOptions}, fdBindings:{...state.fdBindings},
     traps:{}, trapListeners:new Map(), pendingTraps:[], ownedFds:new Set(),
   };
+  // Command substitution installs its own stdout pipe even inside >file.
+  delete child.fdBindings[1];
   const output = await execute(source, child, { capture: true });
   const final = await finishShell(child,output.status,{capture:true});
   state.expansionStatus = final.status;
   return decode(concatBytes([output.stdout,final.stdout])).replace(/\n+$/, "");
 }
 
-async function expandText(text, state) {
+async function expandText(text, state, quoted = false) {
   let output = "";
   for (let i = 0; i < text.length; ) {
     if (text[i] === "\u0000") {
@@ -797,7 +843,8 @@ async function expandText(text, state) {
     }
     if (text.startsWith("$((", i)) {
       const end = substitutionEnd(text, i);
-      output += markedExpansion(arithmeticValue(text.slice(i + 3, end - 2), state));
+      const expression = stripExpansionMarkers(await expandText(text.slice(i + 3, end - 2), state));
+      output += markedExpansion(arithmeticValue(expression, state));
       i = end;
       continue;
     }
@@ -809,13 +856,15 @@ async function expandText(text, state) {
     }
     if (text[i + 1] === "{") {
       const end = parameterEnd(text, i);
-      output += markedExpansion(await parameterExpansion(text.slice(i + 2, end - 1), state));
+      output += markedExpansion(await parameterExpansion(text.slice(i + 2, end - 1), state, quoted));
       i = end;
       continue;
     }
     const next = text[i + 1];
     if (["?", "$", "#", "@", "*", "-"].includes(next) || /[0-9]/.test(next ?? "")) {
-      output += markedExpansion(checkedParameter(next, state));
+      output += next === "@" && quoted
+        ? (state.args.length > 1 ? state.args.slice(1).map(arg => `\u0003${arg}\u0006\u0004`).join("\u0005") : "\u0007")
+        : markedExpansion(checkedParameter(next, state));
       i += 2;
       continue;
     }
@@ -844,6 +893,7 @@ function splitFields(segments, state) {
     forced = false;
   };
   for (const segment of segments) {
+    if (segment.boundary) { finish(true); continue; }
     if (segment.quoted && segment.text === "") forced = true;
     for (const ch of segment.text) {
       if (!segment.quoted && segment.splittable && ifs.includes(ch)) {
@@ -908,36 +958,35 @@ function braceFields(field) {
 }
 
 export async function expandWord(word, state, options = {}) {
-  if (!options.single && word.fragments.length === 1 &&
-      word.fragments[0].quote === "double" && word.fragments[0].text === "$@")
-    return state.args.slice(1);
   const segments = [];
-  for (let index = 0; index < word.fragments.length; index++) {
-    const fragment = word.fragments[index];
+  for (const fragment of word.fragments) {
     const source = fragment.quote === "none" && !options.noTilde
-      ? expandTildes(fragment.text, state, Boolean(options.assignment))
-      : fragment.text;
-    let text = fragment.quote === "single"
-      ? source.replaceAll("\u0000", "")
-      : await expandText(source, state);
-    if (fragment.quote !== "none") {
-      segments.push({ text: stripExpansionMarkers(text.replaceAll("\u0000", "")), quoted: true, splittable: false });
-    } else {
-      let plain = "";
-      let splittable = false;
-      const flush = () => {
-        if (plain) segments.push({ text: plain, quoted: false, splittable });
-        plain = "";
-      };
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === "\u0001") { flush(); splittable = true; continue; }
-        if (text[i] === "\u0002") { flush(); splittable = false; continue; }
-        if (text[i] !== "\u0000") { plain += text[i]; continue; }
-        flush();
-        segments.push({ text: text[++i] ?? "", quoted: true, splittable: false });
-      }
-      flush();
+      ? expandTildes(fragment.text, state, Boolean(options.assignment)) : fragment.text;
+    if (fragment.quote === "single") {
+      segments.push({text:source.replaceAll("\u0000", ""),quoted:true,splittable:false});
+      continue;
     }
+    const text = await expandText(source, state, fragment.quote === "double");
+    let plain = "", splitDepth = 0, quoteDepth = fragment.quote === "double" ? 1 : 0;
+    const flush = () => {
+      if (plain) segments.push({text:plain,quoted:quoteDepth > 0,splittable:splitDepth > 0});
+      plain = "";
+    };
+    if (fragment.quote === "double" && !text.includes("\u0007"))
+      segments.push({text:"",quoted:true,splittable:false});
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === "\u0001") { flush(); splitDepth++; }
+      else if (ch === "\u0002") { flush(); splitDepth--; }
+      else if (ch === "\u0003") { flush(); quoteDepth++; }
+      else if (ch === "\u0004") { flush(); quoteDepth--; }
+      else if (ch === "\u0005") { flush(); segments.push({text:options.single ? " " : "",boundary:!options.single}); }
+      else if (ch === "\u0006") { flush(); segments.push({text:"",quoted:true,splittable:false}); }
+      else if (ch === "\u0007") { flush(); }
+      else if (ch === "\u0000") { flush(); segments.push({text:text[++i] ?? "",quoted:true,splittable:false}); }
+      else plain += ch;
+    }
+    flush();
   }
   if (options.single) return [segments.map(({ text }) => text).join("")];
   const fields = splitFields(segments, state);
@@ -1584,8 +1633,9 @@ const builtins = {
   "..": async (_argv, state) => changeDirectory(state, ".."),
   "//": async (_argv, state) => previousChildDirectory(state),
   export: async (argv, state) => {
-    if (argv.length === 1) {
+    if (argv.length === 1 || argv.length === 2 && argv[1] === "-p") {
       const listing = Object.entries(state.env)
+        .filter(([name]) => !state.shellOptions.posix || state.exported.has(name))
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([name, value]) => `export ${name}=${JSON.stringify(value)}\n`)
         .join("");
@@ -1600,6 +1650,7 @@ const builtins = {
       else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(item))
         state.env[item] ??= "";
       else return result(1, "", `bunmsh: export: ${item}: invalid name\n`);
+      state.exported.add(assignment?.name ?? item);
     }
     return result();
   },
@@ -1611,6 +1662,7 @@ const builtins = {
         return result(1, "", `bunmsh: unset: ${name}: invalid name\n`);
       if (state.readonly.has(name)) return readonlyError(name);
       delete state.env[name];
+      state.exported.delete(name);
     }
     return result();
   },
@@ -1636,7 +1688,7 @@ const builtins = {
     return result();
   },
   env: async (argv, state, input, context = {}) => {
-    let env = { ...state.env };
+    let env = { ...externalEnvironment(state) };
     let i = 1;
     for (; i < argv.length; i++) {
       const item = argv[i];
@@ -1658,6 +1710,7 @@ const builtins = {
     const childState = {
       ...state,
       env,
+      exported: new Set(Object.keys(env)),
       directoryHistory: [...state.directoryHistory],
       tabs: [...state.tabs],
       readonly: new Set(state.readonly),
@@ -1804,7 +1857,7 @@ const builtins = {
   set: async (argv, state) => {
     if (argv.length === 1)
       return result(0, Object.entries(state.env).sort().map(([k, v]) => `${k}=${JSON.stringify(v)}\n`).join(""));
-    const names = {errexit:"e",nounset:"u",noglob:"f",xtrace:"x",verbose:"v"};
+    const names = {errexit:"e",nounset:"u",noglob:"f",xtrace:"x",verbose:"v",posix:"posix"};
     let i = 1;
     for (; i < argv.length; i++) {
       const item = argv[i];
@@ -1814,7 +1867,6 @@ const builtins = {
       if (item === "-o" || item === "+o") {
         if (argv[i+1] === undefined) return result(0,Object.entries(names).map(([name,key]) => enabled ? `${name} ${state.shellOptions[key] ? "on" : "off"}\n` : `set ${state.shellOptions[key] ? "-" : "+"}o ${name}\n`).join(""));
         const name = argv[++i];
-        if (name === "posix") continue;
         if (!names[name]) return result(2,"",`bunmsh: set: unknown option ${name}\n`);
         state.shellOptions[names[name]] = enabled;
       } else {
@@ -1850,9 +1902,12 @@ export function bunShellFallbackArgv(argv) {
 }
 
 async function runBunShellFallback(argv, state) {
+  // Bun.$ rejects an empty operand list even with rm -f. Autoconf probes it.
+  if (argv[0] === "rm" && argv.length > 1 && argv.slice(1).every(arg => /^-[frRi]+$/.test(arg) || arg === "--") &&
+      argv.slice(1).join("").lastIndexOf("f") > argv.slice(1).join("").lastIndexOf("i")) return result();
   const shell = Bun.$`${bunShellFallbackArgv(argv)}`
     .cwd(nativePath(state.cwd))
-    .env(state.env)
+    .env(externalEnvironment(state))
     .nothrow();
   if (state.pipelineChild) {
     const output = await shell;
@@ -1875,7 +1930,7 @@ async function runBunShellCpFallback(argv, state) {
     cmd,
     cwd: nativePath(state.cwd),
     env: {
-      ...state.env,
+      ...externalEnvironment(state),
       BUN_ENABLE_EXPERIMENTAL_SHELL_BUILTINS: "1",
     },
     stdin: "inherit",
@@ -1897,7 +1952,7 @@ async function runReflectedProcess(cmd, state) {
     const proc = Bun.spawn({
       cmd,
       cwd: nativePath(state.cwd),
-      env: state.env,
+      env: externalEnvironment(state),
       stdin: "inherit",
       stdout: inherit ? "inherit" : "pipe",
       stderr: inherit ? "inherit" : "pipe",
@@ -2217,7 +2272,7 @@ async function runCurlFallback(argv, state, input, context = {}) {
   const stderr = [];
   const io = {
     cwd: nativePath(state.cwd),
-    env: state.env,
+    env: externalEnvironment(state),
     stdoutIsTTY: streamStdout && Boolean(process.stdout.isTTY),
     readStdin: () => readFallbackInput(input),
     async writeStdout(chunk) {
@@ -2781,7 +2836,7 @@ async function queryProcessList(name, state) {
     proc = Bun.spawn({
       cmd: command,
       cwd: nativePath(state.cwd),
-      env: state.env,
+      env: externalEnvironment(state),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -3062,8 +3117,14 @@ function formatMilliseconds(milliseconds, color = Boolean(process.stderr.isTTY))
   return output;
 }
 
+function externalEnvironment(state) {
+  if (!state.shellOptions.posix) return state.env;
+  return Object.fromEntries(Object.entries(state.env).filter(([name]) =>
+    state.exported.has(name) || name === PIPELINE_STATE_ENV));
+}
+
 export function createState(options = {}) {
-  const env = canonicalEnvironment({ ...process.env, ...(options.env ?? {}) });
+  const env = canonicalEnvironment({ ...(options.inheritEnvironment === false ? {} : process.env), ...(options.env ?? {}) });
   const cwd = shellPath(options.cwd ?? process.cwd());
   env.PWD = cwd;
   return {
@@ -3078,6 +3139,7 @@ export function createState(options = {}) {
     mouseTracking: options.mouseTracking ?? /^(?:1|true|on|yes)$/i.test(env.BUNMSH_MOUSE ?? ""),
     pathSearch: options.pathSearch ?? true,
     readonly: new Set(options.readonly ?? []),
+    exported: new Set(options.exported ?? Object.keys(env)),
     getoptsOffset: 1,
     args: options.args ?? ["bunmsh"],
     lastStatus: 0,
@@ -3114,7 +3176,7 @@ function hasCompoundSyntax(source) {
   return false;
 }
 
-function compoundLogicalSource(source) {
+function compoundLogicalSource(source, firstLine = 1, sourceLines = null) {
   const tokens = tokenize(source);
   const breaks = new Set();
   let commandStart = true;
@@ -3157,11 +3219,15 @@ function compoundLogicalSource(source) {
       breaks.add(tokens[index + 1].offset);
     commandStart = ["if", "while", "until", "elif", "then", "do", "else"].includes(word);
   }
-  let logical = source;
-  for (const offset of [...breaks].sort((a, b) => b - a))
-    if (offset > 0 && source[offset - 1] !== "\n")
-      logical = `${logical.slice(0, offset)}\n${logical.slice(offset)}`;
-  return logical;
+  let logical = "", line = firstLine, physicalIndex = 0;
+  const lineNumbers = [line];
+  for (let i = 0; i < source.length; i++) {
+    if (breaks.has(i) && i > 0 && source[i - 1] !== "\n") { logical += "\n"; lineNumbers.push(line); }
+    if (source[i] === "\\" && source[i + 1] === "\n") { i++; line = sourceLines?.[++physicalIndex] ?? line + 1; continue; }
+    logical += source[i];
+    if (source[i] === "\n") { line = sourceLines?.[++physicalIndex] ?? line + 1; lineNumbers.push(line); }
+  }
+  return {logical, lineNumbers};
 }
 
 // A leaf command inside a compound body may continue across physical lines
@@ -3203,7 +3269,7 @@ function makeCompoundPostfix(compound, suffix, source, nextLine) {
   if (redirectionText && !redirectionText.startsWith("#")) {
     if (redirectionText === "&") throw new ShellSyntaxError("&: only a single external command is supported");
     const parsed = parse(`: ${redirectionText}`)[0]?.pipeline[0];
-    if (!parsed || parsed.words.length !== 1) throw new ShellSyntaxError(`unexpected compound suffix: ${redirectionText}`);
+    if (!parsed || parsed.words.length !== 1) throw new ShellSyntaxError(`unexpected compound suffix: ${redirectionText} after ${compound.source.slice(0,120)}`);
     compound = {type:"redirected", compound, redirects:parsed.redirects, source:compound.source + " " + redirectionText};
     suffix = connector ? suffix.slice(connector.offset) : "";
   }
@@ -3211,13 +3277,17 @@ function makeCompoundPostfix(compound, suffix, source, nextLine) {
   const match = /^\s*(\|\||&&|\||;)\s*(.*)$/.exec(suffix ?? "");
   if (!match) return { node: compound, nextLine };
   let command = match[2].trim();
+  let commandLine = null;
   if (match[1] === ";" && (!command || command.startsWith("#"))) return { node: compound, nextLine };
   while (!command && nextLine < source.length) {
+    commandLine = nextLine;
     command = source[nextLine++].trim();
     if (!command || command.startsWith("#")) command = "";
   }
   if (!command)
     throw new ShellSyntaxError(`compound command requires a command after ${match[1]}`);
+  if (commandLine !== null && /^(?:\{|if\b|case\b|for\b|while\b|until\b|\()/.test(command))
+    return {node:{type:"compoundPostfix",compound,operator:match[1],rightPending:true},nextLine:commandLine};
   return {
     node: {
       type: "compoundPostfix",
@@ -3319,7 +3389,7 @@ function caseKeywords(tokens) {
   return words;
 }
 
-function parseCaseArms(source) {
+function parseCaseArms(source, sourceLines) {
   const arms = [];
   let i = 0;
   const skipSpace = () => {
@@ -3385,10 +3455,11 @@ function parseCaseArms(source) {
       if (source.slice(bodyStart, i).trim() || arms.length) terminator = ";;";
       else throw new ShellSyntaxError("unterminated case clause");
     }
-    const bodySource = source.slice(bodyStart, i).trim();
+    const bodySource = source.slice(bodyStart, i);
     let body;
     try {
-      body = parseCompoundScript(bodySource);
+      const first = source.slice(0,bodyStart).split("\n").length - 1;
+      body = parseCompoundScript(bodySource, sourceLines?.[first] ?? 1, sourceLines?.slice(first));
     } catch (error) {
       if (error instanceof ShellSyntaxError)
         error.message += ` in case arm ${patterns.join("|")}`;
@@ -3400,8 +3471,41 @@ function parseCaseArms(source) {
   return arms;
 }
 
-export function parseCompoundScript(source) {
-  const lines = compoundLogicalSource(source.replace(/\\\r?\n/g, "")).split(/\r?\n/);
+function readCompoundHeader(lines, start, keyword) {
+  let source = "";
+  for (let end = start; end < lines.length; end++) {
+    source += (end === start ? "" : "\n") + lines[end];
+    let tokens;
+    try { tokens = tokenize(source, {strict:true}); } catch (error) {
+      if (error.message.startsWith("unterminated")) continue;
+      throw error;
+    }
+    const stack = [];
+    let commandStart = true;
+    for (let index = 1; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (token.type === "op") {
+        if ([";", "&&", "||", "|"].includes(token.value)) commandStart = true;
+        continue;
+      }
+      const word = token.fragments.length === 1 && token.fragments[0].quote === "none" ? token.fragments[0].text : null;
+      if (commandStart && word === keyword && !stack.length) {
+        return {condition:source.slice(tokens[0].offset + tokens[0].fragments[0].text.length, token.offset).trim(),
+          tail:source.slice(token.offset + keyword.length).trim(), end};
+      }
+      if (commandStart && ["{", "if", "case", "while", "until", "for"].includes(word)) {
+        stack.push(word === "{" ? "}" : word === "if" ? "fi" : word === "case" ? "esac" : "done");
+      } else if (word === stack.at(-1)) stack.pop();
+      if (commandStart && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word ?? "")) continue;
+      commandStart = ["{", "if", "while", "until", "then", "do", "else", "elif"].includes(word);
+    }
+  }
+  throw new ShellSyntaxError(`unterminated condition: expected ${keyword}`);
+}
+
+export function parseCompoundScript(source, firstLine = 1, sourceLines = null) {
+  const {logical, lineNumbers} = compoundLogicalSource(source, firstLine, sourceLines);
+  const lines = logical.split(/\r?\n/);
   const parseSequence = (start, stops = []) => {
     const nodes = [];
     let i = start;
@@ -3434,38 +3538,36 @@ export function parseCompoundScript(source) {
         continue;
       }
 
-      const subshellMatch = /^\((.*)\)\s*;?$/.exec(trimmed);
-      if (subshellMatch) {
-        nodes.push({ type: "subshell", source: subshellMatch[1] });
-        i++;
-        continue;
+      if (trimmed.startsWith("(")) {
+        let end=i, text=line, group=leadingSubshell(text);
+        while (!group && ++end < lines.length) { text += `\n${lines[end]}`; group=leadingSubshell(text); }
+        if (!group) throw new ShellSyntaxError("unterminated subshell");
+        // Preserve the existing rewriteSubshells -> external Bun path for &.
+        if (group.suffix.trim() === "&") {
+          nodes.push({type:"command",source:text,lineNumber:lineNumbers[i]}); i=end+1; continue;
+        }
+        const compound={type:"subshell",source:group.body};
+        const postfix=makeCompoundPostfix(compound,group.suffix,lines,end+1);
+        nodes.push(postfix.node); i=postfix.nextLine; continue;
       }
 
       if (/^if(?:\s|$)/.test(trimmed)) {
         const compoundStart = i;
         const branches = [];
-        let header = trimmed;
-        while (!/(?:;\s*|\s+)then(?:\s+.*)?$/.test(header) && ++i < lines.length)
-          header += ` ${lines[i].trim()}`;
-        let then = /(?:;\s*|\s+)then(?:\s+(.*))?$/.exec(header);
-        if (!then) throw new ShellSyntaxError("if requires then");
-        let condition = header.slice(0, then.index).replace(/^if\s*/, "").trim();
-        let thenCommand = then[1]?.trim() ?? "";
-        i++;
+        let header = readCompoundHeader(lines, i, "then");
+        let condition = header.condition;
+        let thenCommand = header.tail;
+        i = header.end + 1;
         while (true) {
           const body = parseSequence(i, [/^elif(?:\s|$)/, /^else\s*;?$/, /^fi\b/]);
           branches.push({ condition, body: body.nodes, thenCommand });
           i = body.index;
           const stop = lines[i]?.trim() ?? "";
           if (/^elif(?:\s|$)/.test(stop)) {
-            header = stop;
-            while (!/(?:;\s*|\s+)then(?:\s+.*)?$/.test(header) && ++i < lines.length)
-              header += ` ${lines[i].trim()}`;
-            then = /(?:;\s*|\s+)then(?:\s+(.*))?$/.exec(header);
-            if (!then) throw new ShellSyntaxError("elif requires then");
-            condition = header.slice(0, then.index).replace(/^elif\s*/, "").trim();
-            thenCommand = then[1]?.trim() ?? "";
-            i++;
+            header = readCompoundHeader(lines, i, "then");
+            condition = header.condition;
+            thenCommand = header.tail;
+            i = header.end + 1;
             continue;
           }
           let otherwise = [];
@@ -3547,9 +3649,11 @@ export function parseCompoundScript(source) {
       }
       if (/^case(?:\s|$)/.test(trimmed)) {
         const remaining = lines.slice(i).join("\n");
-        const header = /^case\s+(.+?)\s+in(?:\s|$)/.exec(remaining);
-        if (!header) throw new ShellSyntaxError("case requires in");
-        const start = header[0].length;
+        const headerTokens=tokenize(remaining).slice(0,3);
+        if (headerTokens[2]?.fragments?.map(f=>f.text).join("") !== "in")
+          throw new ShellSyntaxError(`case requires in: ${remaining.slice(0,180)}`);
+        const caseWord=remaining.slice(headerTokens[1].offset,headerTokens[2].offset).trim();
+        const start = headerTokens[2].offset + 2;
         let depth = 0, end = -1;
         for (const [offset, word] of caseKeywords(tokenize(remaining.slice(start)))) {
           if (word === "case") depth++;
@@ -3559,7 +3663,7 @@ export function parseCompoundScript(source) {
           }
         }
         if (end < 0) throw new ShellSyntaxError(`unterminated case: ${trimmed}`);
-        const compound = {type:"case", word:header[1], arms:parseCaseArms(remaining.slice(start,end)), source:remaining.slice(0,end+4)};
+        const compound = {type:"case", word:caseWord, arms:parseCaseArms(remaining.slice(start,end),lineNumbers.slice(i + remaining.slice(0,start).split("\n").length - 1)), source:remaining.slice(0,end+4)};
         const nextLine = i + remaining.slice(0,end+4).split("\n").length;
         const suffix = remaining.slice(end+4).split("\n")[0];
         const postfix = makeCompoundPostfix(compound,suffix,lines,nextLine);
@@ -3568,12 +3672,15 @@ export function parseCompoundScript(source) {
         continue;
       }
       const grown = growLogicalCommand(lines, i);
-      nodes.push({ type: "command", source: grown.source });
+      nodes.push({ type: "command", source: grown.source, lineNumber:lineNumbers[i], sourceLines:lineNumbers.slice(i,grown.next) });
       i = grown.next;
     }
     for (let n = nodes.length - 2; n >= 0; n--) {
+      if (nodes[n].rightPending) {
+        nodes[n].right = nodes[n+1]; delete nodes[n].rightPending; nodes.splice(n+1,1); continue;
+      }
       if (nodes[n].type !== "command") continue;
-      const logical = /^(.*?)(\&\&|\|\|)\s*$/s.exec(nodes[n].source);
+      const logical = /^(.*?)(\&\&|\|\||\|)\s*$/s.exec(nodes[n].source);
       if (!logical) continue;
       nodes.splice(n,2,{type:"compoundPostfix",compound:{type:"command",source:logical[1]},operator:logical[2],right:nodes[n+1]});
     }
@@ -3658,13 +3765,14 @@ async function executeNodeList(nodes, state, options = {}) {
           aliases: { ...state.aliases },
           functions: { ...state.functions },
           readonly: new Set(state.readonly),
+          exported: new Set(state.exported),
           directoryHistory: [...state.directoryHistory],
           tabs: [...state.tabs],
           exitRequested: false,
           exitStatus: 0,
         };
         const right = await runExternal(
-          pipelineCompoundArgv(node.command),
+          pipelineCompoundArgv(node.right?.source ?? node.command),
           pipelineBuiltinState(rightState),
           link.readable,
           true,
@@ -3704,7 +3812,7 @@ async function executeNodeList(nodes, state, options = {}) {
       continue;
     }
     if (node.type === "command") {
-      execution = await execute(node.source, state, { capture, simple: true });
+      execution = await execute(node.source, state, { capture, simple: true, firstLine:node.lineNumber, sourceLines:node.sourceLines });
       append(execution);
       continue;
     }
@@ -3849,7 +3957,7 @@ async function runExternal(
   const options = {
     cmd: spawnArgv,
     cwd: nativePath(state.cwd),
-    env: state.env,
+    env: externalEnvironment(state),
     stdin: runtimeOptions.background ? "ignore" : input === null ? "inherit" : input,
     stdout: runtimeOptions.background ? "inherit" : captureStdout || stdoutSink ? "pipe" : "inherit",
     stderr: runtimeOptions.background ? "inherit" : captureStderr || runtimeOptions.stderrSink ? "pipe" : "inherit",
@@ -3857,7 +3965,15 @@ async function runExternal(
       runtimeOptions.onExit?.(proc, exitCode, signalCode, error);
     },
   };
+  let stateDirectory;
   try {
+    const serialized = options.env[PIPELINE_STATE_ENV];
+    if (serialized?.length > 2048 && !runtimeOptions.background) {
+      stateDirectory = mkdtempSync(resolvePath(tmpdir(), "bunmsh-state-"));
+      const file = resolvePath(stateDirectory, "state.json");
+      writeFileSync(file, serialized, {mode:0o600});
+      options.env = {...options.env, [PIPELINE_STATE_ENV]: `@file:${file}`};
+    }
     if (!runtimeOptions.background) {
       options.stdout = runtimeOptions.stdoutFd ?? options.stdout;
       options.stderr = runtimeOptions.stderrFd ?? options.stderr;
@@ -3928,6 +4044,10 @@ async function runExternal(
     return execution;
   } catch (error) {
     return result(127, "", `bunmsh: ${argv[0]}: ${error.message}\n`);
+  } finally {
+    if (stateDirectory) {
+      try { unlinkSync(resolvePath(stateDirectory,"state.json")); rmdirSync(stateDirectory); } catch {}
+    }
   }
 }
 
@@ -3952,11 +4072,39 @@ function pipelineCompoundArgv(source) {
     : [...BUN_RUNTIME_COMMAND, BUNMSH_ENTRY, "-c", source];
 }
 
+function heredocRanges(source, tokens = tokenize(source)) {
+  const ranges = new Map();
+  let previousEnd = 0;
+  for (const token of tokens) {
+    if (!token.heredoc) continue;
+    const delimiter = token.fragments.map(f=>f.text.replaceAll("\u0000", "")).join("");
+    const start = Math.max(source.indexOf("\n",token.offset)+1, previousEnd);
+    if (!start) continue;
+    let end=start;
+    while (end < source.length) {
+      const newline=source.indexOf("\n",end);
+      const lineEnd=newline<0 ? source.length : newline;
+      const line=source.slice(end,lineEnd);
+      end=newline<0 ? source.length : newline+1;
+      if (line === delimiter || line.replace(/^\t+/,"") === delimiter) break;
+    }
+    ranges.set(start,end); previousEnd=end;
+  }
+  return ranges;
+}
+
 function leadingSubshell(source) {
   const leading = source.length - source.trimStart().length;
   if (source[leading] !== "(") return null;
   let depth = 0, quote = null;
+  let keywords, ranges;
+  try { const tokens=tokenize(source); keywords = caseKeywords(tokens); ranges=heredocRanges(source,tokens); } catch (error) {
+    if (error.message.startsWith("unterminated")) return null;
+    throw error;
+  }
+  const cases = [];
   for (let i = leading; i < source.length; i++) {
+    if (ranges.has(i)) { i=ranges.get(i)-1; continue; }
     const ch = source[i];
     if (quote === "'") { if (ch === "'") quote = null; continue; }
     if (quote === '"') {
@@ -3964,6 +4112,14 @@ function leadingSubshell(source) {
       if (ch === '"') quote = null;
       continue;
     }
+    if (ch === "#" && (i === leading || /[\s;|&]/.test(source[i-1]))) {
+      const end=source.indexOf("\n",i); if (end<0) return null; i=end; continue;
+    }
+    const keyword=keywords.get(i);
+    if (keyword === "case") cases.push("head");
+    else if (keyword === "esac") cases.pop();
+    if (cases.at(-1) === "head" && source.slice(i).match(/^in(?:\s|$)/) && /\s/.test(source[i-1] ?? "")) cases[cases.length-1]="pattern";
+    if (cases.at(-1) === "body" && source.startsWith(";;",i)) cases[cases.length-1]="pattern";
     if (ch === "\\") { i++; continue; }
     if (ch === "'" || ch === '"') { quote = ch; continue; }
     if (ch === "`") {
@@ -3972,6 +4128,10 @@ function leadingSubshell(source) {
     }
     if (ch === "$" && source[i + 1] === "(") {
       try { i = substitutionEnd(source, i) - 1; } catch { return null; }
+      continue;
+    }
+    if (cases.at(-1) === "pattern" && (ch === "(" || ch === ")")) {
+      if (ch === ")") cases[cases.length-1]="body";
       continue;
     }
     if (ch === "(") depth++;
@@ -3983,7 +4143,9 @@ function leadingSubshell(source) {
 
 function rewriteSubshells(source, state) {
   let output = "", quote = null;
+  const ranges=heredocRanges(source);
   for (let i = 0; i < source.length;) {
+    if (ranges.has(i)) { const end=ranges.get(i); output+=source.slice(i,end); i=end; continue; }
     const ch = source[i];
     if (quote === "'") {
       output += ch;
@@ -4031,6 +4193,8 @@ function pipelineBuiltinState(state) {
     env: {
       ...state.env,
       [PIPELINE_STATE_ENV]: JSON.stringify({
+        env: Object.fromEntries(Object.entries(state.env).filter(([name]) => name !== PIPELINE_STATE_ENV)),
+        exported: [...state.exported],
         aliases: state.aliases,
         functions: state.functions,
         readonly: [...state.readonly],
@@ -4286,6 +4450,7 @@ function redirectHeredoc(content) {
 
 async function runCommand(command, state, options = {}) {
   state.expansionStatus = null;
+  if (command.lineNumber != null) state.lineNumber = command.lineNumber;
   const standaloneTilde =
     command.words.length === 1 &&
     command.words[0].fragments.length === 1 &&
@@ -4314,7 +4479,8 @@ async function runCommand(command, state, options = {}) {
     localEnv[assignment.name] = assignment.value;
     expanded.shift();
   }
-  if (expanded.length === 0) {
+  const assignmentOnly = expanded.length === 0;
+  if (assignmentOnly) {
     for (const name of Object.keys(localEnv))
       if (state.readonly.has(name)) return readonlyError(name);
     Object.assign(state.env, localEnv);
@@ -4324,6 +4490,9 @@ async function runCommand(command, state, options = {}) {
   const alias = aliasEligible ? state.aliases[expanded[0]] : null;
   if (alias) expanded.splice(0, 1, ...alias);
 
+  const prefixSaved = new Map();
+  const special = [":", ".", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set", "shift", "trap", "unset"].includes(expanded[0]);
+  const temporaryPrefix = state.shellOptions.posix && !assignmentOnly && !special;
   const previousBindings = state.fdBindings;
   const bindings = {...previousBindings};
   if (options.stdoutSink) bindings[1] = {channel:1};
@@ -4368,11 +4537,14 @@ async function runCommand(command, state, options = {}) {
         bindings[fd] = {fd:handle};
       }
     }
-    const commandState = options.subshell ? {...state,env:{...state.env,...localEnv},fdBindings:bindings,flow:null,loopDepth:0,returnDepth:0} : state;
+    const commandState = options.subshell ? {...state,env:{...state.env,...localEnv},exported:new Set(state.exported),fdBindings:bindings,flow:null,loopDepth:0,returnDepth:0} : state;
     if (!options.subshell) {
       for (const name of Object.keys(localEnv)) if (state.readonly.has(name)) return readonlyError(name);
+      if (temporaryPrefix) for (const name of Object.keys(localEnv))
+        prefixSaved.set(name, {present:Object.hasOwn(state.env,name),value:state.env[name],exported:state.exported.has(name)});
       Object.assign(commandState.env,localEnv);
     }
+    if (!assignmentOnly) for (const name of Object.keys(localEnv)) commandState.exported.add(name);
     commandState.fdBindings = bindings;
     if (persistent) {
       for (const fd of opened) state.ownedFds.add(fd);
@@ -4417,6 +4589,10 @@ async function runCommand(command, state, options = {}) {
     persistent = false;
     return result(1,"",`bunmsh: ${error.message}\n`);
   } finally {
+    for (const [name,saved] of prefixSaved) {
+      if (saved.present) state.env[name]=saved.value; else delete state.env[name];
+      if (saved.exported) state.exported.add(name); else state.exported.delete(name);
+    }
     if (!persistent) {
       if (options.subshell) state.fdBindings = previousBindings;
       else if (command.redirects.length) {
@@ -4617,7 +4793,7 @@ async function executeInternal(source, state, io) {
   if (compoundSyntax) {
     let execution;
     try {
-      execution = await executeNodeList(parseCompoundScript(source), state, {
+      execution = await executeNodeList(parseCompoundScript(source, io.firstLine ?? 1, io.sourceLines), state, {
         capture: Boolean(io.capture),
         input: io.input ?? null,
       });
@@ -4643,6 +4819,7 @@ async function executeInternal(source, state, io) {
   let jobs;
   try {
     jobs = parse(source);
+    for (const job of jobs) for (const command of job.pipeline) command.lineNumber = io.sourceLines?.[command.lineNumber-1] ?? command.lineNumber + (io.firstLine ?? 1) - 1;
   } catch (error) {
     const message = error instanceof ShellSyntaxError ? error.message : String(error);
     const output = `bunmsh: syntax error: ${message}\n`;
@@ -4713,11 +4890,13 @@ export function pipelineChildState() {
   const serialized = process.env[PIPELINE_STATE_ENV];
   if (!serialized) return createState();
   try {
-    const inherited = JSON.parse(serialized);
-    const env = { ...process.env };
+    const inherited = JSON.parse(serialized.startsWith("@file:") ? readFileSync(serialized.slice(6),"utf8") : serialized);
+    const env = { ...process.env, ...(inherited.env ?? {}) };
     delete env[PIPELINE_STATE_ENV];
     return createState({
       env,
+      inheritEnvironment: false,
+      exported: inherited.exported,
       cwd: process.cwd(),
       aliases: inherited.aliases,
       functions: inherited.functions,

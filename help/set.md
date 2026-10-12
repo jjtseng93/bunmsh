@@ -17,8 +17,8 @@ set [-eufxv] [+eufxv] [-o NAME | +o NAME] [-- [ARG ...]]
 - `-f` / `+f`: disable/enable pathname expansion.
 - `-x` / `+x`: enable/disable execution tracing.
 - `-o` / `+o` without a name: list named option states / reusable set commands.
-- Names: `errexit`, `nounset`, `noglob`, `xtrace`, `verbose`. CLI `-v` prints initial input; incremental verbose reading is not yet implemented.
-- `-o posix`: accepted for configure compatibility, not a guarantee of complete POSIX semantics.
+- Names: `errexit`, `nounset`, `noglob`, `xtrace`, `verbose`, `posix`. CLI `-v` prints initial input; incremental verbose reading is not yet implemented.
+- `-o posix`: enable compatibility mode. The fallback `ls` prints without icons or automatic directory suffixes; `lsfancy` remains decorative. External programs receive only inherited/exported variables and command-prefix assignments; pipelines and subshells still receive complete shell state. Use `+o posix` to restore the default, which passes all variables to external programs. This option is not a guarantee of complete POSIX semantics.
 
 ### Example
 

@@ -53,7 +53,13 @@ pseudo-terminal tests.
   non-final AND/OR commands and negation, following mksh XERROK. `set -u`,
   `set -f`, `set -x`, option queries and corresponding CLI flags are supported.
   `-v` currently prints initial CLI input only; it is not an incremental reader.
-  `set -o posix` is accepted but does not imply full POSIX conformance.
+  `set -o posix` is listed and stored as an option. It makes fallback `ls`
+  omit icons and automatic directory suffixes; `lsfancy` remains decorative.
+  External environments in this mode contain only inherited/exported names
+  and command-prefix assignments. Full variables and export attributes travel
+  with internal pipeline/subshell state, separately from the native environment.
+  Default mode continues passing all shell variables to external programs.
+  It does not imply full POSIX conformance.
 - Functions and subshells cover practical cases but do not yet reproduce every
   mksh scoping, local-variable, trap, and diagnostic edge case.
 - Pipelines isolate builtin/function state through subprocess copies. Changes
@@ -233,8 +239,18 @@ Tests were run with musl Bun 1.4.2 in `bunproot -r rfs1`. The guest's `/bin/sh`
 is itself bunmsh, so reference.test.js comparisons there would not constitute
 an independent POSIX oracle.
 
-GNU make 4.4.1 configure still does not complete: its LINENO fallback needs sed
-labels/branches/multiline pattern-space operations not implemented by the
-current fallback sed. Shell LINENO tracking is not implemented either.
-The Autoconf `${1+"$@"}` re-exec idiom also needs expansion work to retain
-argument boundaries. These are remaining blockers, not a successful configure.
+The next configure compatibility batch adds physical source-line tracking for
+ordinary commands and nested function/case bodies, quoted parameter operands
+(including `${1+"$@"}`), compound conditions containing nested groups/if, and
+multiline subshells containing case clauses. LINENO handling is not yet complete
+for every condition, eval, subshell, or user-assignment edge case.
+
+Subprocess state still includes the complete function AST. Large internal state
+uses a private temporary file cleaned by the spawning foreground process. This
+avoids the observed bunproot environment-string limit without changing the
+Bun.sha.procs registry or background process lifecycle.
+
+GNU make 4.4.1 configure validation is ongoing; no complete run is claimed.
+Its LINENO/re-exec blockers and large unexported test-source environment values
+have dedicated regressions. Autoconf's multiline case wildcard now detects the
+listed posix option and enables it. Further utility/parser blockers may remain.

@@ -6,6 +6,23 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Added and fixed
 
+- Expand parameters and substitutions inside arithmetic, including Autoconf `$(( $* ))`.
+
+- In `set -o posix` mode, send only exported variables and command-prefix
+  assignments to external programs, while preserving complete internal state
+  for pipeline/subshell Bun children. Default mode still passes all variables.
+- Match newlines with case wildcards, including Autoconf POSIX-mode detection.
+- Keep heredoc contents out of subshell rewriting, support pipelines feeding
+  compound cases, and accept operand-free rm -f.
+
+- Track command source lines, preserve quotes and argument boundaries in selected
+  parameter operands, and parse nested compound conditions and subshell cases.
+- Make `set -o posix` an observable option: only this mode removes fallback ls
+  icons and implicit directory suffixes. Normal ls and lsfancy retain icons.
+- Support ls inode/dereference options and sorting multiple file operands.
+- Transport large internal subprocess state through a private temporary file;
+  retain the full function AST and clean up after foreground execution.
+
 - Accept inline and next-line function braces, brace groups with redirects and
   pipelines, multiline pipelines, and nested case clauses with here-documents.
 - Implement return and counted break/continue with function/source/loop boundaries.

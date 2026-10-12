@@ -151,3 +151,75 @@ test("fd numbers are recognized only at unquoted token boundaries", async () => 
     expect(r.stdout).toBe('word2\n'); expect(r.stderr).toBe('');
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
+test("parameter operands retain quoted argument boundaries and empty arguments", async () => {
+  let r = await run('set -- "one two" "" "*"\nprintf "<%s>\\n" ${1+"$@"}\nprintf "<%s>\\n" pre"$@"post');
+  expect(r.stdout).toBe('<one two>\n<>\n<*>\n<preone two>\n<>\n<*post>\n'); expect(r.stderr).toBe('');
+  r = await run('set --\nfor x in ${1+"$@"} "$@"; do echo BAD; done\nprintf "<%s>\\n" ${missing:-"a b"} ${missing:-${other:-"c d"}}');
+  expect(r.stdout).toBe('<a b>\n<c d>\n'); expect(r.stderr).toBe('');
+});
+test("LINENO uses physical source lines through compound normalization", async () => {
+  const r = await run('echo "$LINENO"\nif true; then echo "$LINENO"; fi\n# comment\necho "$LINENO"\nf () {\n echo "$LINENO"\n}\nf');
+  expect(r.stdout).toBe('1\n2\n4\n6\n'); expect(r.stderr).toBe('');
+});
+test("command substitutions capture stdout inside redirected groups", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-substitution-'));
+  try {
+    const path=join(dir,'log');
+    const r=await run(`{ x=$(printf kept); echo "$x"; } >'${path}'\necho "$x"`);
+    expect(r.stdout).toBe('kept\n'); expect(readFileSync(path,'utf8')).toBe('kept\n'); expect(r.stderr).toBe('');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test("nested compound conditions do not terminate at an inner then", async () => {
+  const r=await run('f () {\n if { if true; then echo inner; fi; } && { test x = x; }\n then echo outer\n else echo BAD\n fi\n}\nf\n(\necho subshell\n) | cat');
+  expect(r.stdout).toBe('inner\nouter\nsubshell\n'); expect(r.stderr).toBe('');
+});
+test("large function state survives pipeline subprocess transport", async () => {
+  const r=await run(`f () {\n : '${'padding'.repeat(1000)}'\n echo function\n}\nf | cat`);
+  expect(r.stdout).toBe('function\n'); expect(r.stderr).toBe(''); expect(r.status).toBe(0);
+});
+test("only posix mode removes ls icons and survives pipeline state transfer", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-posix-ls-'));
+  try {
+    const path=join(dir,'file'); writeFileSync(path,'x');
+    const r=await run(`ls '${path}'\nset -o posix\nls '${path}' | cat\nlsfancy '${path}'\nset +o posix\nls '${path}'`);
+    expect(r.stdout).toBe(`📄 ${path}\n${path}\n📄 ${path}\n📄 ${path}\n`); expect(r.stderr).toBe('');
+    const options=await run('set -o\nset -o posix\necho "flags=$-"\nset +o');
+    expect(options.stdout).toContain('posix off\n'); expect(options.stdout).toContain('flags=\n'); expect(options.stdout).toContain('set -o posix\n');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test("LINENO retains original lines in nested case arms", async () => {
+  const r=await run('echo "$LINENO"\ncase x in\nx)\n case y in y)\n echo "$LINENO"\n ;; esac\n ;;\nesac\necho "$LINENO"');
+  expect(r.stdout).toBe('1\n5\n9\n'); expect(r.stderr).toBe('');
+});
+test("posix isolates external environments while default mode exports all values", async () => {
+  const child=`'${process.execPath}' -e 'console.log([process.env.BUNMSH_PRIVATE??"missing",process.env.BUNMSH_PUBLIC??"missing"].join("/"))'`;
+  const r=await run(`unset BUNMSH_PRIVATE BUNMSH_PUBLIC\nBUNMSH_PRIVATE=private\nBUNMSH_PUBLIC=public\n${child}\nset -o posix\nexport BUNMSH_PUBLIC\n${child}\nBUNMSH_PRIVATE=temporary ${child}\necho "$BUNMSH_PRIVATE"\nunset BUNMSH_PUBLIC\nBUNMSH_PUBLIC=unexported\n${child}\nset +o posix\n${child}`);
+  expect(r.stdout).toBe('private/public\nmissing/public\ntemporary/public\nprivate\nmissing/missing\nprivate/unexported\n'); expect(r.stderr).toBe('');
+});
+test("posix subshells retain private values without exporting them to grandchildren", async () => {
+  const child=`'${process.execPath}' -e 'console.log(process.env.BUNMSH_PRIVATE??"missing")'`;
+  const r=await run(`set -o posix\nunset BUNMSH_PRIVATE\nBUNMSH_PRIVATE='${'x'.repeat(6000)}'\nf () { printf "%s\\n" "\${#BUNMSH_PRIVATE}"; ${child}; }\nf | cat\n(f)\nprintf '%s\\n' "$(f)"`);
+  expect(r.stdout).toBe('6000\nmissing\n6000\nmissing\n6000\nmissing\n'); expect(r.stderr).toBe('');
+});
+test("posix env assignments and export attributes survive mode toggles", async () => {
+  const r=await run('unset BUNMSH_PRIVATE BUNMSH_PUBLIC\nBUNMSH_PRIVATE=hidden\nexport BUNMSH_PUBLIC=shown\nset -o posix\nenv -i BUNMSH_PRIVATE=explicit\nexport -p\nset +o posix\nset -o posix\nenv');
+  expect(r.stdout).toContain('BUNMSH_PRIVATE=explicit\n');
+  expect(r.stdout).not.toContain('BUNMSH_PRIVATE=hidden');
+  expect(r.stdout).toContain('BUNMSH_PUBLIC=shown\n'); expect(r.stderr).toBe('');
+});
+test("Autoconf detects and enables posix from multiline option output", async () => {
+  const r=await run('case `(set -o) 2>/dev/null` in *posix*) set -o posix;; esac\nset -o');
+  expect(r.stdout).toContain('posix on\n'); expect(r.stderr).toBe('');
+});
+test("rm force accepts no operands and a pipeline can feed a compound case", async () => {
+  const r=await run('rm -f && rm -fr && rm -rf\nprintf hello | case x in x) cat;; esac');
+  expect(r.stdout).toBe('hello'); expect(r.stderr).toBe(''); expect(r.status).toBe(0);
+});
+test("subshell rewriting leaves C parentheses in heredocs untouched", async () => {
+  const r=await run("ac_ext=c\ncat <<EOF\nint main (void)\n{ return 0; }\nEOF");
+  expect(r.stdout).toBe('int main (void)\n{ return 0; }\n'); expect(r.stderr).toBe('');
+});
+test("arithmetic expands Autoconf positional expressions and nested substitutions", async () => {
+  const r=await run('as_fn_arith () { as_val=$(( $* )); }\nas_fn_arith 10 + 1\necho "$as_val"\nx=3\necho "$(( ${x} + $(echo 2) + $((1 + 1)) ))"');
+  expect(r.status).toBe(0); expect(r.stdout).toBe('11\n7\n'); expect(r.stderr).toBe('');
+});
