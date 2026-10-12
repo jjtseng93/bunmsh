@@ -241,6 +241,37 @@ test("sed reads scripts from a file", async () => {
     expect(r.stdout).toBe('b\n'); expect(r.stderr).toBe('');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
+test("diff distinguishes identical, changed, and inaccessible files", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-diff-'));
+  try {
+    const a=join(dir,'a'),b=join(dir,'b'); writeFileSync(a,'same\nold\n'); writeFileSync(b,'same\nnew\n');
+    let r=await run(`diff '${a}' '${a}'`); expect(r.status).toBe(0); expect(r.stdout).toBe('');
+    r=await run(`diff '${a}' '${b}'`); expect(r.status).toBe(1); expect(r.stdout).toBe('2c2\n< old\n---\n> new\n');
+    r=await run(`diff '${a}' '${b}.missing'`); expect(r.status).toBe(2);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test("diff aligns separated insertions, deletions, repeated lines and final newlines", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-diff-align-'));
+  try {
+    const a=join(dir,'a'), b=join(dir,'b');
+    const cases=[
+      ['a\nb\nc\nd\n','a\nnew\nb\nc\nmore\nd\n','1a2\n> new\n3a5\n> more\n'],
+      ['a\nnew\nb\nc\nmore\nd\n','a\nb\nc\nd\n','2d1\n< new\n5d3\n< more\n'],
+      ['a\nb\nc\nd\ne\n','a\nx\nb\nc\nD\ne\n','1a2\n> x\n4c5\n< d\n---\n> D\n'],
+      ['a\nsame\nsame\nz\n','a\nsame\nnew\nsame\nz\n','2a3\n> new\n'],
+      ['', 'new\n', '0a1\n> new\n'],
+      ['old\n', '', '1d0\n< old\n'],
+      ['a\n', 'a', '1c1\n< a\n---\n> a\n\\ No newline at end of file\n'],
+      ['前\n後\n', '前\n中\n後\n', '1a2\n> 中\n'],
+    ];
+    for (const [before,after,expected] of cases) {
+      writeFileSync(a,before); writeFileSync(b,after);
+      const r=await run(`diff '${a}' '${b}'`);
+      expect(r.status).toBe(1); expect(r.stderr).toBe(''); expect(r.stdout).toBe(expected);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test("arithmetic expands Autoconf positional expressions and nested substitutions", async () => {
   const r=await run('as_fn_arith () { as_val=$(( $* )); }\nas_fn_arith 10 + 1\necho "$as_val"\nx=3\necho "$(( ${x} + $(echo 2) + $((1 + 1)) ))"');
   expect(r.status).toBe(0); expect(r.stdout).toBe('11\n7\n'); expect(r.stderr).toBe('');

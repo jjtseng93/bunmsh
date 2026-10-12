@@ -6,6 +6,8 @@ All notable user-visible changes to bunmsh are documented here.
 
 ### Added and fixed
 
+- Add file diff using the jsmdcui Myers line alignment, with separate insertion,
+  deletion and replacement hunks, binary notices and missing-final-newline markers.
 - Expand parameters and substitutions inside arithmetic, including Autoconf `$(( $* ))`.
 
 - In `set -o posix` mode, send only exported variables and command-prefix

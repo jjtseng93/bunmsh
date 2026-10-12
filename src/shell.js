@@ -1,3 +1,4 @@
+import {normalFileDiff} from "./diff.js";
 import {compileSed, applySed} from "./sed.js";
 import {
   constants as fsConstants,
@@ -3000,7 +3001,27 @@ function runExprFallback(argv) {
   } catch (error) { return result(2,"",`bunmsh: expr: ${error.message}\n`); }
 }
 
+async function runDiffFallback(argv, state) {
+  let brief=false, i=1;
+  for (; i<argv.length && argv[i].startsWith("-"); i++) {
+    if (argv[i] === "--") { i++; break; }
+    if (["-q","--brief"].includes(argv[i])) brief=true;
+    else if (!/^--color(?:=(?:always|auto|never))?$/.test(argv[i]))
+      return result(2,"",`bunmsh: diff: unsupported option: ${argv[i]}\n`);
+  }
+  if (argv.length-i !== 2) return result(2,"","bunmsh: diff: expected two files\n");
+  const [left,right]=argv.slice(i);
+  try {
+    const a=readFileSync(resolvePath(nativePath(state.cwd),nativePath(left)));
+    const b=readFileSync(resolvePath(nativePath(state.cwd),nativePath(right)));
+    if (a.equals(b)) return result();
+    if (brief || a.includes(0) || b.includes(0)) return result(1,`Files ${left} and ${right} differ\n`);
+    return result(1, Buffer.from(normalFileDiff(a.toString("latin1"), b.toString("latin1")), "latin1").toString());
+  } catch(error) {return result(2,"",`bunmsh: diff: ${error.message}\n`);}
+}
+
 const fallbackBuiltins = {
+  diff: runDiffFallback,
   expr: runExprFallback,
   basename: async (argv) => {
     const i = argv[1] === "--" ? 2 : 1;
