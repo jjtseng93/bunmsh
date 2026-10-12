@@ -245,6 +245,8 @@ ordinary commands and nested function/case bodies, quoted parameter operands
 multiline subshells containing case clauses. LINENO handling is not yet complete
 for every condition, eval, subshell, or user-assignment edge case.
 
+The sed fallback now has addresses/ranges, labels/branches, pattern/hold-space
+operations, and text commands; expr provides arithmetic/comparison/BRE matching.
 Subprocess state still includes the complete function AST. Large internal state
 uses a private temporary file cleaned by the spawning foreground process. This
 avoids the observed bunproot environment-string limit without changing the

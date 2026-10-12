@@ -13,10 +13,11 @@ All notable user-visible changes to bunmsh are documented here.
   for pipeline/subshell Bun children. Default mode still passes all variables.
 - Match newlines with case wildcards, including Autoconf POSIX-mode detection.
 - Keep heredoc contents out of subshell rewriting, support pipelines feeding
-  compound cases, and accept operand-free rm -f.
+  compound cases, accept operand-free rm -f, grep -e/-c, and sed -f.
 
 - Track command source lines, preserve quotes and argument boundaries in selected
   parameter operands, and parse nested compound conditions and subshell cases.
+- Add expr and extend fallback sed with addresses, branches and hold-space edits.
 - Make `set -o posix` an observable option: only this mode removes fallback ls
   icons and implicit directory suffixes. Normal ls and lsfancy retain icons.
 - Support ls inode/dereference options and sorting multiple file operands.

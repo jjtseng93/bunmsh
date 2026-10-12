@@ -177,6 +177,16 @@ test("large function state survives pipeline subprocess transport", async () => 
   const r=await run(`f () {\n : '${'padding'.repeat(1000)}'\n echo function\n}\nf | cat`);
   expect(r.stdout).toBe('function\n'); expect(r.stderr).toBe(''); expect(r.status).toBe(0);
 });
+test("expr supports BRE captures, arithmetic precedence and exit statuses", async () => {
+  const r=await run("expr 2 + 3 \\* 4\nexpr 00001 : '.*\\(...\\)'\nexpr '' \\| fallback\nexpr a : z\necho $?");
+  expect(r.stdout).toBe('14\n001\nfallback\n0\n1\n'); expect(r.stderr).toBe('');
+});
+test("sed handles delimiters, branches, hold space and multiline pattern space", async () => {
+  let r=await run("printf 'a;b\\nc\\n' | sed -n 's/;/!/; t changed; b; :changed; h; n; G; p'");
+  expect(r.stdout).toBe('c\na!b\n'); expect(r.stderr).toBe('');
+  r=await run("printf 'a\\nb\\nc\\n' | sed -n '1,2{N;s/\\n/:/;p;}'");
+  expect(r.stdout).toBe('a:b\n'); expect(r.stderr).toBe('');
+});
 test("only posix mode removes ls icons and survives pipeline state transfer", async () => {
   const dir=mkdtempSync(join(tmpdir(),'bunmsh-posix-ls-'));
   try {
@@ -218,6 +228,18 @@ test("rm force accepts no operands and a pipeline can feed a compound case", asy
 test("subshell rewriting leaves C parentheses in heredocs untouched", async () => {
   const r=await run("ac_ext=c\ncat <<EOF\nint main (void)\n{ return 0; }\nEOF");
   expect(r.stdout).toBe('int main (void)\n{ return 0; }\n'); expect(r.stderr).toBe('');
+});
+test("grep accepts multiple explicit patterns and counts selected lines", async () => {
+  const r=await run("printf 'apple\\npear\\napricot\\n' | grep -e '^a' -e 'pear'\nprintf 'a\\nb\\na\\n' | grep -c -e '^a$'");
+  expect(r.stdout).toBe('apple\npear\napricot\n2\n'); expect(r.stderr).toBe('');
+});
+test("sed reads scripts from a file", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-sed-file-'));
+  try {
+    const path=join(dir,'script'); writeFileSync(path,'s/a/b/\nt done\n:done\np\n');
+    const r=await run(`printf 'a\\n' | sed -n -f '${path}'`);
+    expect(r.stdout).toBe('b\n'); expect(r.stderr).toBe('');
+  } finally {rmSync(dir,{recursive:true,force:true});}
 });
 test("arithmetic expands Autoconf positional expressions and nested substitutions", async () => {
   const r=await run('as_fn_arith () { as_val=$(( $* )); }\nas_fn_arith 10 + 1\necho "$as_val"\nx=3\necho "$(( ${x} + $(echo 2) + $((1 + 1)) ))"');

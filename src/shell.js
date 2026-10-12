@@ -1,3 +1,4 @@
+import {compileSed, applySed} from "./sed.js";
 import {
   constants as fsConstants,
   accessSync,
@@ -2429,6 +2430,7 @@ function grepPosixClasses(pattern) {
 
 async function runGrepFallback(argv, state, input, context = {}) {
   let flags = "", colorMode = "never", i = 1;
+  const patterns=[];
   while (argv[i]?.startsWith("-") && argv[i] !== "-") {
     if (argv[i] === "--") { i++; break; }
     const colorOption = /^--colou?r(?:=(always|auto|never))?$/.exec(argv[i]);
@@ -2437,16 +2439,24 @@ async function runGrepFallback(argv, state, input, context = {}) {
       i++;
       continue;
     }
-    if (!/^-[EFiqvnorx]+$/.test(argv[i]))
+    if (argv[i] === "-e" || argv[i].startsWith("-e")) {
+      const option=argv[i++]; const pattern=option.length>2 ? option.slice(2) : argv[i++];
+      if (pattern === undefined) return result(2,"","bunmsh: grep: -e requires a pattern\n");
+      patterns.push(...pattern.split("\n")); continue;
+    }
+    if (!/^-[EFiqvnorxc]+$/.test(argv[i]))
       return result(2, "", `bunmsh: grep: unsupported option: ${argv[i]}\n`);
     flags += argv[i++].slice(1);
   }
-  const pattern = argv[i++];
-  if (pattern === undefined) return result(2, "", "bunmsh: grep: missing pattern\n");
+  if (!patterns.length) {
+    const pattern=argv[i++];
+    if (pattern === undefined) return result(2,"","bunmsh: grep: missing pattern\n");
+    patterns.push(...pattern.split("\n"));
+  }
   let regex;
-  const regexSource = flags.includes("F")
-    ? pattern.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")
-    : grepPosixClasses(flags.includes("E") ? pattern : grepBasicRegex(pattern));
+  const regexSource=patterns.map(pattern => flags.includes("F")
+    ? pattern.replace(/[\\^$.*+?()[\]{}|]/g,"\\$&")
+    : grepPosixClasses(flags.includes("E") ? pattern : grepBasicRegex(pattern))).map(p=>`(?:${p})`).join("|");
   try { regex = new RegExp(flags.includes("x") ? `^(?:${regexSource})$` : regexSource, `${flags.includes("i") ? "i" : ""}${flags.includes("o") ? "g" : ""}`); }
   catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
   const invert = flags.includes("v"), quiet = flags.includes("q"), numbers = flags.includes("n"), only = flags.includes("o");
@@ -2457,15 +2467,16 @@ async function runGrepFallback(argv, state, input, context = {}) {
   const highlightRegex = color && !only
     ? new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`)
     : null;
-  let matched = false;
+  let matched = false, count = 0;
   const output = [];
   const processLine = (line, lineNumber, label, showLabel) => {
     regex.lastIndex = 0;
     const isMatch = regex.test(line);
     regex.lastIndex = 0;
     if (isMatch === invert) return false;
-    matched = true;
+    matched = true; count++;
     if (quiet) return true;
+    if (flags.includes("c")) return false;
     const prefix = `${showLabel ? `${label}:` : ""}${numbers ? `${lineNumber}:` : ""}`;
     if (only) {
       if (invert) return false;
@@ -2488,11 +2499,13 @@ async function runGrepFallback(argv, state, input, context = {}) {
       const files = grepFiles(operands, state, flags.includes("r"));
       const showLabel = files.length > 1 || flags.includes("r");
       for (const file of files) {
+        count=0;
         const lines = (await Bun.file(file.path).text()).split("\n");
         if (lines.at(-1) === "") lines.pop();
         for (let line = 0; line < lines.length; line++)
           if (processLine(lines[line], line + 1,
             implicitCwd ? file.shown.replace(/^\.\//, "") : file.shown, showLabel)) return result(0);
+        if (flags.includes("c")) output.push(`${showLabel ? `${file.shown}:` : ""}${count}\n`);
       }
     } catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
   } else {
@@ -2512,91 +2525,8 @@ async function runGrepFallback(argv, state, input, context = {}) {
       }
     } finally { try { reader.releaseLock(); } catch {} }
   }
+  if (!operands.length && flags.includes("c") && !quiet) output.push(`${count}\n`);
   return result(matched ? 0 : 1, output.join(""));
-}
-
-function splitSedCommands(script) {
-  const commands = [];
-  let start = 0, escaped = false;
-  for (let i = 0; i < script.length; i++) {
-    if (escaped) { escaped = false; continue; }
-    if (script[i] === "\\") { escaped = true; continue; }
-    if (script[i] === ";") {
-      commands.push(script.slice(start, i).trim());
-      start = i + 1;
-    }
-  }
-  commands.push(script.slice(start).trim());
-  return commands.filter(Boolean);
-}
-
-function readSedField(command, start, delimiter) {
-  let value = "";
-  for (let i = start; i < command.length; i++) {
-    if (command[i] === "\\" && i + 1 < command.length) {
-      if (command[i + 1] === delimiter) value += command[++i];
-      else value += command[i] + command[++i];
-    } else if (command[i] === delimiter) return [value, i + 1];
-    else value += command[i];
-  }
-  throw new Error("unterminated substitute command");
-}
-
-function sedReplacement(value) {
-  let output = "";
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === "\\" && /[1-9]/.test(value[i + 1] ?? "")) output += `$${value[++i]}`;
-    else if (value[i] === "\\" && i + 1 < value.length) output += value[++i];
-    else if (value[i] === "&") output += "$&";
-    else if (value[i] === "$") output += "$$";
-    else output += value[i];
-  }
-  return output;
-}
-
-function compileSedCommand(source, extended) {
-  const numberedPrint = /^(\d+)p$/.exec(source);
-  if (numberedPrint) return { type: "print", line: Number(numberedPrint[1]) };
-  if (!source.startsWith("s") || source.length < 2)
-    throw new Error(`unsupported command: ${source}`);
-  const delimiter = source[1];
-  const [pattern, replacementStart] = readSedField(source, 2, delimiter);
-  const [replacement, flagsStart] = readSedField(source, replacementStart, delimiter);
-  const flags = source.slice(flagsStart);
-  if (!/^[gp]*$/.test(flags)) throw new Error(`unsupported substitute flags: ${flags}`);
-  const regexSource = grepPosixClasses(extended ? pattern : grepBasicRegex(pattern));
-  return {
-    type: "substitute",
-    regex: new RegExp(regexSource, flags.includes("g") ? "g" : ""),
-    replacement: sedReplacement(replacement),
-    print: flags.includes("p"),
-  };
-}
-
-function applySed(text, commands, quiet) {
-  const trailingNewline = text.endsWith("\n");
-  const lines = text.split("\n");
-  if (trailingNewline) lines.pop();
-  const output = [];
-  for (let index = 0; index < lines.length; index++) {
-    let line = lines[index];
-    for (const command of commands) {
-      if (command.type === "print") {
-        if (command.line === index + 1) output.push(line);
-        continue;
-      }
-      command.regex.lastIndex = 0;
-      const matched = command.regex.test(line);
-      command.regex.lastIndex = 0;
-      if (matched) {
-        line = line.replace(command.regex, command.replacement);
-        if (command.print) output.push(line);
-      }
-    }
-    if (!quiet) output.push(line);
-  }
-  if (!output.length) return "";
-  return output.join("\n") + (trailingNewline ? "\n" : "");
 }
 
 async function runSedFallback(argv, state, input) {
@@ -2611,6 +2541,13 @@ async function runSedFallback(argv, state, input) {
       continue;
     }
     if (option.startsWith("-e")) { scripts.push(option.slice(2)); continue; }
+    if (option.startsWith("-f")) {
+      const file=option.length>2 ? option.slice(2) : argv[i++];
+      if (file === undefined) return result(1,"","bunmsh: sed: -f requires a file\n");
+      try { scripts.push(readFileSync(resolvePath(nativePath(state.cwd),nativePath(file)),"utf8")); }
+      catch(error) { return result(1,"",`bunmsh: sed: ${error.message}\n`); }
+      continue;
+    }
     if (!/^-[nEri]+$/.test(option))
       return result(1, "", `bunmsh: sed: unsupported option: ${option}\n`);
     quiet ||= option.includes("n");
@@ -2620,7 +2557,7 @@ async function runSedFallback(argv, state, input) {
   if (!scripts.length && i < argv.length) scripts.push(argv[i++]);
   if (!scripts.length) return result(1, "", "bunmsh: sed: missing script\n");
   let commands;
-  try { commands = scripts.flatMap(splitSedCommands).map((script) => compileSedCommand(script, extended)); }
+  try { commands = compileSed(scripts.join("\n"), pattern => grepPosixClasses(extended ? pattern : grepBasicRegex(pattern))); }
   catch (error) { return result(1, "", `bunmsh: sed: ${error.message}\n`); }
   const operands = argv.slice(i);
   if (inPlace && !operands.length) return result(1, "", "bunmsh: sed: -i requires a file operand\n");
@@ -3018,12 +2955,58 @@ async function runPspacFallback(argv, state) {
   return result(0, colorProcessTable(rows), query.stderr);
 }
 
+function runExprFallback(argv) {
+  const args = argv.slice(argv[1] === "--" ? 2 : 1);
+  let i = 0;
+  const precedence = {"|":1,"&":2,"=":3,"!=":3,"<":3,"<=":3,">":3,">=":3,"+":4,"-":4,"*":5,"/":5,"%":5,":":6};
+  const truth = value => value !== "" && !/^-?0+$/.test(value);
+  const integer = value => { if (!/^-?\d+$/.test(value)) throw new Error("non-integer argument"); return BigInt(value); };
+  const atom = () => {
+    if (i >= args.length) throw new Error("missing operand");
+    const value = args[i++];
+    if (value !== "(") return value;
+    const nested = expression(1);
+    if (args[i++] !== ")") throw new Error("expected closing parenthesis");
+    return nested;
+  };
+  const expression = minimum => {
+    let left = atom();
+    while ((precedence[args[i]] ?? 0) >= minimum) {
+      const op = args[i++], right = expression(precedence[op] + 1);
+      if (op === "|") left = truth(left) ? left : truth(right) ? right : "0";
+      else if (op === "&") left = truth(left) && truth(right) ? left : "0";
+      else if (op === ":") {
+        const re = new RegExp(`^(?:${grepPosixClasses(grepBasicRegex(right))})`);
+        const match = re.exec(left);
+        // BRE parentheses are captures; a failed capturing match returns empty.
+        const capture = /(^|[^\\])(?:\\\\)*\\\(/.test(right);
+        left = capture ? (match?.[1] ?? "") : String(match?.[0].length ?? 0);
+      } else if (["+","-","*","/","%"].includes(op)) {
+        const a = integer(left), b = integer(right);
+        if ((op === "/" || op === "%") && b === 0n) throw new Error("division by zero");
+        left = String(op === "+" ? a+b : op === "-" ? a-b : op === "*" ? a*b : op === "/" ? a/b : a%b);
+      } else {
+        const numeric = /^-?\d+$/.test(left) && /^-?\d+$/.test(right);
+        const a = numeric ? BigInt(left) : left, b = numeric ? BigInt(right) : right;
+        left = String(Number(op === "=" ? a===b : op === "!=" ? a!==b : op === "<" ? a<b : op === "<=" ? a<=b : op === ">" ? a>b : a>=b));
+      }
+    }
+    return left;
+  };
+  try {
+    const value = expression(1);
+    if (i !== args.length) throw new Error("unexpected operand");
+    return result(truth(value) ? 0 : 1, `${value}\n`);
+  } catch (error) { return result(2,"",`bunmsh: expr: ${error.message}\n`); }
+}
+
 const fallbackBuiltins = {
+  expr: runExprFallback,
   basename: async (argv) => {
     const i = argv[1] === "--" ? 2 : 1;
     if (i >= argv.length || argv.length - i > 2)
       return result(1, "", "bunmsh: basename: usage: basename string [suffix]\n");
-    let name = pathBasename(argv[i]);
+    let name = /^\/+$/.test(argv[i]) ? "/" : pathBasename(argv[i]);
     const suffix = argv[i + 1];
     if (suffix && suffix !== name && name.endsWith(suffix)) name = name.slice(0, -suffix.length);
     return result(0, `${name}\n`);
