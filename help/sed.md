@@ -19,7 +19,7 @@ sed [-nEr] [-e SCRIPT | -f FILE] [-i] [SCRIPT] [FILE ...]
 - `s///` with `g`, `p`, and occurrence-number flags; `y///` translation.
 - `p`, `P`, `d`, `D`, `q`, `=`, `n`, `N`; hold-space commands `h`, `H`, `g`, `G`, `x`.
 - Labels (`:`), unconditional branches (`b`), and substitution-test branches (`t`, `T`).
-- `a`, `i`, `c` text commands. This remains a subset: file-reading/writing commands (`r`, `w`) are not implemented.
+- `a`, `i`, `c` text commands; `r FILE` appends file contents after the current cycle. Missing/unreadable files are skipped. This remains a subset: `w` is not implemented.
 
 ### Example
 

@@ -58,6 +58,10 @@ export function compileSed(script, regexSource) {
       space(); const start = i; while (i < script.length && !";\n}".includes(script[i])) i++;
       command.label = script.slice(start,i).trim();
       if (op === ":") labels.set(command.label,index);
+    } else if (op === "r") {
+      space(); const start=i; while (i<script.length && script[i]!=="\n") i++;
+      command.file=script.slice(start,i);
+      if (!command.file) throw new Error("r requires a filename");
     } else if (["a","i","c"].includes(op)) {
       space(); if (script[i] === "\\") { i++; if (script[i] === "\n") i++; }
       let text = "";
@@ -89,7 +93,7 @@ function replacementText(template, args) {
   return output;
 }
 
-export function applySed(text, commands, quiet) {
+export function applySed(text, commands, quiet, readFile = () => "") {
   if (!text) return "";
   const trailing = text.endsWith("\n"), lines = text.split("\n");
   if (trailing) lines.pop();
@@ -142,7 +146,8 @@ export function applySed(text, commands, quiet) {
         const take = c.op === "b" || (c.op === "t" ? changed : !changed);
         if (c.op !== "b") changed=false;
         if (take) pc=c.target-1;
-      } else if (c.op === "a") appended.push(c.text+"\n");
+      } else if (c.op === "r") appended.push(readFile(c.file));
+      else if (c.op === "a") appended.push(c.text+"\n");
       else if (c.op === "i") output.push(c.text+"\n");
       else if (c.op === "c") { if (!c.second || !active.has(pc)) output.push(c.text+"\n"); deleted=true; break; }
     }

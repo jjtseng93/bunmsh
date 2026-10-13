@@ -1,3 +1,4 @@
+import {compileAwk, executeAwk} from "./awk.js";
 import {normalFileDiff} from "./diff.js";
 import {compileSed, applySed} from "./sed.js";
 import {
@@ -5,22 +6,28 @@ import {
   accessSync,
   closeSync,
   chmodSync,
+  chownSync,
+  copyFileSync,
   createReadStream,
   createWriteStream,
   lstatSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  rmSync,
   writeFileSync,
   openSync,
   readdirSync,
   rmdirSync,
   readFileSync,
+  readSync,
+  read as fsRead,
   writeSync,
   realpathSync,
   statSync,
   symlinkSync,
   unlinkSync,
+  utimesSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import {
@@ -264,13 +271,18 @@ export function tokenize(source, options = {}) {
     // word for the indented continuation lines commonly used in exec calls.
     const continuation = lineContinuationLength(source, i);
     if (continuation) {
+      options.continuations?.set(i, continuation);
       i += continuation;
       continue;
     }
 
     if (ch === "\n") {
       finishWord();
-      tokens.push({ type: "op", value: ";", offset: i });
+      // Newlines after AND/OR/pipe operators continue the same command,
+      // including when a here-document body lies between the two sides.
+      const previous = tokens.at(-1);
+      if (!(previous?.type === "op" && ["&&", "||", "|"].includes(previous.value)))
+        tokens.push({ type: "op", value: ";", offset: i });
       i++;
       atWordBoundary = true;
       if (pendingHeredocs.length) {
@@ -361,6 +373,7 @@ export function tokenize(source, options = {}) {
         }
         const quotedContinuation = lineContinuationLength(source, i);
         if (quotedContinuation) {
+          options.continuations?.set(i, quotedContinuation);
           i += quotedContinuation;
           continue;
         }
@@ -373,7 +386,7 @@ export function tokenize(source, options = {}) {
           }
         }
         if ((source[i] === "$" && ["(", "{"].includes(source[i + 1])) || source[i] === "`") {
-          const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+          const end = source[i] === "$" && source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
           text += source.slice(i, end);
           i = end;
           continue;
@@ -411,7 +424,7 @@ export function tokenize(source, options = {}) {
     while (i < source.length) {
       const c = source[i];
       if ((c === "$" && ["(", "{"].includes(source[i + 1])) || c === "`") {
-        const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+        const end = source[i] === "$" && source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
         text += source.slice(i, end);
         i = end;
         continue;
@@ -621,16 +634,6 @@ function arithmeticValue(source, state) {
   return String(value | 0);
 }
 
-function globPatternRegex(pattern, anchoredStart, anchoredEnd, greedy) {
-  let source = "";
-  for (const ch of pattern) {
-    if (ch === "*") source += greedy ? ".*" : ".*?";
-    else if (ch === "?") source += ".";
-    else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-  }
-  return new RegExp(`${anchoredStart ? "^" : ""}${source}${anchoredEnd ? "$" : ""}`);
-}
-
 async function casePatternRegex(pattern, state) {
   let marked = "";
   const literal = (value) => {
@@ -675,13 +678,16 @@ async function casePatternRegex(pattern, state) {
       let end = i + 1;
       if (marked[end] === "!" || marked[end] === "^") end++;
       if (marked[end] === "]") end++;
-      while (end < marked.length && marked[end] !== "]") end++;
+      while (end < marked.length && marked[end] !== "]") {
+        if (marked[end] === "\u0000" && end + 1 < marked.length) end++;
+        end++;
+      }
       if (end >= marked.length) source += "\\[";
       else {
         let body = marked.slice(i + 1, end);
         const negate = body[0] === "!" || body[0] === "^";
         if (negate) body = body.slice(1);
-        body = body.replaceAll("\\", "\\\\");
+        body = body.replace(/\u0000(.)/gs, (_,ch) => /[\\\]\-^]/.test(ch) ? `\\${ch}` : ch);
         source += `[${negate ? "^" : ""}${body}]`;
         i = end;
       }
@@ -696,13 +702,13 @@ async function parameterExpansion(body, state, quoted = false) {
     const value = parameterValue(body.slice(1), state);
     return body[0] === "!" ? parameterValue(value, state) : String([...value].length);
   }
-  if (body.startsWith("#") && /^[A-Za-z_][A-Za-z0-9_]*$/.test(body.slice(1)))
+  if (body.startsWith("#") && /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$#-])$/.test(body.slice(1)))
     return String(parameterValue(body.slice(1), state).length);
   const trim = /^([A-Za-z_][A-Za-z0-9_]*|[?$#@*]|[0-9]+)(%%|%|##|#)(.*)$/s.exec(body);
   if (trim) {
     const value = parameterValue(trim[1], state);
-    const pattern = stripExpansionMarkers(await expandText(trim[3], state));
-    const matches = (part) => globPatternRegex(pattern, true, true, true).test(part);
+    const pattern = await casePatternRegex(trim[3], state);
+    const matches = (part) => pattern.test(part);
     if (trim[2] === "%") {
       for (let i = value.length; i >= 0; i--) if (matches(value.slice(i))) return value.slice(0, i);
     } else if (trim[2] === "%%") {
@@ -758,11 +764,11 @@ async function parameterExpansion(body, state, quoted = false) {
 }
 
 function markedExpansion(value) {
-  return `\u0001${value}\u0002`;
+  return `\ufdd0${value}\ufdd1`;
 }
 
 function stripExpansionMarkers(value) {
-  return value.replace(/\u0005/g, " ").replace(/[\u0001-\u0004\u0006\u0007]/g, "");
+  return value.replace(/\ufdd4/g, " ").replace(/[\ufdd0-\ufdd3\ufdd5\ufdd6]/g, "");
 }
 
 // Like mksh eval.c's XARG/XARGSEP, retain quote and argument boundaries
@@ -770,10 +776,10 @@ function stripExpansionMarkers(value) {
 async function expandParameterOperand(source, state, outerQuoted) {
   let output = "", plain = "", quote = "none";
   const flush = async () => {
-    if (quote === "single") output += `\u0003${plain}\u0006\u0004`;
+    if (quote === "single") output += `\ufdd2${plain}\ufdd5\ufdd3`;
     else {
       const value = await expandText(plain, state, outerQuoted || quote === "double");
-      output += quote === "double" ? `\u0003${value}${value === "\u0007" ? "" : "\u0006"}\u0004` : value;
+      output += quote === "double" ? `\ufdd2${value}${value === "\ufdd6" ? "" : "\ufdd5"}\ufdd3` : value;
     }
     plain = "";
   };
@@ -793,7 +799,7 @@ async function expandParameterOperand(source, state, outerQuoted) {
       }
     }
     if (ch === "`" || ch === "$" && ["{", "("].includes(source[i + 1])) {
-      const end = source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
+      const end = source[i] === "$" && source[i + 1] === "{" ? parameterEnd(source, i) : substitutionEnd(source, i);
       plain += source.slice(i, end); i = end; continue;
     }
     plain += source[i++];
@@ -835,7 +841,11 @@ async function expandText(text, state, quoted = false) {
     }
     if (text[i] === "`") {
       const end = substitutionEnd(text, i);
-      output += markedExpansion(await commandSubstitution(text.slice(i + 1, end - 1), state));
+      // mksh lex.c SBQUOTE removes one escape layer before parsing the body,
+      // even inside quotes that belong to the inner command. Double-quoted
+      // backquotes additionally recognize an escaped double quote.
+      const source = text.slice(i + 1, end - 1).replace(quoted ? /\\([$`\\"])/g : /\\([$`\\])/g, "$1");
+      output += markedExpansion(await commandSubstitution(source, state));
       i = end;
       continue;
     }
@@ -865,7 +875,7 @@ async function expandText(text, state, quoted = false) {
     const next = text[i + 1];
     if (["?", "$", "#", "@", "*", "-"].includes(next) || /[0-9]/.test(next ?? "")) {
       output += next === "@" && quoted
-        ? (state.args.length > 1 ? state.args.slice(1).map(arg => `\u0003${arg}\u0006\u0004`).join("\u0005") : "\u0007")
+        ? (state.args.length > 1 ? state.args.slice(1).map(arg => `\ufdd2${arg}\ufdd5\ufdd3`).join("\ufdd4") : "\ufdd6")
         : markedExpansion(checkedParameter(next, state));
       i += 2;
       continue;
@@ -974,17 +984,17 @@ export async function expandWord(word, state, options = {}) {
       if (plain) segments.push({text:plain,quoted:quoteDepth > 0,splittable:splitDepth > 0});
       plain = "";
     };
-    if (fragment.quote === "double" && !text.includes("\u0007"))
+    if (fragment.quote === "double" && !text.includes("\ufdd6"))
       segments.push({text:"",quoted:true,splittable:false});
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
-      if (ch === "\u0001") { flush(); splitDepth++; }
-      else if (ch === "\u0002") { flush(); splitDepth--; }
-      else if (ch === "\u0003") { flush(); quoteDepth++; }
-      else if (ch === "\u0004") { flush(); quoteDepth--; }
-      else if (ch === "\u0005") { flush(); segments.push({text:options.single ? " " : "",boundary:!options.single}); }
-      else if (ch === "\u0006") { flush(); segments.push({text:"",quoted:true,splittable:false}); }
-      else if (ch === "\u0007") { flush(); }
+      if (ch === "\ufdd0") { flush(); splitDepth++; }
+      else if (ch === "\ufdd1") { flush(); splitDepth--; }
+      else if (ch === "\ufdd2") { flush(); quoteDepth++; }
+      else if (ch === "\ufdd3") { flush(); quoteDepth--; }
+      else if (ch === "\ufdd4") { flush(); segments.push({text:options.single ? " " : "",boundary:!options.single}); }
+      else if (ch === "\ufdd5") { flush(); segments.push({text:"",quoted:true,splittable:false}); }
+      else if (ch === "\ufdd6") { flush(); }
       else if (ch === "\u0000") { flush(); segments.push({text:text[++i] ?? "",quoted:true,splittable:false}); }
       else plain += ch;
     }
@@ -1446,11 +1456,13 @@ const builtins = {
         fd = Number(arg.slice(2));
         continue;
       }
-      if (arg === "-r" || arg === "-R") raw = true;
-      else if (arg === "-n") newline = false;
-      else if (arg === "-l") separator = "\n";
-      else if (arg === "-N") separator = terminator = "\0";
-      else return result(1, "", `bunmsh: print: ${arg}: unsupported option\n`);
+      for (const flag of arg.slice(1)) {
+        if (flag === "r" || flag === "R") raw = true;
+        else if (flag === "n") newline = false;
+        else if (flag === "l") separator = "\n";
+        else if (flag === "N") separator = terminator = "\0";
+        else return result(1, "", `bunmsh: print: -${flag}: unsupported option\n`);
+      }
     }
     let output = argv.slice(i).join(separator);
     if (!raw) {
@@ -1514,6 +1526,25 @@ const builtins = {
     if (state.readLines) {
       gotInput = state.readLines.length > 0;
       line = state.readLines.shift() ?? "";
+    } else if (typeof input === "number" || input == null) {
+      // Like mksh's normal read mode, consume only through the delimiter.
+      // A fresh buffered stream would read ahead and cancelling it can close
+      // the shared descriptor, breaking subsequent reads and fd duplicates.
+      const byte = Buffer.alloc(1), data = [];
+      gotInput = false;
+      while (true) {
+        let count;
+        try {
+          count = input == null
+            ? await new Promise((resolve,reject) => fsRead(0,byte,0,1,null,(error,n) => error ? reject(error) : resolve(n)))
+            : readSync(input, byte, 0, 1, null);
+        }
+        catch (error) { if (error.code === "EINTR") continue; throw error; }
+        if (!count) break;
+        if (byte[0] === 10) { gotInput = true; break; }
+        data.push(byte[0]);
+      }
+      line = decoder.decode(Uint8Array.from(data));
     } else {
       const reader = fallbackInput(input).getReader();
       const chunks = [];
@@ -1864,7 +1895,13 @@ const builtins = {
     for (; i < argv.length; i++) {
       const item = argv[i];
       if (item === "--") { i++; break; }
-      if (!/^[+-]/.test(item) || item === "-") break;
+      if (item === "-") {
+        // Traditional set - ends options and disables verbose/xtrace. Like
+        // mksh parse_args, preserve positional parameters if none follow.
+        state.shellOptions.x = state.shellOptions.v = false;
+        i++; break;
+      }
+      if (!/^[+-]/.test(item)) break;
       const enabled = item[0] === "-";
       if (item === "-o" || item === "+o") {
         if (argv[i+1] === undefined) return result(0,Object.entries(names).map(([name,key]) => enabled ? `${name} ${state.shellOptions[key] ? "on" : "off"}\n` : `set ${state.shellOptions[key] ? "-" : "+"}o ${name}\n`).join(""));
@@ -1897,6 +1934,13 @@ export function bunShellFallbackArgv(argv) {
   let commandArgv = argv;
   if (argv[0] === "ls")
     commandArgv = commandArgv.filter((value, index) => index === 0 || value !== "--color=auto");
+  if (["mv", "rm"].includes(argv[0]) && argv.includes("--")) {
+    const end = argv.indexOf("--");
+    // Bun.$ mv/rm do not accept --. Protect option-looking path operands when
+    // removing the delimiter, so a filename cannot become an option.
+    commandArgv = [...argv.slice(0, end), ...argv.slice(end + 1).map(value =>
+      value.startsWith("-") ? `./${value}` : value)];
+  }
   if (argv[0] === "cp")
     commandArgv = commandArgv.map((value, index) =>
       index > 0 && /^-[^-]/.test(value) ? `-${value.slice(1).replaceAll("r", "R")}` : value);
@@ -1904,9 +1948,33 @@ export function bunShellFallbackArgv(argv) {
 }
 
 async function runBunShellFallback(argv, state) {
+  if (argv[0] === "mkdir") {
+    const flags = argv.slice(1).filter(arg => /^-[pv]+$/.test(arg) || ["--parents","--vebose"].includes(arg));
+    const operands = argv.slice(1).filter(arg => !flags.includes(arg));
+    // Bun.$ starts sibling mkdir operands concurrently. POSIX callers can
+    // pass parent then child without -p, so preserve operand order here.
+    if (operands.length > 1 && operands.every(arg => !arg.startsWith("-") || arg === "-")) {
+      const output = [], errors = []; let status = 0;
+      for (const operand of operands) {
+        const r = await runBunShellFallback(["mkdir",...flags,operand],state);
+        status ||= r.status; output.push(r.stdout); errors.push(r.stderr);
+      }
+      return result(status,concatBytes(output),concatBytes(errors));
+    }
+  }
+  // GNU/POSIX rm -f ignores nonexistent operands, including the empty name.
+  // Bun.$ instead resolves that empty name to cwd and reports a directory.
+  if (argv[0] === "rm") {
+    const delimiter = argv.indexOf("--");
+    const options = argv.slice(1, delimiter < 0 ? undefined : delimiter)
+      .filter(arg => /^-[frRi]+$/.test(arg)).join("");
+    if (options.lastIndexOf("f") > options.lastIndexOf("i"))
+      argv = argv.filter((arg, index) => index === 0 || arg !== "");
+  }
   // Bun.$ rejects an empty operand list even with rm -f. Autoconf probes it.
-  if (argv[0] === "rm" && argv.length > 1 && argv.slice(1).every(arg => /^-[frRi]+$/.test(arg) || arg === "--") &&
-      argv.slice(1).join("").lastIndexOf("f") > argv.slice(1).join("").lastIndexOf("i")) return result();
+  const rmFlags = argv.at(-1) === "--" ? argv.slice(1, -1) : argv.slice(1);
+  if (argv[0] === "rm" && rmFlags.every(arg => /^-[frRi]+$/.test(arg)) &&
+      rmFlags.join("").lastIndexOf("f") > rmFlags.join("").lastIndexOf("i")) return result();
   const shell = Bun.$`${bunShellFallbackArgv(argv)}`
     .cwd(nativePath(state.cwd))
     .env(externalEnvironment(state))
@@ -1925,6 +1993,42 @@ async function runFancyLsFallback(argv, state) {
 }
 
 async function runBunShellCpFallback(argv, state) {
+  let preserve=false, verbose=false, end=false;
+  const files=[], unsupported=[];
+  for(const arg of argv.slice(1)) {
+    if(!end&&arg==='--'){end=true;continue;}
+    if(!end&&arg.startsWith('-')&&arg!=='-') {
+      for(const flag of arg.slice(1)) {
+        if(flag==='p')preserve=true;
+        else if(flag==='v')verbose=true;
+        else unsupported.push(flag);
+      }
+    } else files.push(arg);
+  }
+  if(preserve) {
+    if(unsupported.length)return result(1,'',`bunmsh: cp: unsupported option with -p: -${unsupported[0]}\n`);
+    if(files.length<2)return result(1,'','bunmsh: cp: missing file operand\n');
+    const destination=resolvePath(nativePath(state.cwd),nativePath(files.pop()));
+    let directory=false;
+    try {directory=statSync(destination).isDirectory();}catch(error){if(error.code!=='ENOENT')return result(1,'',`bunmsh: cp: ${error.message}\n`);}
+    if(files.length>1&&!directory)return result(1,'','bunmsh: cp: destination must be a directory\n');
+    let stdout='',stderr='',status=0;
+    for(const file of files)try {
+      const source=resolvePath(nativePath(state.cwd),nativePath(file));
+      const target=directory?resolvePath(destination,pathBasename(source)):destination;
+      const info=statSync(source);
+      if(!info.isFile())throw new Error(`-p currently requires a regular file: ${file}`);
+      let previous;try{previous=statSync(target);}catch(error){if(error.code!=='ENOENT')throw error;}
+      if(previous?.dev===info.dev&&previous?.ino===info.ino)throw new Error(`${file} and destination are the same file`);
+      copyFileSync(source,target);
+      const copied=statSync(target);
+      if(copied.uid!==info.uid||copied.gid!==info.gid)chownSync(target,info.uid,info.gid);
+      chmodSync(target,info.mode&0o7777);
+      utimesSync(target,info.atime,info.mtime);
+      if(verbose)stdout+=`'${file}' -> '${target}'\n`;
+    }catch(error){status=1;stderr+=`bunmsh: cp: ${error.message}\n`;}
+    return result(status,stdout,stderr);
+  }
   const cmd = IS_COMPILED
     ? [...EXECUTABLE_COMMAND, "--bun-shell-fallback", ...bunShellFallbackArgv(argv)]
     : [...BUN_RUNTIME_COMMAND, BUNMSH_ENTRY, "--bun-shell-fallback", ...bunShellFallbackArgv(argv)];
@@ -2000,7 +2104,10 @@ async function runCatFallback(argv, state, input) {
   const chunks = [];
   let status = 0;
   let stderr = "";
-  const writer = state.pipelineChild ? Bun.stdout.writer() : null;
+  // A subprocess still needs shell-level descriptor routing for redirects.
+  const endpoint = state.fdBindings?.[1] ?? {channel:1};
+  const writer = state.pipelineChild && endpoint.channel === 1 &&
+    endpoint.fd === undefined && !endpoint.closed ? Bun.stdout.writer() : null;
   const emit = async (chunk) => {
     if (writer) {
       writer.write(chunk);
@@ -2131,6 +2238,44 @@ async function runHeadFallback(argv, state, input) {
   return result(0, concatBytes(output));
 }
 
+async function runUniqFallback(argv, state, input) {
+  let count = false, repeated = false, single = false, i = 1;
+  for (; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") { i++; break; }
+    if (arg === "-" || !arg.startsWith("-")) break;
+    if (!/^-[cdu]+$/.test(arg)) return result(1, "", `bunmsh: uniq: unsupported option: ${arg}\n`);
+    count ||= arg.includes("c"); repeated ||= arg.includes("d"); single ||= arg.includes("u");
+  }
+  const operands = argv.slice(i);
+  if (operands.length > 2) return result(1, "", "bunmsh: uniq: too many operands\n");
+  try {
+    const data = await readFallbackFiles([operands[0] ?? "-"], state, input);
+    const output = [];
+    let previous = null, occurrences = 0;
+    const emit = () => {
+      if (previous === null || (repeated && occurrences === 1) || (single && occurrences !== 1)) return;
+      if (count) output.push(String(occurrences).padStart(7) + " ");
+      output.push(previous, "\n");
+    };
+    for (let start = 0; start < data.length;) {
+      const newline = data.indexOf(10, start);
+      const end = newline < 0 ? data.length : newline;
+      const line = data.subarray(start, end);
+      if (previous !== null && previous.length === line.length && line.every((b, j) => b === previous[j])) occurrences++;
+      else { emit(); previous = line; occurrences = 1; }
+      start = end + 1;
+    }
+    emit();
+    const bytes = concatBytes(output);
+    if (operands[1] && operands[1] !== "-") {
+      writeFileSync(resolvePath(state.cwd, operands[1]), bytes);
+      return result(0);
+    }
+    return result(0, bytes);
+  } catch (error) { return result(1, "", `bunmsh: uniq: ${error.message}\n`); }
+}
+
 async function runTextFilter(argv, state, input, kind) {
   try {
     let args = argv.slice(1), reverse = false, numeric = false, unique = false;
@@ -2247,17 +2392,29 @@ function expandTrSet(value) {
 }
 
 async function runTrFallback(argv, _state, input) {
-  let del = false, i = 1;
-  if (argv[i] === "-d") del = true, i++;
-  if (!argv[i] || (!del && !argv[i + 1])) return result(1, "", "bunmsh: tr: missing operand\n");
-  const from = expandTrSet(argv[i++]);
-  const to = expandTrSet(argv[i] ?? "");
+  let del = false, squeeze = false, i = 1;
+  while (argv[i]?.startsWith("-") && argv[i] !== "-") {
+    const option = argv[i++];
+    if (option === "--") break;
+    if (!/^-[ds]+$/.test(option)) return result(1, "", `bunmsh: tr: unsupported option: ${option}\n`);
+    del ||= option.includes("d"); squeeze ||= option.includes("s");
+  }
+  const operands = argv.slice(i);
+  const count = del ? (squeeze ? 2 : 1) : (squeeze && operands.length === 1 ? 1 : 2);
+  if (operands.length !== count) return result(1, "", "bunmsh: tr: wrong number of operands\n");
+  const from = expandTrSet(operands[0]);
+  const to = expandTrSet(operands[1] ?? "");
+  const translate = !del && operands.length === 2;
+  if (translate && !to) return result(1, "", "bunmsh: tr: empty translation set\n");
+  const squeezed = new Set(operands.length === 2 ? to : from);
   const text = decoder.decode(await readFallbackInput(input));
-  let output = "";
+  let output = "", previous;
   for (const ch of text) {
     const index = from.indexOf(ch);
-    if (index < 0) output += ch;
-    else if (!del) output += to[Math.min(index, Math.max(0, to.length - 1))] ?? "";
+    if (del && index >= 0) continue;
+    const value = translate && index >= 0 ? to[Math.min(index, to.length - 1)] : ch;
+    if (squeeze && value === previous && squeezed.has(value)) continue;
+    output += value; previous = value;
   }
   return result(0, output);
 }
@@ -2404,17 +2561,24 @@ function grepFiles(operands, state, recursive) {
 }
 
 function grepBasicRegex(pattern) {
-  let output = "", inClass = false;
+  let output = "", inClass = false, branchStart = true;
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i];
-    if (ch === "[") inClass = true;
-    if (ch === "]" && inClass) inClass = false;
-    if (!inClass && ch === "\\" && i + 1 < pattern.length && "+?|(){}".includes(pattern[i + 1])) {
-      output += pattern[++i];
+    if (!inClass && ch === "\\" && i + 1 < pattern.length) {
+      const next=pattern[++i];
+      output += "+?|(){}".includes(next) ? next : `\\${next}`;
+      branchStart = next === "(" || next === "|";
       continue;
     }
-    if (!inClass && "+?|(){}".includes(ch)) output += `\\${ch}`;
+    if (!inClass && ch === "$") {
+      const anchored = i === pattern.length-1 || pattern.startsWith("\\)",i+1) || pattern.startsWith("\\|",i+1);
+      output += anchored ? "$" : "\\$";
+    } else if (!inClass && ch === "^") output += branchStart ? "^" : "\\^";
+    else if (!inClass && "+?|(){}".includes(ch)) output += `\\${ch}`;
     else output += ch;
+    if (ch === "[") inClass = true;
+    else if (ch === "]" && inClass) inClass = false;
+    branchStart=false;
   }
   return output;
 }
@@ -2562,15 +2726,19 @@ async function runSedFallback(argv, state, input) {
   catch (error) { return result(1, "", `bunmsh: sed: ${error.message}\n`); }
   const operands = argv.slice(i);
   if (inPlace && !operands.length) return result(1, "", "bunmsh: sed: -i requires a file operand\n");
+  const readExtra = file => {
+    try { return readFileSync(resolvePath(nativePath(state.cwd),nativePath(file)),"utf8"); }
+    catch { return ""; } // sed r silently skips unreadable or missing files.
+  };
   try {
     if (!operands.length) {
       const text = decoder.decode(await readFallbackInput(input));
-      return result(0, applySed(text, commands, quiet));
+      return result(0, applySed(text, commands, quiet, readExtra));
     }
     let stdout = "";
     for (const operand of operands) {
       const file = isAbsolute(nativePath(operand)) ? nativePath(operand) : resolvePath(nativePath(state.cwd), nativePath(operand));
-      const changed = applySed(await Bun.file(file).text(), commands, quiet);
+      const changed = applySed(await Bun.file(file).text(), commands, quiet, readExtra);
       if (inPlace) await Bun.write(file, changed);
       else stdout += changed;
     }
@@ -2644,16 +2812,47 @@ function runLnFallback(argv, state) {
   return result(status, "", stderr);
 }
 
+function symbolicFileMode(spec, stat) {
+  let mode = stat.mode & 0o7777;
+  // Retain the original shorthand; other symbolic forms require explicit who.
+  if (spec === "+x") return mode | 0o111;
+  for (const clause of spec.split(",")) {
+    const match = /^([ugoa]+)((?:[+=-][rwxX]*)+)$/.exec(clause);
+    if (!match) throw new Error(`unsupported mode: ${spec}`);
+    const who = match[1].includes("a") ? "ugo" : match[1];
+    let selected = 0, special = 0;
+    for (const [name, mask, bit] of [["u",0o700,0o4000],["g",0o070,0o2000],["o",0o007,0o1000]])
+      if (who.includes(name)) { selected |= mask; special |= bit; }
+    for (const action of match[2].matchAll(/([+=-])([rwxX]*)/g)) {
+      let bits = 0;
+      for (const ch of action[2]) {
+        if (ch === "r") bits |= 0o444;
+        if (ch === "w") bits |= 0o222;
+        if (ch === "x" || (ch === "X" && (stat.isDirectory() || (mode & 0o111)))) bits |= 0o111;
+      }
+      bits &= selected;
+      if (action[1] === "+") mode |= bits;
+      else if (action[1] === "-") mode &= ~bits;
+      else {
+        // GNU chmod preserves directory set-ID bits unless explicitly changed.
+        const clearedSpecial = stat.isDirectory() ? special & 0o1000 : special;
+        mode = (mode & ~(selected | clearedSpecial)) | bits;
+      }
+    }
+  }
+  return mode;
+}
+
 function runChmodFallback(argv, state) {
-  if (argv.length < 3) return result(1, "", "bunmsh: chmod: usage: chmod MODE FILE...\n");
-  const mode = argv[1];
+  let i = argv[1] === "--" ? 2 : 1;
+  const mode = argv[i++];
+  if (argv[i] === "--") i++;
+  if (!mode || i >= argv.length) return result(1, "", "bunmsh: chmod: usage: chmod MODE FILE...\n");
   let status = 0, stderr = "";
-  for (const operand of argv.slice(2)) {
+  for (const operand of argv.slice(i)) {
     const path = isAbsolute(nativePath(operand)) ? nativePath(operand) : resolvePath(nativePath(state.cwd), nativePath(operand));
     try {
-      if (/^[0-7]{3,4}$/.test(mode)) chmodSync(path, Number.parseInt(mode, 8));
-      else if (mode === "+x" || mode === "a+x") chmodSync(path, statSync(path).mode | 0o111);
-      else throw new Error(`unsupported mode: ${mode}`);
+      chmodSync(path, /^[0-7]{1,4}$/.test(mode) ? Number.parseInt(mode, 8) : symbolicFileMode(mode, statSync(path)));
     } catch (error) { status = 1; stderr += `bunmsh: chmod: ${operand}: ${error.message}\n`; }
   }
   return result(status, "", stderr);
@@ -3001,6 +3200,83 @@ function runExprFallback(argv) {
   } catch (error) { return result(2,"",`bunmsh: expr: ${error.message}\n`); }
 }
 
+async function runAwkFallback(argv, state, input) {
+  try {
+    const scripts=[], variables={}; let i=1;
+    const assignment = text => {
+      const m=/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(text);
+      if (!m) throw new Error(`invalid variable assignment: ${text}`);
+      return [m[1], m[2].replace(/\\([ntr\\])/g, (_,c)=>({n:"\n",t:"\t",r:"\r","\\":"\\"})[c])];
+    };
+    for (; i<argv.length && argv[i].startsWith("-") && argv[i]!=="-"; i++) {
+      const option=argv[i]; if(option==="--") {i++;break;}
+      const flag=option.slice(0,2);
+      if(!["-F","-v","-f","-e"].includes(flag)) throw new Error(`unsupported option: ${option}`);
+      const value=option.length>2?option.slice(2):argv[++i];
+      if(value===undefined)throw new Error(`${flag} requires an argument`);
+      if(flag==="-F")variables.FS=value;
+      else if(flag==="-v") {const [name,text]=assignment(value);variables[name]=text;}
+      else scripts.push(flag==="-f" ? readFileSync(resolvePath(nativePath(state.cwd),nativePath(value)),"utf8") : value);
+    }
+    if(!scripts.length){if(i>=argv.length)throw new Error("missing program");scripts.push(argv[i++]);}
+    const program=compileAwk(scripts.join("\n"));
+    const needsInput = node => node && typeof node==="object" && (node.type==="getline"&&!node.file ||
+      (node instanceof Map ? [...node.values()] : Object.values(node)).some(needsInput));
+    const operands=argv.slice(i), inputs=[];
+    if(program.rules.length || needsInput(program)) {
+      for (const operand of operands.length?operands:["-"]) {
+        if(/^[A-Za-z_][A-Za-z0-9_]*=/.test(operand))inputs.push({assignment:assignment(operand)});
+        else inputs.push({name:operand,text:operand==="-"?decode(await readFallbackInput(input)):readFileSync(resolvePath(nativePath(state.cwd),nativePath(operand)),"utf8")});
+      }
+    }
+    const path = file => resolvePath(nativePath(state.cwd),nativePath(file));
+    const value=executeAwk(program,inputs,{variables,argv:operands,env:externalEnvironment(state),
+      runPipe:(command,text)=>{
+        const directory=mkdtempSync(resolvePath(tmpdir(),"bunmsh-awk-state-"));
+        try {
+          const file=resolvePath(directory,"state.json");
+          writeFileSync(file,pipelineBuiltinState(state).env[PIPELINE_STATE_ENV],{mode:0o600});
+          const p=Bun.spawnSync([process.execPath,BUNMSH_ENTRY,"-c",command],{
+            cwd:nativePath(state.cwd),env:{...externalEnvironment(state),[PIPELINE_STATE_ENV]:`@file:${file}`},
+            stdin:bytes(text),stdout:"pipe",stderr:"pipe"});
+          if(p.error)throw p.error;
+          return {status:p.exitCode,stdout:decode(p.stdout),stderr:decode(p.stderr)};
+        } finally {rmSync(directory,{recursive:true,force:true});}
+      },
+      readFile:file=>readFileSync(path(file),"utf8"),
+      writeFile:(file,text,append)=>writeFileSync(path(file),text,{flag:append?"a":"w"})});
+    return result(value.status,value.stdout,value.stderr??"");
+  } catch(error) {return result(2,"",`bunmsh: ${error.message.startsWith("awk:")?"":"awk: "}${error.message}\n`);}
+}
+
+async function runCmpFallback(argv, state, input) {
+  let silent = false, i = 1;
+  for (; i < argv.length && argv[i].startsWith("-") && argv[i] !== "-"; i++) {
+    if (argv[i] === "--") { i++; break; }
+    if (["-s", "--silent", "--quiet"].includes(argv[i])) silent = true;
+    else return result(2, "", `bunmsh: cmp: unsupported option: ${argv[i]}\n`);
+  }
+  const files = argv.slice(i);
+  if (files.length !== 2) return result(2, "", "bunmsh: cmp: expected two files\n");
+  try {
+    let stdin;
+    const read = async file => file === "-" ? (stdin ??= await readFallbackInput(input)) :
+      readFileSync(resolvePath(nativePath(state.cwd), nativePath(file)));
+    const a = await read(files[0]), b = await read(files[1]);
+    let offset = 0, line = 1;
+    while (offset < Math.min(a.length, b.length) && a[offset] === b[offset]) {
+      if (a[offset] === 10) line++;
+      offset++;
+    }
+    if (offset === a.length && offset === b.length) return result();
+    if (silent) return result(1);
+    if (offset < Math.min(a.length, b.length))
+      return result(1, `${files[0]} ${files[1]} differ: char ${offset + 1}, line ${line}\n`);
+    const file = files[a.length < b.length ? 0 : 1];
+    return result(1, "", `cmp: EOF on ${file}${offset ? ` after byte ${offset}, in line ${line}` : " which is empty"}\n`);
+  } catch (error) { return result(2, "", silent ? "" : `bunmsh: cmp: ${error.message}\n`); }
+}
+
 async function runDiffFallback(argv, state) {
   let brief=false, i=1;
   for (; i<argv.length && argv[i].startsWith("-"); i++) {
@@ -3021,7 +3297,9 @@ async function runDiffFallback(argv, state) {
 }
 
 const fallbackBuiltins = {
+  awk: runAwkFallback,
   diff: runDiffFallback,
+  cmp: runCmpFallback,
   expr: runExprFallback,
   basename: async (argv) => {
     const i = argv[1] === "--" ? 2 : 1;
@@ -3067,11 +3345,14 @@ const fallbackBuiltins = {
   clear: async () => result(0, "\x1b[2J\x1b[H"),
   rmdir: async (argv, state) => runRmdirFallback(argv, state),
   mktemp: async (argv, state) => runMktempFallback(argv, state),
+  uniq: runUniqFallback,
   sort: (argv, state, input) => runTextFilter(argv, state, input, "sort"),
   date: async (argv) => runDateFallback(argv),
   md5sum: (argv, state, input) => runHashFallback(argv, state, input, "md5"),
   sha256sum: (argv, state, input) => runHashFallback(argv, state, input, "sha256"),
   grep: runGrepFallback,
+  egrep: (argv, state, input, context) => runGrepFallback(["grep", "-E", ...argv.slice(1)], state, input, context),
+  fgrep: (argv, state, input, context) => runGrepFallback(["grep", "-F", ...argv.slice(1)], state, input, context),
   sed: runSedFallback,
   cut: runCutFallback,
   ln: async (argv, state) => runLnFallback(argv, state),
@@ -3181,7 +3462,8 @@ function hasCompoundSyntax(source) {
 }
 
 function compoundLogicalSource(source, firstLine = 1, sourceLines = null) {
-  const tokens = tokenize(source);
+  const continuations = new Map();
+  const tokens = tokenize(source, { continuations });
   const breaks = new Set();
   let commandStart = true;
   const literal = (token) => token.type === "word" && token.fragments.length === 1 &&
@@ -3195,16 +3477,19 @@ function compoundLogicalSource(source, firstLine = 1, sourceLines = null) {
     const word = literal(token);
     // Function headers allow linebreaks before the opening brace. Braces
     // elsewhere remain ordinary arguments unless at a command boundary.
-    const functionBrace = word === "{" && /[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*$/.test(source.slice(0, token.offset));
+    const functionHeader = word === "{" && /[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)(?:\s|\\\r?\n)*$/.exec(source.slice(0, token.offset));
+    const functionBrace = Boolean(functionHeader);
     if ((commandStart || functionBrace) && word === "{") {
       if (!functionBrace) breaks.add(token.offset);
+      else breaks.add(functionHeader.index);
       if (tokens[index + 1]) breaks.add(tokens[index + 1].offset);
       commandStart = true;
       continue;
     }
     if (commandStart && word === "}") {
       breaks.add(token.offset);
-      if (tokens[index + 1]?.value === ";" && tokens[index + 2]) breaks.add(tokens[index + 2].offset);
+      if (tokens[index + 1]?.value === ";" && tokens[index + 2] &&
+          tokens[index + 2].value !== ";") breaks.add(tokens[index + 2].offset);
       commandStart = false;
       continue;
     }
@@ -3226,8 +3511,8 @@ function compoundLogicalSource(source, firstLine = 1, sourceLines = null) {
   let logical = "", line = firstLine, physicalIndex = 0;
   const lineNumbers = [line];
   for (let i = 0; i < source.length; i++) {
-    if (breaks.has(i) && i > 0 && source[i - 1] !== "\n") { logical += "\n"; lineNumbers.push(line); }
-    if (source[i] === "\\" && source[i + 1] === "\n") { i++; line = sourceLines?.[++physicalIndex] ?? line + 1; continue; }
+    if (breaks.has(i) && logical && !logical.endsWith("\n")) { logical += "\n"; lineNumbers.push(line); }
+    if (continuations.has(i)) { i += continuations.get(i) - 1; line = sourceLines?.[++physicalIndex] ?? line + 1; continue; }
     logical += source[i];
     if (source[i] === "\n") { line = sourceLines?.[++physicalIndex] ?? line + 1; lineNumbers.push(line); }
   }
@@ -3257,7 +3542,7 @@ function growLogicalCommand(lines, index) {
       return { source: candidate, next: end + 1 };
     } catch (error) {
       if (!(error instanceof ShellSyntaxError) ||
-          !/^(?:unterminated (?:here-document|single quote|double quote|command substitution|substitution))/.test(error.message))
+          !/^(?:unterminated (?:here-document|single quote|double quote|command substitution|parameter expansion|substitution))/.test(error.message))
         throw error;
       end++;
       if (end >= lines.length) throw error;
@@ -3266,7 +3551,28 @@ function growLogicalCommand(lines, index) {
   }
 }
 
+// Heredoc bodies follow the operator's source position even when it is the
+// final token. Remove only the connector, never the rest of the source.
+function removeSourceToken(source, token) {
+  return source.slice(0, token.offset) + source.slice(token.offset + token.value.length);
+}
+
+function compoundSource(node) {
+  if (node.type === "subshell") return `(${node.source})`;
+  if (node.type === "compoundPostfix")
+    return `${compoundSource(node.compound)} ${node.operator} ${node.right ? compoundSource(node.right) : node.command}`;
+  if (typeof node.source !== "string") throw new ShellSyntaxError(`missing source for ${node.type}`);
+  // A following serialized connector must not become part of a heredoc's
+  // delimiter line. Braces preserve the command's scope and give it a boundary.
+  if (node.type === "command" && tokenize(node.source).some(token => token.heredoc))
+    return `{\n${node.source}\n}`;
+  return node.source;
+}
+
 function makeCompoundPostfix(compound, suffix, source, nextLine) {
+  const suffixCommand = growLogicalCommand([suffix ?? "", ...source.slice(nextLine)], 0);
+  suffix = suffixCommand.source;
+  nextLine += suffixCommand.next - 1;
   const tokens = tokenize(suffix ?? "");
   const connector = tokens.find(t => t.type === "op" && [";","&&","||","|"].includes(t.value));
   const redirectionText = (suffix ?? "").slice(0,connector?.offset ?? undefined).trim();
@@ -3274,11 +3580,11 @@ function makeCompoundPostfix(compound, suffix, source, nextLine) {
     if (redirectionText === "&") throw new ShellSyntaxError("&: only a single external command is supported");
     const parsed = parse(`: ${redirectionText}`)[0]?.pipeline[0];
     if (!parsed || parsed.words.length !== 1) throw new ShellSyntaxError(`unexpected compound suffix: ${redirectionText} after ${compound.source.slice(0,120)}`);
-    compound = {type:"redirected", compound, redirects:parsed.redirects, source:compound.source + " " + redirectionText};
+    compound = {type:"redirected", compound, redirects:parsed.redirects, source:compoundSource(compound) + " " + redirectionText};
     suffix = connector ? suffix.slice(connector.offset) : "";
   }
 
-  const match = /^\s*(\|\||&&|\||;)\s*(.*)$/.exec(suffix ?? "");
+  const match = /^\s*(\|\||&&|\||;)\s*(.*)$/s.exec(suffix ?? "");
   if (!match) return { node: compound, nextLine };
   let command = match[2].trim();
   let commandLine = null;
@@ -3292,6 +3598,28 @@ function makeCompoundPostfix(compound, suffix, source, nextLine) {
     throw new ShellSyntaxError(`compound command requires a command after ${match[1]}`);
   if (commandLine !== null && /^(?:\{|if\b|case\b|for\b|while\b|until\b|\()/.test(command))
     return {node:{type:"compoundPostfix",compound,operator:match[1],rightPending:true},nextLine:commandLine};
+  // A postfix command can contain multiline quotes, substitutions or heredocs.
+  // Grow it just like an ordinary command before resuming the outer parser.
+  const remaining = [command, ...source.slice(nextLine)];
+  const grown = growLogicalCommand(remaining, 0);
+  command = grown.source;
+  nextLine += grown.next - 1;
+  const trailing = tokenize(command).at(-1);
+  if (trailing?.type === "op" && ["&&", "||", "|"].includes(trailing.value)) {
+    const middle = {type:"command",source:removeSourceToken(command,trailing)};
+    // Pipes bind more tightly; AND/OR lists associate left-to-right.
+    if (trailing.value !== "|") return {
+      node:{type:"compoundPostfix",compound:{type:"compoundPostfix",compound,operator:match[1],right:middle},operator:trailing.value,rightPending:true},
+      nextLine,
+    };
+    return {
+      node: {type:"compoundPostfix", compound, operator:match[1], right:{
+        type:"compoundPostfix", compound:middle,
+        operator:trailing.value, rightPending:true,
+      }},
+      nextLine,
+    };
+  }
   return {
     node: {
       type: "compoundPostfix",
@@ -3381,13 +3709,21 @@ function caseKeywords(tokens) {
   const words = new Map();
   let start = true;
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i], word = shellLiteral(token);
+    const token = tokens[i];
+    let word = shellLiteral(token);
     if (token.type === "op") {
       if ([";", "|", "&&", "||"].includes(token.value)) start = true;
       continue;
     }
-    if (start && word === "case" && shellLiteral(tokens[i + 2]) === "in") words.set(token.offset, "case");
-    if (start && word === "esac") words.set(token.offset, "esac");
+    // Parentheses are retained in word tokens by this tokenizer. At command
+    // start they can introduce subshells without whitespace before `case`.
+    const openings = start ? /^\(+/.exec(word ?? "")?.[0].length ?? 0 : 0;
+    if (openings) {
+      word = word.slice(openings);
+      if (!word) continue;
+    }
+    if (start && word === "case" && shellLiteral(tokens[i + 2]) === "in") words.set(token.offset + openings, "case");
+    if (start && /^esac\)*$/.test(word ?? "")) words.set(token.offset + openings, "esac");
     start = ["then", "do", "else", "{"].includes(word) || Boolean(word?.endsWith(")"));
   }
   return words;
@@ -3563,7 +3899,7 @@ export function parseCompoundScript(source, firstLine = 1, sourceLines = null) {
         let thenCommand = header.tail;
         i = header.end + 1;
         while (true) {
-          const body = parseSequence(i, [/^elif(?:\s|$)/, /^else\s*;?$/, /^fi\b/]);
+          const body = parseSequence(i, [/^elif(?:\s|$)/, /^else(?:\s*;\s*|\s+|$)(?:#.*)?$/, /^fi\b/]);
           branches.push({ condition, body: body.nodes, thenCommand });
           i = body.index;
           const stop = lines[i]?.trim() ?? "";
@@ -3575,7 +3911,7 @@ export function parseCompoundScript(source, firstLine = 1, sourceLines = null) {
             continue;
           }
           let otherwise = [];
-          if (/^else\s*;?$/.test(stop)) {
+          if (/^else(?:\s*;\s*|\s+|$)(?:#.*)?$/.test(stop)) {
             const body = parseSequence(i + 1, [/^fi\b/]);
             otherwise = body.nodes;
             i = body.index;
@@ -3605,7 +3941,7 @@ export function parseCompoundScript(source, firstLine = 1, sourceLines = null) {
         if (!/(?:;\s*|\s+)do\s*$/.test(header)) throw new ShellSyntaxError(`${kind} requires do`);
         const condition = header.replace(new RegExp(`^${kind}\\s*`), "").replace(/(?:;\s*|\s+)do\s*$/, "");
         const body = parseSequence(i + 1, [/^done\b/]);
-        const done = /^done(?:\s*<\s*(.+?))?\s*;?\s*((?:\|\||&&|\||;).*)?$/.exec(lines[body.index]?.trim() ?? "");
+        const done = /^done(?=$|[\s;<|&])(?:\s*<\s*(.+?))?\s*;?\s*((?:\|\||&&|\||;|#).*)?$/.exec(lines[body.index]?.trim() ?? "");
         if (!done)
           throw new ShellSyntaxError(`unterminated ${kind}`);
         const compound = {
@@ -3680,13 +4016,15 @@ export function parseCompoundScript(source, firstLine = 1, sourceLines = null) {
       i = grown.next;
     }
     for (let n = nodes.length - 2; n >= 0; n--) {
-      if (nodes[n].rightPending) {
-        nodes[n].right = nodes[n+1]; delete nodes[n].rightPending; nodes.splice(n+1,1); continue;
+      let pending = nodes[n];
+      while (pending.right) pending = pending.right;
+      if (pending.rightPending) {
+        pending.right = nodes[n+1]; delete pending.rightPending; nodes.splice(n+1,1); continue;
       }
       if (nodes[n].type !== "command") continue;
-      const logical = /^(.*?)(\&\&|\|\||\|)\s*$/s.exec(nodes[n].source);
-      if (!logical) continue;
-      nodes.splice(n,2,{type:"compoundPostfix",compound:{type:"command",source:logical[1]},operator:logical[2],right:nodes[n+1]});
+      const last = tokenize(nodes[n].source).at(-1);
+      if (last?.type !== "op" || !["&&", "||", "|"].includes(last.value)) continue;
+      nodes.splice(n,2,{type:"compoundPostfix",compound:{...nodes[n],source:removeSourceToken(nodes[n].source,last)},operator:last.value,right:nodes[n+1]});
     }
     return { nodes, index: i };
   };
@@ -3724,6 +4062,21 @@ export function needsMoreInput(source) {
   return false;
 }
 
+// Buffered compound pipelines need the same descriptor routing as leaf commands.
+function routeCommandOutput(execution, bindings) {
+  const output = [], errors = [];
+  for (const [number, data] of [[1, execution.stdout], [2, execution.stderr]]) {
+    if (!data.byteLength) continue;
+    const endpoint = bindings[number] ?? {channel:number};
+    if (endpoint.closed) { execution.status = 1; errors.push(bytes("bunmsh: bad file descriptor\n")); }
+    else if (endpoint.fd !== undefined) writeSync(endpoint.fd, data);
+    else (endpoint.channel === 2 ? errors : output).push(data);
+  }
+  execution.stdout = concatBytes(output);
+  execution.stderr = concatBytes(errors);
+  return execution;
+}
+
 async function executeNodeList(nodes, state, options = {}) {
   const capture = options.capture ?? true;
   const stdout = [], stderr = [];
@@ -3755,7 +4108,7 @@ async function executeNodeList(nodes, state, options = {}) {
       if (node.operator === "|") {
         const link = new TransformStream();
         const leftPromise = runExternal(
-          pipelineCompoundArgv(node.compound.source),
+          pipelineCompoundArgv(compoundSource(node.compound)),
           pipelineBuiltinState(state),
           options.input ?? null,
           false,
@@ -3776,14 +4129,14 @@ async function executeNodeList(nodes, state, options = {}) {
           exitStatus: 0,
         };
         const right = await runExternal(
-          pipelineCompoundArgv(node.right?.source ?? node.command),
+          pipelineCompoundArgv(node.right ? compoundSource(node.right) : node.command),
           pipelineBuiltinState(rightState),
           link.readable,
           true,
           true,
         );
         const left = await leftPromise;
-        execution = result(right.status, right.stdout, concatBytes([left.stderr, right.stderr]));
+        execution = routeCommandOutput(result(right.status, right.stdout, concatBytes([left.stderr, right.stderr])), state.fdBindings ?? {});
       } else {
         const previousIgnore = state.ignoreErrexit;
         if (["&&","||"].includes(node.operator)) state.ignoreErrexit++;
@@ -3906,11 +4259,9 @@ async function executeNodeList(nodes, state, options = {}) {
     let selectedThen = "";
     for (const branch of node.branches) {
       let condition = branch.condition.trim();
-      let negate = false;
-      while (/^!\s+/.test(condition)) { negate = !negate; condition = condition.replace(/^!\s+/, ""); }
       const checked = await execute(condition, state, { capture, errexitIgnored:true });
       append(checked);
-      if ((checked.status === 0) !== negate) {
+      if (checked.status === 0) {
         selected = branch.body;
         selectedThen = branch.thenCommand ?? "";
         break;
@@ -3971,6 +4322,8 @@ async function runExternal(
   };
   let stateDirectory;
   try {
+    if (options.env[PIPELINE_STATE_ENV] === "@current")
+      options.env[PIPELINE_STATE_ENV] = pipelineBuiltinState(state).env[PIPELINE_STATE_ENV];
     const serialized = options.env[PIPELINE_STATE_ENV];
     if (serialized?.length > 2048 && !runtimeOptions.background) {
       stateDirectory = mkdtempSync(resolvePath(tmpdir(), "bunmsh-state-"));
@@ -4015,10 +4368,21 @@ async function runExternal(
     const abandonStreaming = new Promise((resolve) => {
       runtimeOptions.onSpawn?.(proc, pipelineKillSignal, resolve);
     });
-    const outputPromise = captureStdout
+    const sharedSink = stdoutSink && stdoutSink === runtimeOptions.stderrSink;
+    const sharedStreamPromise = sharedSink ? Promise.race([
+      (async()=>{
+        const writer=stdoutSink.getWriter();
+        const pump=async stream=>{const reader=stream.getReader();try{while(true){const chunk=await reader.read();if(chunk.done)break;await writer.write(chunk.value);}}finally{reader.releaseLock();}};
+        try {await Promise.all([pump(proc.stdout),pump(proc.stderr)]);await writer.close();}
+        catch {try{proc.kill(pipelineKillSignal);}catch{}}
+        finally {writer.releaseLock();}
+      })(),
+      abandonStreaming,
+    ]) : Promise.resolve();
+    const outputPromise = captureStdout && !stdoutSink
       ? new Response(proc.stdout).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
-    const streamPromise = stdoutSink
+    const streamPromise = stdoutSink && !sharedSink
       ? Promise.race([
           proc.stdout.pipeTo(stdoutSink).catch(() => {
             try { proc.kill(pipelineKillSignal); } catch {}
@@ -4026,13 +4390,13 @@ async function runExternal(
           abandonStreaming,
         ])
       : Promise.resolve();
-    const errorStreamPromise = runtimeOptions.stderrSink
+    const errorStreamPromise = runtimeOptions.stderrSink && !sharedSink
       ? Promise.race([
           proc.stderr.pipeTo(runtimeOptions.stderrSink).catch(() => {}),
           abandonStreaming,
         ])
       : Promise.resolve();
-    const errorPromise = captureStderr
+    const errorPromise = captureStderr && !runtimeOptions.stderrSink
       ? new Response(proc.stderr).arrayBuffer()
       : Promise.resolve(new ArrayBuffer(0));
     const [status, output, error] = await Promise.all([
@@ -4041,9 +4405,10 @@ async function runExternal(
       errorPromise,
       streamPromise,
       errorStreamPromise,
+      sharedStreamPromise,
     ]);
     const execution = result(status, new Uint8Array(output), new Uint8Array(error));
-    execution.stdoutStreamed = Boolean(stdoutSink);
+    execution.stdoutStreamed = Boolean(stdoutSink || runtimeOptions.stderrSink);
     execution.stderrStreamed = Boolean(runtimeOptions.stderrSink);
     return execution;
   } catch (error) {
@@ -4179,8 +4544,9 @@ function rewriteSubshells(source, state) {
       const group = leadingSubshell(source.slice(i));
       if (group) {
         const argv = pipelineCompoundArgv(group.body);
-        const serialized = pipelineBuiltinState(state).env[PIPELINE_STATE_ENV];
-        output += `BUNMSH_INTERNAL_PIPELINE_STATE=${quoteShellWord(serialized)} ${argv.map(quoteShellWord).join(" ")}`;
+        // Snapshot only when this command runs: earlier commands in the same
+        // list may still change variables, functions, options or positional args.
+        output += `BUNMSH_INTERNAL_PIPELINE_STATE=@current ${argv.map(quoteShellWord).join(" ")}`;
         i += group.body.length + 2;
         continue;
       }
@@ -4315,7 +4681,7 @@ async function runCommandArgv(
       options.stdoutSink,
       { ...options, pipelineKillSignal: "SIGTERM" },
     );
-  if (typeof input === "number" && runsInPipelineSubprocess(commandArgv,commandState))
+  if (typeof input === "number" && ioCommand !== "read" && runsInPipelineSubprocess(commandArgv,commandState))
     input = Readable.toWeb(createReadStream("",{fd:input,autoClose:false}));
   while (["command", "builtin", "__builtin"].includes(commandArgv[0])) {
     if (requestsBuiltinHelp(commandArgv) && hasBuiltinHelp(commandArgv[0]))
@@ -4544,7 +4910,9 @@ async function runCommand(command, state, options = {}) {
     const commandState = options.subshell ? {...state,env:{...state.env,...localEnv},exported:new Set(state.exported),fdBindings:bindings,flow:null,loopDepth:0,returnDepth:0} : state;
     if (!options.subshell) {
       for (const name of Object.keys(localEnv)) if (state.readonly.has(name)) return readonlyError(name);
-      if (temporaryPrefix) for (const name of Object.keys(localEnv))
+      // Internal subprocess transport is command-scoped in both modes.
+      // Otherwise an unrelated later shell inherits the parent's functions/options.
+      for (const name of Object.keys(localEnv)) if (temporaryPrefix || name === PIPELINE_STATE_ENV)
         prefixSaved.set(name, {present:Object.hasOwn(state.env,name),value:state.env[name],exported:state.exported.has(name)});
       Object.assign(commandState.env,localEnv);
     }
@@ -4573,21 +4941,12 @@ async function runCommand(command, state, options = {}) {
       direct(stderr) ? false : Boolean(options.captureStderr || stderr.channel !== 2), {
         ...options,
         pipelineStage: Boolean(options.pipelineStage),
-        stdoutSink: direct(stdout) ? null : options.stdoutSink,
+        stdoutSink: !direct(stdout)&&stdout.channel===1 ? options.stdoutSink : null,
+        stderrSink: !direct(stderr)&&stderr.channel===1 ? options.stdoutSink : null,
         stdoutFd: stdout.fd ?? (stdout.closed ? "ignore" : undefined),
         stderrFd: stderr.fd ?? (stderr.closed ? "ignore" : undefined),
       });
-    if (!nested) {
-      const output = [], errors = [];
-      for (const [endpoint,data] of [[stdout,execution.stdout],[stderr,execution.stderr]]) {
-        if (!data.byteLength) continue;
-        if (endpoint.closed) { execution.status = 1; errors.push(bytes("bunmsh: bad file descriptor\n")); }
-        else if (endpoint.fd !== undefined) writeSync(endpoint.fd,data);
-        else (endpoint.channel === 2 ? errors : output).push(data);
-      }
-      execution.stdout = concatBytes(output);
-      execution.stderr = concatBytes(errors);
-    }
+    if (!nested) routeCommandOutput(execution, bindings);
     return execution;
   } catch (error) {
     persistent = false;

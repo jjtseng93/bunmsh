@@ -12,6 +12,7 @@ set [-eufxv] [+eufxv] [-o NAME | +o NAME] [-- [ARG ...]]
 
 - No arguments: print variables.
 - `--`: replace positional parameters, including clearing them with no following arguments.
+- `-`: end options and disable verbose/xtrace; replace positional parameters only when arguments follow.
 - `-e` / `+e`: enable/disable exit on untested failures. Conditions, negation and non-final AND/OR commands suppress it.
 - `-u` / `+u`: enable/disable errors for unset parameters; explicit defaults still work.
 - `-f` / `+f`: disable/enable pathname expansion.

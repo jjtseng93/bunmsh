@@ -2,9 +2,74 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
-## Unreleased
+## [0.4.0] - 2026-10-13
 
 ### Added and fixed
+
+- Respect builtin cat output redirects in shell subprocesses, including AWK pipes.
+
+- Stream external stdout/stderr to the correct pipeline endpoint for `2>&1`,
+  `2>&1 >file` and `1>&2`, retaining downstream early-close handling.
+
+- Support `cp -p` for regular files, preserving ownership, mode and timestamps.
+
+- Evaluate `!` inside if/elif conditions with normal pipeline precedence,
+  including conditions joined with `&&` or `||`.
+
+- AWK supports parenthesized print lists, continued arguments and buffered
+  output command pipes through bunmsh. Correct function parameter scope and
+  preserve replacement backslashes; GCC option generators match mawk output.
+
+- Process mkdir operands in order so parent/child paths do not race.
+
+- Preserve here-document bodies when connecting commands to compound operands.
+
+- Distinguish backquoted brace groups from parameter expansions during tokenization.
+
+- Handle traditional set - as an option delimiter, preserving bare-call arguments.
+
+- Add byte-preserving adjacent-line uniq with -c/-d/-u and input/output files.
+- Ignore empty nonexistent filenames with rm -f, including libtool cleanup.
+
+- Recognize case/esac next to subshell parentheses, including nested groups.
+
+- Keep awk quoted operator strings as data, including install path concatenation.
+
+- Remove the backquote escape layer before parsing command substitutions.
+
+- Preserve short circuiting across comments before compounds and parse simple
+  pipeline stages before a trailing compound command.
+
+- Keep persistent read descriptors open and consume one line without read-ahead.
+- Expand positional parameter lengths such as libtool's ${#1}.
+
+- Support explicit-class chmod rwxX modes such as a-w and u+rw.
+
+- Recognize comments after else and loop-closing done as compound syntax.
+
+- Apply enclosing descriptor redirects to compound-producer pipeline output.
+
+- Add bytewise cmp, legacy egrep/fgrep names, and tr squeeze/delete combinations.
+- Adapt mv/rm -- for Bun Shell while protecting option-looking filenames.
+
+- Preserve multiline parameter expansion operands inside compound bodies.
+- Accept combined print flags such as Autoconf's -rn.
+- Preserve compound commands and function declarations after recipe continuations.
+
+- Match quoted literals and bracket patterns in parameter prefix/suffix removal.
+- Capture subshell state at execution time and scope its internal transport to
+  that command, preserving changes from earlier commands in the same list.
+- Treat interior ^ and $ as literals in basic regular expressions, including
+  GNU make build.sh object-extension substitutions.
+
+- Add a pure JavaScript awk fallback interpreter with fields, arrays, rules,
+  functions, loops, string/regex operations and file I/O. Input command pipes
+  and system() remain unsupported; full POSIX/GNU compatibility is not claimed.
+- Preserve multiline quoted operands after compound pipeline connectors, quoted
+  backslash-newlines, heredoc AND/OR continuations, and case terminators after groups.
+- Preserve ASCII control characters used as Autoconf awk separators during expansion.
+- Keep nested redirected compound operands when reconstructing pipelines.
+- Support sed r FILE, including end-of-cycle output and silently missing files.
 
 - Add offline system diff/sed reference fixtures so isolated tests can compare
   output and exit status without depending on host executables in the guest.

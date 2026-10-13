@@ -267,7 +267,48 @@ The test compares status, stdout and stderr from explicit bunmsh builtins; it
 does not invoke or mount host reference executables. Without the environment
 variable, the reference fixture suite is skipped explicitly.
 
-The current 13 file-diff and 12 sed cases passed under musl Bun/bunproot against
+The current 13 file-diff and 15 sed cases passed under musl Bun/bunproot against
 GNU diffutils 3.10 and GNU sed 4.9. They cover middle edits, repeated lines,
-newline boundaries, UTF-8, sed script files, addresses, branches and hold space.
+newline boundaries, UTF-8, sed script files, addresses, branches, hold space and file reads.
 These are selected compatibility cases, not a claim of complete GNU behavior.
+
+The awk fallback is a JavaScript parser/interpreter in src/awk.js, with no
+native awk or FFI dependency. It supports BEGIN/END, pattern/action records,
+fields, associative arrays, functions/control flow, regex/string operations,
+getline and file redirection. Output command pipes run through bunmsh, with
+input buffered until close or program end; streaming and interactive pipe
+communication are not supported. Input command pipes and system() fail
+explicitly. JavaScript regex, string and numeric behavior imposes remaining
+locale/formatting limits; this is not full POSIX or GNU awk compatibility.
+The optional test/awk-reference.test.js suite compares a separately supplied
+BUNMSH_AWK_REFERENCE executable; it is never used by the builtin itself.
+
+### Additional Autoconf regressions
+
+Compound normalization removes only lexer-recognized line continuations; it
+preserves backslash-newlines inside single quotes and heredoc bodies. Case `;;`
+terminators remain adjacent after brace groups. AND/OR operators continue across
+heredoc bodies, and pipelines retain redirected compound operands. Expansion
+markers use reserved Unicode noncharacters instead of ASCII control bytes, so
+Autoconf's BEL separator reaches awk intact. Sed `r FILE` appends raw file data
+at the end of the cycle (including after `d`); missing files contribute nothing.
+
+GNU make build.sh additionally exercises bracket/quoted parameter trimming and
+subshell snapshots taken at execution time. Internal state transport is scoped
+to its command even outside POSIX mode; default user variable export behavior
+and the background process registry are unchanged. Basic regex anchors are
+context-sensitive so literal make variable references can be substituted.
+
+Binutils bootstrap coverage additionally includes multiline `${...}` operands
+inside compound bodies, legacy egrep/fgrep fallback names, bytewise cmp (normal
+and quiet modes), tr squeezing with optional translation/deletion, and an
+adapter for Bun Shell mv's missing `--` support. The adapter protects filenames
+beginning with `-` by prefixing `./` after removing the option delimiter. The
+cmp and tr subset has offline GNU command reference fixtures;
+unsupported extensions remain errors, not successful no-ops.
+
+The uniq fallback preserves byte comparisons and adjacent groups, supports
+-c/-d/-u, -- and input/output operands. Other GNU extensions are explicit
+errors. Twelve GNU reference fixtures cover ordering, flags, blank lines,
+missing final newlines and NUL bytes. rm -f discards empty nonexistent path
+operands before Bun Shell can incorrectly treat them as the current directory.

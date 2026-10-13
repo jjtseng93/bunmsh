@@ -1,10 +1,38 @@
 import { test, expect } from "bun:test";
 import { createState, execute, finishShell } from "../src/shell.js";
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
+import {mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, utimesSync, statSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 
 const decode = (value) => new TextDecoder().decode(value);
+test('external stderr duplication reaches pipelines without losing buffered output',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'bunmsh-pipe-stderr-'));
+ try {
+  const script=join(dir,'writer.js');writeFileSync(script,'process.stdout.write("out\\n");process.stderr.write("Thread model: posix\\n");');
+  const cmd=`'${process.execPath}' '${script}'`;
+  const r=await run(`${cmd} 2>&1 | builtin sed -n 's/^Thread model: //p'`);
+  expect(r.stdout).toBe('posix\n');expect(r.stderr).toBe('');expect(r.status).toBe(0);
+  const both=await run(`${cmd} 2>&1 | builtin cat`);expect(both.stdout.split('\n').filter(Boolean).sort()).toEqual(['Thread model: posix','out']);expect(both.stderr).toBe('');
+  const moved=await run(`${cmd} 2>&1 > '${dir}/out' | builtin cat`);expect(moved.stdout).toBe('Thread model: posix\n');expect(readFileSync(join(dir,'out'),'utf8')).toBe('out\n');
+  const away=await run(`${cmd} 1>&2 | builtin cat`);expect(away.stdout).toBe('');expect(away.stderr).toContain('out\n');expect(away.stderr).toContain('Thread model: posix\n');
+  writeFileSync(script,'process.on("SIGPIPE",()=>process.exit(0));while(true){process.stdout.write("out\\n");process.stderr.write("err\\n");await Bun.sleep(1);}');
+  const early=await run(`${cmd} 2>&1 | builtin head -n 1`);expect(early.status).toBe(0);expect(['out\n','err\n']).toContain(early.stdout);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('cp -p preserves regular file contents, mode and timestamps without truncating itself',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'bunmsh-cp-p-'));
+ try {
+  const source=join(dir,'source'),target=join(dir,'target');writeFileSync(source,'preserved\n');chmodSync(source,0o640);utimesSync(source,1234567890,1234567891);
+  const r=await run(`builtin cp -p '${source}' '${target}'`);
+  expect(r.status).toBe(0);expect(r.stderr).toBe('');
+  const st=statSync(target);expect(st.mode&0o777).toBe(0o640);expect(st.atimeMs).toBe(1234567890000);expect(st.mtimeMs).toBe(1234567891000);expect(readFileSync(target,'utf8')).toBe('preserved\n');
+  const same=await run(`builtin cp -p '${source}' '${source}'`);expect(same.status).toBe(1);expect(readFileSync(source,'utf8')).toBe('preserved\n');
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('if negation applies to its pipeline rather than the entire AND/OR list',async()=>{
+ const r=await run('if ! false && false; then echo BAD; else echo and-ok; fi; if ! true || true; then echo or-ok; fi; if ! true; then echo BAD; elif ! false; then echo elif-ok; fi; if ! false | false; then echo pipe-ok; fi');
+ expect(r.status).toBe(0);expect(r.stdout).toBe('and-ok\nor-ok\nelif-ok\npipe-ok\n');expect(r.stderr).toBe('');
+});
 async function run(source) {
   const state = createState();
   const value = await execute(source, state, {capture:true});
@@ -275,4 +303,293 @@ test("diff aligns separated insertions, deletions, repeated lines and final newl
 test("arithmetic expands Autoconf positional expressions and nested substitutions", async () => {
   const r=await run('as_fn_arith () { as_val=$(( $* )); }\nas_fn_arith 10 + 1\necho "$as_val"\nx=3\necho "$(( ${x} + $(echo 2) + $((1 + 1)) ))"');
   expect(r.status).toBe(0); expect(r.stdout).toBe('11\n7\n'); expect(r.stderr).toBe('');
+});
+test("compound pipelines retain multiline quoted command operands", async () => {
+  for (const first of ["(printf 'hello\\n')", "case x in x) printf 'hello\\n';; esac", "{ printf 'hello\\n'; }"]) {
+    for (const separator of [" ", "\n"]) {
+    const r=await run(`${first} |${separator}sed '\n s/hello/world/\n '\necho after`);
+    expect(r.status).toBe(0);expect(r.stdout).toBe('world\nafter\n');expect(r.stderr).toBe('');
+    }
+  }
+});
+
+test("heredoc bodies do not terminate a pending logical connector", async () => {
+  const r=await run("cat <<EOF ||\nhello\nEOF\necho BAD\ncat <<EOF &&\nworld\nEOF\necho after");
+  expect(r.status).toBe(0);expect(r.stdout).toBe('hello\nworld\nafter\n');expect(r.stderr).toBe('');
+});
+test("ASCII control characters survive quoted expansion and heredocs", async () => {
+  const literal=String.fromCharCode(1,2,3,4,5,6,7);
+  const r=await run(`x='${literal}'\nprintf '%s' "$x"\ncat <<EOF\n${literal}\nEOF`);
+  expect(r.stdout).toBe(literal+literal+'\n');expect(r.stderr).toBe('');
+});
+
+test("pipelines preserve redirected compound operands and logical suffixes", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-compound-source-'));
+  try {
+    const file=join(dir,'out');
+    const r=await run(`printf 'hello\\n' |\nif true; then\n cat\nelse\n echo BAD\nfi >'${file}' || echo ERROR\ncat '${file}'`);
+    expect(r.status).toBe(0);expect(r.stdout).toBe('hello\n');expect(r.stderr).toBe('');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test("compound parsing preserves quoted backslash newlines", async () => {
+  const value="a\\\nb";
+  const r=await run(`if true; then\n printf '%s\\n' '${value}'\n cat <<'EOF'\n${value}\nEOF\n echo a\\\nb\nfi`);
+  expect(r.status).toBe(0);expect(r.stdout).toBe(value+'\n'+value+'\nab\n');expect(r.stderr).toBe('');
+});
+
+test("case terminators remain intact after nested groups", async () => {
+  const r=await run(`x='none needed'
+case $x in #(
+ 'cannot detect') { { echo BAD; }; echo BAD; } ;; #(
+ 'none needed') x='' ;; #(
+ *) x=BAD ;;
+esac
+printf '<%s>\\n' "$x"`);
+  expect(r.status).toBe(0);expect(r.stdout).toBe('<>\n');expect(r.stderr).toBe('');
+});
+
+test("parameter trimming uses shell bracket patterns and quoted literals", async () => {
+  const source="w='$(am_make_OBJECTS)'\nw=${w#\\$[\\(\\{]}\nprintf '%s\\n' \"${w%[\\)\\}]}\"\nlo='${LIBOBJDIR}alloca.o'\nprintf '%s\\n' \"${lo#'${LIBOBJDIR}'}\"\nx='*abc123'\nprintf '%s\\n' \"${x#'*'}\" \"${x%%[0-9]*}\" \"${x%[0-9]*}\"\nx=abc\nprintf '%s\\n' \"${x##[a-c]*}\"";
+  const r=await run(source);
+  expect(r.status).toBe(0);expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('am_make_OBJECTS\nalloca.o\nabc123\n*abc\n*abc12\n\n');
+});
+
+test("subshell state is captured after preceding commands in the same list", async () => {
+  const r=await run("x=old; x=new; (printf '%s\\n' \"$x\"); printf '%s\\n' \"$x\"");
+  expect(r.status).toBe(0);expect(r.stdout).toBe('new\nnew\n');expect(r.stderr).toBe('');
+});
+
+test("subshell transport does not leak into later external shells", async () => {
+  const r=await run("(true); printf '<%s>\\n' \"${BUNMSH_INTERNAL_PIPELINE_STATE-unset}\"");
+  expect(r.status).toBe(0);expect(r.stdout).toBe('<unset>\n');expect(r.stderr).toBe('');
+});
+
+test("continued recipe lists retain compound keyword boundaries", async () => {
+  const r=await run("fail=; \\\nif (target_option=k; test \"$target_option\" = k); then \\\n  echo yes; \\\nelse \\\n  echo no; \\\nfi\n");
+  expect(r.status).toBe(0);expect(r.stdout).toBe("yes\n");expect(r.stderr).toBe("");
+});
+
+test("continued recipe function headers start a separate compound node", async () => {
+  const r=await run("x=old; \\\nf () \\\n{ \\\n  x=new; echo \"$x\"; \\\n}; \\\nf\n");
+  expect(r.status).toBe(0);expect(r.stdout).toBe("new\n");expect(r.stderr).toBe("");
+});
+
+test("print accepts Autoconf combined raw/no-newline flags", async () => {
+  const r=await run("print -rn -- 'a\\nb'; print -r -- end");
+  expect(r.status).toBe(0);expect(r.stdout).toBe('a\\nbend\n');expect(r.stderr).toBe('');
+});
+
+test("compound bodies preserve multiline parameter expansion words", async () => {
+  const r = await run('if true; then { echo "${missing-first\nsecond}"; }; fi');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('first\nsecond\n');
+});
+
+test("legacy egrep and fgrep names use builtin grep modes", async () => {
+  const r = await run("printf 'alpha\\nbeta\\na+b\\n' | builtin egrep 'alpha|beta'; printf 'ab\\na+b\\n' | builtin fgrep 'a+b'");
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('alpha\nbeta\na+b\n');
+});
+
+test("mv option delimiter protects filenames beginning with hyphens", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'bunmsh-mv-'));
+  try {
+    writeFileSync(join(cwd, '-f'), 'kept');
+    const r = await execute('builtin mv -f -- -f --target', createState({cwd}), {capture:true});
+    expect(r.status).toBe(0); expect(decode(r.stderr)).toBe('');
+    expect(readFileSync(join(cwd, '--target'), 'utf8')).toBe('kept');
+  } finally { rmSync(cwd, {recursive:true, force:true}); }
+});
+
+test("rm option delimiter removes option-looking filenames and preserves force with no operands", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'bunmsh-rm-'));
+  try {
+    for (const name of ['-f', '--', 'unchanged']) writeFileSync(join(cwd, name), 'data');
+    const r = await execute('builtin rm -f -- -f -- unchanged; builtin rm -f --', createState({cwd}), {capture:true});
+    expect(r.status).toBe(0); expect(decode(r.stderr)).toBe('');
+    for (const name of ['-f', '--', 'unchanged']) expect(existsSync(join(cwd, name))).toBe(false);
+  } finally { rmSync(cwd, {recursive:true, force:true}); }
+});
+
+test("read preserves a persistent input descriptor and its shared offset", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'bunmsh-read-fd-'));
+  try {
+    writeFileSync(join(cwd, 'input'), 'first\nsecond\n第三\ntail');
+    const r = await execute('exec 5<&0 <input; read a; exec 6<&0; builtin read b; command read c <&6; read d; last=$?; exec 0<&5 5<&- 6<&-; printf "%s|%s|%s|%s|%s\\n" "$a" "$b" "$c" "$d" "$last"', createState({cwd}), {capture:true});
+    expect(r.status).toBe(0); expect(decode(r.stderr)).toBe('');
+    expect(decode(r.stdout)).toBe('first|second|第三|tail|1\n');
+  } finally { rmSync(cwd, {recursive:true, force:true}); }
+});
+
+test("parameter lengths include positional parameters used by libtool", async () => {
+  const r = await run('set -- abc "" 3 4 5 6 7 8 9 tenth; printf "%s %s %s %s\\n" "${#1}" "${#2}" "${#10}" "${##}"');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('3 0 5 2\n');
+});
+
+test("comments between logical operators and compounds preserve short circuiting", async () => {
+  const r = await run('true ||\n\n# fallback\n{ echo BAD; }\nfalse &&\n# skipped\n{ echo BAD; }\nfalse ||\n# needed\n{ echo fallback; }\ntrue &&\n# needed\n{ echo success; }');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('fallback\nsuccess\n');
+});
+
+test("compound pipelines can include simple stages before a trailing loop", async () => {
+  const r = await run('for x in one two; do echo "$x"; done | builtin cat | while read x; do echo "<$x>"; done');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('<one>\n<two>\n');
+});
+
+test("compound AND and OR lists retain left associativity", async () => {
+  const r = await run('{ false; } && true || { echo fallback; }\n{ true; } || false && { echo success; }');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('fallback\nsuccess\n');
+});
+
+test("backquotes remove their escape layer before inner shell quoting", async () => {
+  const source = 'paths="/lib /usr/lib"; value=`' + String.raw`echo $paths | builtin sed -e 's/\([^ ][^ ]*\)/SEARCH_DIR(\\"\1\\");/g'` + '`; printf "%s\\n" "$value"';
+  const r = await run(source);
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('SEARCH_DIR("/lib"); SEARCH_DIR("/usr/lib");\n');
+});
+
+test("backquote escaping respects enclosing double quotes and unrelated escapes", async () => {
+  const body = String.raw`printf '%s' '\"'`;
+  const unquoted = await run('value=`' + body + '`; printf "%s\\n" "$value"');
+  const quoted = await run('value="`' + body + '`"; printf "%s\\n" "$value"');
+  expect(unquoted.status).toBe(0); expect(unquoted.stderr).toBe('');
+  expect(unquoted.stdout).toBe('\\' + '"\n');
+  expect(quoted.status).toBe(0); expect(quoted.stderr).toBe('');
+  expect(quoted.stdout).toBe('"\n');
+  const special = await run('value=`' + String.raw`printf '%s' '\$name|\q'` + '`; printf "%s\\n" "$value"');
+  expect(special.status).toBe(0); expect(special.stderr).toBe('');
+  expect(special.stdout).toBe('$name|\\q\n');
+});
+
+test("compound producer pipelines honor enclosing descriptor redirects", async () => {
+  const cwd=mkdtempSync(join(tmpdir(),'bunmsh-compound-fd-'));
+  try {
+    const r=await execute('exec 5>log; { for x in b a; do echo "$x"; done | sort; } >&5; exec 5>&-',createState({cwd}),{capture:true});
+    expect(r.status).toBe(0); expect(decode(r.stdout)).toBe(''); expect(decode(r.stderr)).toBe('');
+    expect(readFileSync(join(cwd,'log'),'utf8')).toBe('a\nb\n');
+  } finally {rmSync(cwd,{recursive:true,force:true});}
+});
+
+test("else comments remain branch syntax rather than commands", async () => {
+  const r=await run('if true; then echo yes; else # all_targets is true\n echo BAD; fi\nif false; then echo BAD; else # other branch\n echo no; fi');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('yes\nno\n');
+});
+
+test("while and until accept comments after done", async () => {
+  const r=await run('while true; do echo while; break; done # argument parsing loop\nuntil false; do echo until; break; done # another loop\necho after');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('while\nuntil\nafter\n');
+});
+
+
+test("subshell case clauses do not close at the first pattern parenthesis", async () => {
+  const r = await run(String.raw`ac_try='./conftest'
+(case "(($ac_try" in
+  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
+  *) ac_try_echo=$ac_try;;
+esac
+printf '%s\n' "$ac_try_echo")
+( case x in x) echo spaced;; esac )
+((case x in x) echo nested;; esac))`);
+  expect(r.stderr).toBe('');
+  expect(r.status).toBe(0);
+  expect(r.stdout).toBe('./conftest\nspaced\nnested\n');
+});
+
+
+test("uniq supports output files and rejects unsupported options", async () => {
+  const dir = mkdtempSync(join(tmpdir(),'bunmsh-uniq-'));
+  try {
+    writeFileSync(join(dir,'input'),'a\na\nb');
+    const r=await run(`uniq '${dir}/input' '${dir}/output'`);
+    expect(r.status).toBe(0); expect(r.stdout).toBe('');
+    expect(readFileSync(join(dir,'output'),'utf8')).toBe('a\nb\n');
+    expect((await run('uniq -z')).status).toBe(1);
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+test("rm force ignores empty filenames while still deleting real operands", async () => {
+  const dir = mkdtempSync(join(tmpdir(),'bunmsh-rm-empty-'));
+  try {
+    writeFileSync(join(dir,'file'),'delete');
+    const r=await run(`rm -f ''\nrm -f -- '' '${dir}/file'`);
+    expect(r.status).toBe(0); expect(r.stderr).toBe('');
+    expect(existsSync(dir)).toBe(true); expect(existsSync(join(dir,'file'))).toBe(false);
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+
+test("set minus consumes the delimiter, ends options and preserves bare-call args", async () => {
+  const r=await run(`set -- kept two
+set -
+printf '%s:%s:%s\\n' "$#" "$1" "$2"
+set - first -e
+printf '%s:%s:%s\\n' "$#" "$1" "$2"
+IFS='%'
+set - /one%two%three
+IFS=' '
+printf '%s:%s:%s:%s\\n' "$#" "$1" "$2" "$3"`);
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('2:kept:two\n2:first:-e\n1:/one%two%three::\n');
+  const state=createState({shellOptions:{x:true,v:true,e:true}});
+  await execute('set -',state,{capture:true});
+  expect(state.shellOptions.x).toBe(false);expect(state.shellOptions.v).toBe(false);
+  expect(state.shellOptions.e).toBe(true);
+  const split=await run(`dstdir='/one/two/three'
+IFS='%'
+set - $(echo "$dstdir" | sed 's@/@%@g;s@^%@/@')
+IFS=' '
+printf '%s:%s:%s:%s\\n' "$#" "$1" "$2" "$3"`);
+  expect(split.stdout).toBe('3:/one:two:three\n'); expect(split.status).toBe(0);
+});
+
+
+test("backquoted brace groups are not parsed as parameter expansions", async () => {
+  const tick=String.fromCharCode(96);
+  const r=await run('if false; then echo BAD; elif test "X'+tick+'{ echo ok; }'+tick+'" = Xok; then echo yes; fi\nx='+tick+'{ echo assigned; }'+tick+'\necho "$x"');
+  expect(r.status).toBe(0); expect(r.stderr).toBe('');
+  expect(r.stdout).toBe('yes\nassigned\n');
+});
+
+
+test("logical connectors retain heredoc bodies before compound operands", async () => {
+  const dir=mkdtempSync(join(tmpdir(),'bunmsh-heredoc-chain-'));
+  try {
+    const r=await run(`if true; then
+ echo 'BEGIN {' >'${dir}/script' &&
+ cat >>'${dir}/script' <<'ONE' &&
+S["name"]="value"
+ONE
+ cat >>'${dir}/script' <<TWO &&
+}
+TWO
+ if true; then cat '${dir}/script'; fi
+fi`);
+    expect(r.status).toBe(0); expect(r.stderr).toBe('');
+    expect(r.stdout).toBe('BEGIN {\nS["name"]="value"\n}\n');
+    const piped=await run(`{ echo first; } | cat <<END &&
+second
+END
+{ echo last; }`);
+    expect(piped.status).toBe(0); expect(piped.stderr).toBe('');
+    expect(piped.stdout).toBe('second\nlast\n');
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+
+test("mkdir processes parent and child operands in order", async () => {
+  const cwd=mkdtempSync(join(tmpdir(),'bunmsh-mkdir-order-'));
+  try {
+    for(let i=0;i<8;i++) {
+      const r=await execute(`builtin mkdir p${i} p${i}/child p${i}/child/grandchild`,createState({cwd}),{capture:true});
+      expect(r.status).toBe(0); expect(decode(r.stderr)).toBe('');
+      expect(existsSync(join(cwd,`p${i}/child/grandchild`))).toBe(true);
+    }
+  } finally { rmSync(cwd,{recursive:true,force:true}); }
 });
