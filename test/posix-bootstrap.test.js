@@ -72,9 +72,13 @@ test("redirect order snapshots the original stdout and truncates null commands",
   const dir = mkdtempSync(join(tmpdir(),'bunmsh-io-order-'));
   try {
     const path = join(dir,'out');
-    const cmd = `'${process.execPath}' -e 'console.log("out");console.error("err")'`;
+    // Test descriptor routing, not console formatting: FORCE_COLOR can make
+    // console.error emit ANSI codes even when its output is captured in a pipe.
+    const cmd = `'${process.execPath}' -e 'const {writeSync}=require("node:fs");writeSync(1,"out\\n");writeSync(2,"err\\n")'`;
     let r = await run(`${cmd} 2>&1 >'${path}'`);
-    expect(r.stdout).toBe('err\n'); expect(r.stderr).toBe('');
+    // Escape control characters in failures: terminal-rendered string diffs
+    // can hide CR, ANSI sequences, or NUL bytes behind an apparent newline.
+    expect(JSON.stringify(r.stdout)).toBe(JSON.stringify('err\n')); expect(r.stderr).toBe('');
     expect(readFileSync(path,'utf8')).toBe('out\n');
     r = await run(`${cmd} >'${path}' 2>&1`);
     expect(r.stdout).toBe(''); expect(r.stderr).toBe('');
