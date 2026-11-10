@@ -2,6 +2,7 @@ import {test,expect} from 'bun:test';
 import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {fileURLToPath} from 'node:url';
 import {unifiedFileDiff} from '../src/diff.js';
 const labels=['before','after'];
 test('unified hunks cover changes, context, empty ranges and missing LF',()=>{
@@ -14,7 +15,7 @@ test('unified hunks cover changes, context, empty ranges and missing LF',()=>{
 test('builtin accepts Flea argv, option variants, Unicode labels, and GNU-compatible hunks',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'bunmsh-unified-'));
  const a=join(dir,'before'),b=join(dir,'after');
- const run=async args=>{const p=Bun.spawn([process.execPath,new URL('../index.js',import.meta.url).pathname,'-cc','builtin','diff',...args],{stdout:'pipe',stderr:'pipe',env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});return {code:await p.exited,out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text()}};
+ const run=async args=>{const p=Bun.spawn([process.execPath,fileURLToPath(new URL('../index.js',import.meta.url)),'-cc','builtin','diff',...args],{stdout:'pipe',stderr:'pipe',env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});return {code:await p.exited,out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text()}};
  try {
   const cases=[['a\nb\nc\n','a\nx\nc\n'],['','new\n'],['gone\n',''],['last','last\n'],['中文\n','日文\n'],['a\nb\nc\nd\ne\nf\ng\nh\ni\n','A\nb\nc\nd\ne\nf\ng\nh\nI\n']];
   for(const [left,right] of cases){
@@ -24,7 +25,7 @@ test('builtin accepts Flea argv, option variants, Unicode labels, and GNU-compat
     const r=await run(args);expect(r.code).toBe(1);expect(r.err).toBe('');
     expect(r.out).toBe(unifiedFileDiff(left,right,{context:flags[0]==='-u'?3:flags[0]==='-U'?0:flags[0]==='-U1'?1:2,labels:['前檔','後檔']}));
     if(process.platform!=='win32' && Bun.which('diff')){
-     const p=Bun.spawn([Bun.which('diff'),...args],{stdout:'pipe',stderr:'pipe'});
+     const p=Bun.spawn([Bun.which('diff'),...args],{stdout:'pipe',stderr:'pipe',env:{...process.env,LC_ALL:'C'}});
      expect(await new Response(p.stdout).text()).toBe(r.out);expect(await p.exited).toBe(1);
     }
    }
