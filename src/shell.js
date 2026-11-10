@@ -1,5 +1,5 @@
 import {compileAwk, executeAwk} from "./awk.js";
-import {normalFileDiff} from "./diff.js";
+import {normalFileDiff, unifiedFileDiff} from "./diff.js";
 import {compileSed, applySed} from "./sed.js";
 import {
   constants as fsConstants,
@@ -3284,12 +3284,24 @@ async function runCmpFallback(argv, state, input) {
 }
 
 async function runDiffFallback(argv, state) {
-  let brief=false, i=1;
+  let brief=false, unified=false, context=3, i=1;
+  const labels=[];
   for (; i<argv.length && argv[i].startsWith("-"); i++) {
-    if (argv[i] === "--") { i++; break; }
-    if (["-q","--brief"].includes(argv[i])) brief=true;
-    else if (!/^--color(?:=(?:always|auto|never))?$/.test(argv[i]))
-      return result(2,"",`bunmsh: diff: unsupported option: ${argv[i]}\n`);
+    const arg=argv[i];
+    if (arg === "--") { i++; break; }
+    if (["-q","--brief"].includes(arg)) brief=true;
+    else if (arg === "-u" || arg === "--unified") unified=true;
+    else if (arg === "-U" || /^-U./.test(arg) || arg.startsWith("--unified=")) {
+      const n=arg === "-U" ? argv[++i] : arg.startsWith("-U") ? arg.slice(2) : arg.slice(10);
+      if (!/^\d+$/.test(n ?? "") || !Number.isSafeInteger(Number(n)))
+        return result(2,"","bunmsh: diff: invalid context length\n");
+      context=Number(n);unified=true;
+    } else if (arg === "--label" || arg.startsWith("--label=") || arg === "-L" || /^-L./.test(arg)) {
+      const label=arg === "--label" || arg === "-L" ? argv[++i] : arg.startsWith("--label=") ? arg.slice(8) : arg.slice(2);
+      if (label === undefined || labels.length === 2) return result(2,"","bunmsh: diff: expected at most two labels\n");
+      labels.push(label);
+    } else if (!/^--color(?:=(?:always|auto|never))?$/.test(arg))
+      return result(2,"",`bunmsh: diff: unsupported option: ${arg}\n`);
   }
   if (argv.length-i !== 2) return result(2,"","bunmsh: diff: expected two files\n");
   const [left,right]=argv.slice(i);
@@ -3298,7 +3310,16 @@ async function runDiffFallback(argv, state) {
     const b=readFileSync(resolvePath(nativePath(state.cwd),nativePath(right)));
     if (a.equals(b)) return result();
     if (brief || a.includes(0) || b.includes(0)) return result(1,`Files ${left} and ${right} differ\n`);
-    return result(1, Buffer.from(normalFileDiff(a.toString("latin1"), b.toString("latin1")), "latin1").toString());
+    const textA=a.toString("latin1"), textB=b.toString("latin1");
+    if (unified) {
+      const headers=[left,right].map((name,index)=> {
+        if (labels[index] !== undefined) return labels[index];
+        const stamp=statSync(resolvePath(nativePath(state.cwd),nativePath(name))).mtime.toISOString().replace('T',' ').replace('Z',' +0000');
+        return name + "\t" + stamp;
+      }).map(label=>Buffer.from(label).toString('latin1'));
+      return result(1,Buffer.from(unifiedFileDiff(textA,textB,{context,labels:headers}), 'latin1').toString());
+    }
+    return result(1, Buffer.from(normalFileDiff(textA, textB), "latin1").toString());
   } catch(error) {return result(2,"",`bunmsh: diff: ${error.message}\n`);}
 }
 
