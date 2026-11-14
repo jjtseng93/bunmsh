@@ -11,8 +11,9 @@
 //
 // A file whose data holds a NUL is binary. By default its first selected line prints
 // "binary file matches" to stderr instead of the line; -a (--text, --binary-files=text)
-// searches it as text. -I skips streams with NUL in their first 32 KiB; later
-// bytes are searched as text, keeping memory bounded and emitted matches consistent.
+// searches it as text. -I probes up to 32 KiB of the first nonempty chunk, without
+// waiting for more pipe input. Later bytes are searched as text: already emitted
+// matches cannot be retracted. Classification can depend on input buffering.
 import { lstatSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
@@ -103,6 +104,8 @@ function parse(argv) {
     if ("EFG".includes(flag)) for (const other of "EFG") flags.delete(other);
     if ("Hh".includes(flag)) for (const other of "Hh") flags.delete(other);
     if ("lL".includes(flag)) for (const other of "lL") flags.delete(other);
+    if (flag === "a") options.binary = "text";
+    if (flag === "I") options.binary = "without-match";
     flags.add(flag === "y" ? "i" : flag);
   };
   const maxCount = (value) => {
@@ -127,7 +130,7 @@ function parse(argv) {
       };
       if (name === "color" || name === "colour") {
         if (value !== undefined && !["always", "auto", "never"].includes(value)) throw new Error(`invalid argument '${value}' for '--color'`);
-        options.color = value ?? "auto";
+        options.color = value ?? "always";  // bunmsh keeps "always" for a bare --color; GNU means "auto".
       } else if (name === "regexp") options.patterns.push(...takes().split("\n"));
       else if (name === "max-count") maxCount(takes());
       else if (name === "binary-files") binaryFiles(takes());
@@ -156,8 +159,6 @@ function parse(argv) {
     if (i >= argv.length) throw new Error("missing pattern");
     options.patterns.push(...argv[i++].split("\n"));
   }
-  if (flags.has("a")) options.binary = "text";
-  if (flags.has("I")) options.binary = "without-match";
   options.operands = argv.slice(i);
   return options;
 }
@@ -170,19 +171,66 @@ function compile(options) {
   let wrapped = source;
   if (flags.has("x")) wrapped = `^(?:${source})$`;
   else if (flags.has("w")) wrapped = `(?<![A-Za-z0-9_])(?:${source})(?![A-Za-z0-9_])`;
-  return new RegExp(wrapped, `${flags.has("i") ? "i" : ""}${flags.has("o") ? "g" : ""}`);
+  const modes = `${flags.has("i") ? "i" : ""}${flags.has("o") ? "g" : ""}`;
+  // "u" makes "." and [...] take a whole emoji rather than half of its surrogate pair. A pattern
+  // that "u" rejects (an identity escape such as \< or a bare "{" in -E) keeps the old reading.
+  try { return new RegExp(wrapped, `${modes}u`); }
+  catch { return new RegExp(wrapped, modes); }
+}
+
+// Bytes that are not UTF-8 travel as U+DC80..U+DCFF (Python's "surrogateescape"): the regex
+// sees the text around them, and output gives back exactly the bytes that were read.
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+export function decodeBytes(bytes) {
+  try { return strictUtf8.decode(bytes); } catch {}
+  let text = "", start = 0, i = 0;
+  const continues = (at, low = 0x80, high = 0xbf) => at < bytes.length && bytes[at] >= low && bytes[at] <= high;
+  while (i < bytes.length) {
+    const b = bytes[i];
+    let size = 0;
+    if (b < 0x80) size = 1;
+    else if (b >= 0xc2 && b <= 0xdf) size = continues(i + 1) ? 2 : 0;
+    else if (b >= 0xe0 && b <= 0xef) {
+      const [low, high] = b === 0xe0 ? [0xa0, 0xbf] : b === 0xed ? [0x80, 0x9f] : [0x80, 0xbf];
+      size = continues(i + 1, low, high) && continues(i + 2) ? 3 : 0;
+    } else if (b >= 0xf0 && b <= 0xf4) {
+      const [low, high] = b === 0xf0 ? [0x90, 0xbf] : b === 0xf4 ? [0x80, 0x8f] : [0x80, 0xbf];
+      size = continues(i + 1, low, high) && continues(i + 2) && continues(i + 3) ? 4 : 0;
+    }
+    if (size) { i += size; continue; }
+    text += strictUtf8.decode(bytes.subarray(start, i)) + String.fromCharCode(0xdc00 + b);
+    start = ++i;
+  }
+  return text + strictUtf8.decode(bytes.subarray(start));
+}
+// Scanned by hand: Bun's matchAll misses lone surrogates that a lookbehind regex's test() finds.
+export function encodeText(text) {
+  if (!/[\uDC80-\uDCFF]/.test(text)) return Buffer.from(text);
+  const parts = [];
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0xdc80 || code > 0xdcff) continue;
+    const previous = i ? text.charCodeAt(i - 1) : 0;
+    if (previous >= 0xd800 && previous <= 0xdbff) continue;
+    parts.push(Buffer.from(text.slice(last, i)), Uint8Array.of(code - 0xdc00));
+    last = i + 1;
+  }
+  parts.push(Buffer.from(text.slice(last)));
+  return Buffer.concat(parts);
 }
 
 /**
  * Runs `grep` with `argv` (argv[0] is the command name). `cwd` resolves relative operands,
  * `input()` returns the ReadableStream for standard input, `tty` says whether stdout is a
- * terminal for --color=auto. Returns { status, stdout, stderr }; stdout is empty when `write`
- * took it.
+ * terminal for --color=auto. Returns { status, stdout, stderr }: stdout is a Buffer holding the
+ * input's own bytes, empty when `write` took it (as Buffers); stderr is a string, empty when
+ * `writeError` took it, each message after the output before it.
  */
-export async function runGrep(argv, { cwd = process.cwd(), platform = process.platform, input = null, write = null, tty = false } = {}) {
+export async function runGrep(argv, { cwd = process.cwd(), platform = process.platform, input = null, write = null, writeError = null, tty = false } = {}) {
   let options, regex;
   try { options = parse(argv); regex = compile(options); }
-  catch (error) { return { status: 2, stdout: "", stderr: `bunmsh: grep: ${error.message}\n` }; }
+  catch (error) { return { status: 2, stdout: Buffer.alloc(0), stderr: `bunmsh: grep: ${error.message}\n` }; }
   const { flags, max, binary, lineBuffered } = options;
   const invert = flags.has("v"), quiet = flags.has("q"), numbers = flags.has("n"), only = flags.has("o");
   const listMatches = flags.has("l"), listMissing = flags.has("L");
@@ -197,18 +245,25 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
   const highlight = color && !only ? new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`) : null;
   const native = (value) => platform === "win32" ? value.replaceAll("/", "\\") : value;
 
-  let stdout = "", stderr = "", pending = "", status = 1, failed = false, done = false;
+  const stdout = [];
+  let stderr = "", pending = "", status = 1, failed = false, done = false;
   const flush = async () => {
     if (!pending) return;
-    const text = pending;
+    const data = encodeText(pending);
     pending = "";
-    if (write) await write(text); else stdout += text;
+    if (write) await write(data); else stdout.push(data);
   };
   const out = async (text) => {
     pending += text;
     if (lineBuffered || pending.length >= 65536) await flush();
   };
-  const fail = (message) => { failed = true; if (!silent) stderr += `bunmsh: grep: ${message}\n`; };
+  // A message streams in order with the output before it, when the caller streams.
+  const message = async (text) => {
+    if (!writeError) { stderr += text; return; }
+    await flush();
+    await writeError(text);
+  };
+  const fail = async (text) => { failed = true; if (!silent) await message(`bunmsh: grep: ${text}\n`); };
   const nameEnd = nul ? "\0" : "\n";
   const labelSep = nul ? "\0" : ":";
 
@@ -219,7 +274,6 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
       if (!quiet && listMissing) await out(`${label}${nameEnd}`);
       return;
     }
-    const decoder = new TextDecoder();
     let rest = [], lineNo = 0, count = 0, isBinary = false, stop = false;
     const prefix = (n) => `${showLabel ? `${label}${labelSep}` : ""}${numbers ? `${n}:` : ""}`;
     const line = async (text) => {
@@ -235,8 +289,7 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
       if (listMissing) { stop = true; return; }
       if (printsLines) {
         if (isBinary && binary === "binary") {
-          await flush();
-          stderr += `bunmsh: grep: ${label}: binary file matches\n`;
+          await message(`bunmsh: grep: ${label}: binary file matches\n`);
           stop = true;
           return;
         }
@@ -251,44 +304,34 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
     };
     const reader = stream.getReader();
     try {
-      // A bounded initial probe is independent of pipe chunk boundaries. Do not
-      // publish matches until these bytes have been classified; retain streaming
-      // after the probe instead of buffering an entire possibly unbounded input.
-      let initial = null, initialEnd = false;
-      if (binary === "without-match") {
-        const parts = [];
-        let size = 0;
-        while (size < 32768) {
-          const next = await reader.read();
-          if (next.done) { initialEnd = true; break; }
-          parts.push(next.value); size += next.value.byteLength;
-          if (next.value.subarray(0, Math.max(0, 32768 - (size - next.value.byteLength))).includes(0)) {
+      // Never fill a probe by waiting for another chunk: a live producer may
+      // wait for our output before sending more. Classify only available bytes.
+      let probed = false;
+      while (!stop) {
+        const { value, done: end } = await reader.read();
+        if (!end && value.byteLength && !probed) {
+          probed = true;
+          if (binary === "without-match" && value.subarray(0, 32768).includes(0)) {
             isBinary = true; stop = true; break;
           }
         }
-        initial = Buffer.concat(parts);
-      }
-      while (!stop) {
-        const { value, done: end } = initial !== null
-          ? { value: initial, done: false }
-          : initialEnd ? { done: true } : await reader.read();
-        initial = null;
-        const text = end ? decoder.decode() : decoder.decode(value, { stream: true });
-        if (binary !== "without-match" && !isBinary && text.includes("\0")) {
-          isBinary = true;
-        }
-        // Only the new text is scanned for line ends, and an unfinished line is kept as parts, so a
-        // file with very long lines (or none, as a binary may have) costs linear time.
-        let from = 0, at;
-        while (!stop && (at = text.indexOf("\n", from)) >= 0) {
-          const piece = text.slice(from, at);
-          const whole = rest.length ? rest.join("") + piece : piece;
-          rest = [];
-          from = at + 1;
-          await line(whole);
-        }
-        if (!stop && from < text.length) rest.push(text.slice(from));
-        if (end && !stop && rest.length) { const whole = rest.join(""); rest = []; await line(whole); }
+        if (!end) {
+          if (binary !== "without-match" && !isBinary && value.includes(0)) isBinary = true;
+          // Only the new bytes are scanned for line ends, and an unfinished line is kept as parts,
+          // so a file with very long lines (or none, as a binary may have) costs linear time. A
+          // "\n" byte never sits inside a UTF-8 sequence, so the finished lines decode together.
+          const last = value.lastIndexOf(10);
+          if (last < 0) { if (value.byteLength) rest.push(value.slice()); }
+          else {
+            const head = value.subarray(0, last);
+            const finished = rest.length ? Buffer.concat([...rest, head]) : head;
+            rest = last + 1 < value.byteLength ? [value.slice(last + 1)] : [];
+            for (const text of decodeBytes(finished).split("\n")) {
+              if (stop) break;
+              await line(text);
+            }
+          }
+        } else if (!stop && rest.length) { const whole = Buffer.concat(rest); rest = []; await line(decodeBytes(whole)); }
         if (!lineBuffered) await flush();
         if (end) break;
       }
@@ -296,7 +339,7 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
       if (stop) await reader.cancel().catch(() => {});
       try { reader.releaseLock(); } catch {}
     }
-    if (done) return;
+    if (done || quiet) return;
     if (counting) await out(`${showLabel ? `${label}${labelSep}` : ""}${isBinary && binary === "without-match" ? 0 : count}\n`);
     if (listMissing && count === 0) await out(`${label}${nameEnd}`);
     await flush();
@@ -305,14 +348,14 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
   async function searchFile(shown, path, showLabel) {
     let stream;
     try { stream = Bun.file(path).stream(); }
-    catch (error) { fail(`${shown}: ${reason(error)}`); return; }
+    catch (error) { await fail(`${shown}: ${reason(error)}`); return; }
     try { await search(stream, shown, showLabel); }
-    catch (error) { await flush(); fail(`${shown}: ${reason(error)}`); }
+    catch (error) { await fail(`${shown}: ${reason(error)}`); }
   }
 
-  function readdirOrFail(shown, path) {
+  async function readdirOrFail(shown, path) {
     try { return readdirSync(path, { withFileTypes: true }); }
-    catch (error) { fail(`${shown}: ${reason(error)}`); return []; }
+    catch (error) { await fail(`${shown}: ${reason(error)}`); return []; }
   }
 
   // Walks a directory in the order the system lists it, as GNU grep's fts walk does. Children
@@ -333,16 +376,16 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
           continue;
         }
         else continue;
-      } catch (error) { fail(`${childShown}: ${reason(error)}`); continue; }
+      } catch (error) { await fail(`${childShown}: ${reason(error)}`); continue; }
       if (stats.isDirectory()) {
         if (excludedName(options.excludeDir, entry.name)) continue;
         const key = `${stats.dev}:${stats.ino}`;
         if (ancestors.has(key)) {
-          if (!silent) stderr += `bunmsh: grep: ${childShown}: warning: recursive directory loop\n`;
+          if (!silent) await message(`bunmsh: grep: ${childShown}: warning: recursive directory loop\n`);
           continue;
         }
         ancestors.add(key);
-        await walk(childShown, childPath, readdirOrFail(childShown, childPath), ancestors, showLabel);
+        await walk(childShown, childPath, await readdirOrFail(childShown, childPath), ancestors, showLabel);
         ancestors.delete(key);
       } else if (stats.isFile() && !excludedName(options.exclude, entry.name)) await searchFile(childShown, childPath, showLabel);
     }
@@ -363,14 +406,14 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
     const path = isAbsolute(native(operand)) ? native(operand) : resolve(cwd, native(operand));
     let stats;
     try { stats = statSync(path); }
-    catch (error) { fail(`${operand}: ${reason(error)}`); continue; }
+    catch (error) { await fail(`${operand}: ${reason(error)}`); continue; }
     if (stats.isDirectory()) {
-      if (!recursive) { fail(`${operand}: Is a directory`); continue; }
+      if (!recursive) { await fail(`${operand}: Is a directory`); continue; }
       // The implicit "." of a bare -r is never excluded; a named one is, as GNU grep does.
       if (!implicitCwd && excludedOperand(options.excludeDir, operand)) continue;
       const ancestors = new Set([`${stats.dev}:${stats.ino}`]);
       // A directory operand names the files found in it, unless -h says otherwise.
-      await walk(implicitCwd ? "" : operand, path, readdirOrFail(operand, path), ancestors, forced ?? true);
+      await walk(implicitCwd ? "" : operand, path, await readdirOrFail(operand, path), ancestors, forced ?? true);
       continue;
     }
     if (excludedOperand(options.exclude, operand)) continue;
@@ -379,5 +422,5 @@ export async function runGrep(argv, { cwd = process.cwd(), platform = process.pl
   await flush();
 
   if (failed && !(quiet && status === 0)) status = 2;
-  return { status, stdout, stderr };
+  return { status, stdout: Buffer.concat(stdout), stderr };
 }

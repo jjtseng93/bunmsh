@@ -33,7 +33,29 @@ test('builtin accepts Flea argv, option variants, Unicode labels, and GNU-compat
   expect((await run(['-u',a,a])).code).toBe(0);
   expect((await run(['-u',a,b+'missing'])).code).toBe(2);
   for(const flags of [['-U','-1'],['-U','x'],['--label'],['-U','9007199254740992']]) expect((await run(flags)).code).toBe(2);
-  const defaults=await run(['-u',a,b]);expect(defaults.out).toContain(' +0000\n');
+  const defaults=await run(['-u',a,b]);expect(defaults.out).toMatch(/^--- [^\n]*\t\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{9} [+-]\d{4}\n/);
+  if(process.platform!=='win32' && Bun.which('diff')){
+   const p=Bun.spawn([Bun.which('diff'),'-u',a,b],{stdout:'pipe',stderr:'pipe',env:{...process.env,LC_ALL:'C'}});
+   expect(defaults.out).toBe(await new Response(p.stdout).text());
+  }
   const short=await run(['-u','-Lfirst','--label=second',a,b]);expect(short.out).toStartWith('--- first\n+++ second\n');
+ }finally{rmSync(dir,{recursive:true,force:true})}
+},30000);
+
+test('builtin diff keeps Chinese, emoji and bytes that are not UTF-8 as they are',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'bunmsh-diff-bytes-'));
+ const a=join(dir,'前😀'),b=join(dir,'後🎉');
+ try {
+  writeFileSync(a,Buffer.concat([Buffer.from('表情👍🏽\nm'),Buffer.from([0xff]),Buffer.from('\n家👨‍👩‍👧\n')]));
+  writeFileSync(b,Buffer.concat([Buffer.from('表情👍🏿\nm'),Buffer.from([0xfe]),Buffer.from('\n家👨‍👩‍👧\n')]));
+  for(const flags of [[],['-u','--label','舊😀','--label','新🎉']]){
+   const p=Bun.spawn([process.execPath,fileURLToPath(new URL('../index.js',import.meta.url)),'-cc','builtin','diff',...flags,a,b],{stdout:'pipe',stderr:'pipe'});
+   const out=Buffer.from(await new Response(p.stdout).arrayBuffer());
+   expect(await p.exited).toBe(1);
+   expect(out.includes(Buffer.from([0x6d,0xff,0x0a]))).toBe(true);
+   expect(out.includes(Buffer.from([0x6d,0xfe,0x0a]))).toBe(true);
+   expect(out.toString()).toContain('👍🏽');
+   if(flags.length) expect(out.toString()).toStartWith('--- 舊😀\n+++ 新🎉\n');
+  }
  }finally{rmSync(dir,{recursive:true,force:true})}
 },30000);

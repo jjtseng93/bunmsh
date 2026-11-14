@@ -1,5 +1,5 @@
 import {compileAwk, executeAwk} from "./awk.js";
-import {normalFileDiff, unifiedFileDiff} from "./diff.js";
+import {diffTimestamp, normalFileDiff, unifiedFileDiff} from "./diff.js";
 import {compileSed, applySed} from "./sed.js";
 import {
   constants as fsConstants,
@@ -2558,10 +2558,14 @@ async function runGrepFallback(argv, state, input, context = {}) {
   const endpoint = state.fdBindings?.[1] ?? { channel: 1 };
   const streamStdout = !context.captureStdout && !context.options?.stdoutSink &&
     endpoint.channel === 1 && endpoint.fd === undefined && !endpoint.closed;
+  const errorEndpoint = state.fdBindings?.[2] ?? { channel: 2 };
+  const streamStderr = streamStdout && !context.captureStderr && errorEndpoint.channel === 2 &&
+    errorEndpoint.fd === undefined && !errorEndpoint.closed;
   const output = await runGrep(argv, {
     cwd: nativePath(state.cwd),
     input: () => fallbackInput(input),
-    write: streamStdout ? (text) => writeStream(process.stdout, bytes(text)) : null,
+    write: streamStdout ? (data) => writeStream(process.stdout, bytes(data)) : null,
+    writeError: streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
     tty: !context.captureStdout && Boolean(process.stdout.isTTY),
   });
   return result(output.status, output.stdout, output.stderr);
@@ -3197,12 +3201,13 @@ async function runDiffFallback(argv, state) {
     if (unified) {
       const headers=[left,right].map((name,index)=> {
         if (labels[index] !== undefined) return labels[index];
-        const stamp=statSync(resolvePath(nativePath(state.cwd),nativePath(name))).mtime.toISOString().replace('T',' ').replace('Z',' +0000');
-        return name + "\t" + stamp;
+        const {mtimeNs}=statSync(resolvePath(nativePath(state.cwd),nativePath(name)),{bigint:true});
+        return name + "\t" + diffTimestamp(mtimeNs);
       }).map(label=>Buffer.from(label).toString('latin1'));
-      return result(1,Buffer.from(unifiedFileDiff(textA,textB,{context,labels:headers}), 'latin1').toString());
+      return result(1,Buffer.from(unifiedFileDiff(textA,textB,{context,labels:headers}), 'latin1'));
     }
-    return result(1, Buffer.from(normalFileDiff(textA, textB), "latin1").toString());
+    // Bytes go back as they were read: latin1 holds each one, UTF-8 or not.
+    return result(1, Buffer.from(normalFileDiff(textA, textB), "latin1"));
   } catch(error) {return result(2,"",`bunmsh: diff: ${error.message}\n`);}
 }
 

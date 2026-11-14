@@ -53,11 +53,12 @@ async function invokeInternal(source, options = {}) {
   };
 }
 
+// The C locale keeps system messages ("No such file or directory") in English, as bunmsh prints them.
 async function invokeArgvWithInput(argv, input, cwd = root) {
   const proc = Bun.spawn({
     cmd: argv,
     cwd,
-    env: process.env,
+    env: { ...process.env, LC_ALL: "C" },
     stdin: Buffer.from(input),
     stdout: "pipe",
     stderr: "pipe",

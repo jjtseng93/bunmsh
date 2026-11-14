@@ -260,3 +260,14 @@ export function unifiedFileDiff(left, right, {context = 3, labels = ['a', 'b']} 
   }
   return out.join('');
 }
+
+// A unified header's time, as GNU diff prints it: local time to the nanosecond, then the offset.
+export function diffTimestamp(mtimeNs) {
+  const nanos = ((mtimeNs % 1000000000n) + 1000000000n) % 1000000000n;
+  const date = new Date(Number((mtimeNs - nanos) / 1000000n));
+  const pad = (value, width = 2) => String(value).padStart(width, "0");
+  const offset = -date.getTimezoneOffset(), sign = offset < 0 ? "-" : "+";
+  const zone = `${sign}${pad(Math.floor(Math.abs(offset) / 60))}${pad(Math.abs(offset) % 60)}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(nanos, 9)} ${zone}`;
+}
