@@ -71,3 +71,8 @@ test.skipIf(process.platform === "win32")("count-links still stops ancestor syml
   expect(result.stdout).toBe("3\tcycle\n");
   expect(result.stderr).toContain("directory cycle");
 });
+
+test("the total ignores --threshold, as GNU prints it", async () => {
+  expect(await runDu(["du", "-sb", "-t", "100000", "-c", "a"], { cwd: directory }))
+    .toEqual({ status: 0, stdout: "3000\ttotal\n", stderr: "" });
+});

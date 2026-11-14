@@ -183,8 +183,9 @@ export async function runDu(argv, { cwd = process.cwd(), platform = process.plat
     lastFlush = performance.now();
     await flush();
   };
-  const line = async (amount, path) => {
-    if (!shown(amount)) return;
+  // The grand total ignores --threshold, as GNU prints it whatever its size.
+  const line = async (amount, path, always = false) => {
+    if (!always && !shown(amount)) return;
     pending += `${format(amount)}\t${native(path)}${end}`;
     await due();
   };
@@ -256,7 +257,7 @@ export async function runDu(argv, { cwd = process.cwd(), platform = process.plat
     const full = isAbsolute(operand) ? operand : resolve(cwd, operand);
     grand += (await walk(operand, full, 0, undefined))[0];
   }
-  if (o.total) await line(grand, "total");
+  if (o.total) await line(grand, "total", true);
   await flush();
   return { status, stdout, stderr };
 }
