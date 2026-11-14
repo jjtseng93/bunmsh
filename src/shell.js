@@ -55,6 +55,7 @@ import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
 import { grepBasicRegex, grepPosixClasses, runGrep } from "./grep.js";
+import { runDu } from "./du.js";
 import { main as startFileServer, parseServeArguments, waitForInterrupt } from "../serve.js";
 import { main as catFancy } from "./cat-fancy.js";
 import { parseCatOperands } from "./cat-operands.js";
@@ -84,7 +85,7 @@ const HELP_ALIASES = {
   chdir: "cd",
 };
 const HELP_EXCLUDED = new Set([".", "..", "//", "-", "~"]);
-const HELP_LONG_ONLY = new Set(["ls", "lsfancy"]);
+const HELP_LONG_ONLY = new Set(["ls", "lsfancy", "du"]);
 
 function requestsBuiltinHelp(argv) {
   return argv.length === 2 &&
@@ -2566,6 +2567,22 @@ async function runGrepFallback(argv, state, input, context = {}) {
   return result(output.status, output.stdout, output.stderr);
 }
 
+// The fallback du lives in ./du.js and streams the same way: each folder's line as it is finished.
+async function runDuFallback(argv, state, input, context = {}) {
+  const endpoint = state.fdBindings?.[1] ?? { channel: 1 };
+  const streamStdout = !context.captureStdout && !context.options?.stdoutSink &&
+    endpoint.channel === 1 && endpoint.fd === undefined && !endpoint.closed;
+  const errorEndpoint = state.fdBindings?.[2] ?? { channel: 2 };
+  const streamStderr = streamStdout && !context.captureStderr && errorEndpoint.channel === 2 &&
+    errorEndpoint.fd === undefined && !errorEndpoint.closed;
+  const output = await runDu(argv, {
+    cwd: nativePath(state.cwd),
+    write: streamStdout ? (text) => writeStream(process.stdout, bytes(text)) : null,
+    writeError: streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
+  });
+  return result(output.status, output.stdout, output.stderr);
+}
+
 async function runSedFallback(argv, state, input) {
   let quiet = false, extended = false, inPlace = false, i = 1;
   const scripts = [];
@@ -3244,6 +3261,7 @@ const fallbackBuiltins = {
   md5sum: (argv, state, input) => runHashFallback(argv, state, input, "md5"),
   sha256sum: (argv, state, input) => runHashFallback(argv, state, input, "sha256"),
   grep: runGrepFallback,
+  du: runDuFallback,
   egrep: (argv, state, input, context) => runGrepFallback(["grep", "-E", ...argv.slice(1)], state, input, context),
   fgrep: (argv, state, input, context) => runGrepFallback(["grep", "-F", ...argv.slice(1)], state, input, context),
   sed: runSedFallback,

@@ -1048,3 +1048,93 @@ describe("system curl reference", () => {
     await expectLikeCurl(["-sI", `${origin}/text`], normalize);
   });
 });
+
+// The fallback du against GNU du: sizes, order, combined short options and messages.
+const duMessages = (output) => ({ ...output,
+  stderr: output.stderr.replace(/[‘’]/g, "\u0027").replace(/^(?:bunmsh: du|du|\/[^:\n]*\/du): /gm, "du: ").replace(/^Try '[^']*du --help'/gm, "Try 'du --help'") });
+const gnuDu = process.platform !== "win32" && Bun.which("du") &&
+  Bun.spawnSync([Bun.which("du"), "--version"]).stdout.toString().includes("GNU coreutils");
+describe.skipIf(!gnuDu)("system du reference", () => {
+  let directory;
+  beforeAll(async () => {
+    directory = mkdtempSync(join(tmpdir(), "bunmsh-du-"));
+    mkdirSync(join(directory, "t", "sub", "deep"), { recursive: true });
+    mkdirSync(join(directory, "t", "empty"));
+    mkdirSync(join(directory, "t", "locked", "in"), { recursive: true });
+    await Bun.write(join(directory, "t", "a.bin"), Buffer.alloc(5000, 7));
+    await Bun.write(join(directory, "t", "b.txt"), "hi\n");
+    await Bun.write(join(directory, "t", "sub", "z"), Buffer.alloc(20000));
+    await Bun.write(join(directory, "t", "sub", "deep", "y"), "x\n");
+    await Bun.write(join(directory, "t", "it's"), "");
+    await Bun.write(join(directory, "top.txt"), "q\n");
+    symlinkSync("b.txt", join(directory, "t", "link"));
+    symlinkSync("..", join(directory, "t", "sub", "up"));
+    chmodSync(join(directory, "t", "locked"), 0);
+  });
+  afterAll(() => {
+    chmodSync(join(directory, "t", "locked"), 0o755);
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const like = async (...args) => {
+    const [actual, reference] = await Promise.all([
+      invokeArgvWithInput([process.execPath, join(root, "src/main.js"), "-cc", "builtin", "du", ...args], "", directory),
+      invokeArgvWithInput([Bun.which("du"), ...args], "", directory),
+    ]);
+    expect(duMessages(actual)).toEqual(duMessages(reference));
+  };
+
+  test("summaries with combined short options, as du -shc * and du -sbhc * give them", async () => {
+    const all = readdirSync(directory).sort();
+    await like("-shc", ...all);
+    await like("-sbhc", ...all);
+    await like("-sh", "t", "t");
+    await like("--sum", "--total", "--human", "t/", "t/sub");
+    await like("t", "-s");
+  });
+
+  test("walks in directory order, with depth, all entries, links and unreadable folders", async () => {
+    await like();
+    await like("t");
+    await like("-a", "t");
+    await like("-ab", "t");
+    await like("-d1", "t");
+    await like("--max-depth=1", "-h", "t");
+    await like("-l", "t");
+    await like("-L", "t");
+    await like("-H", "t/link");
+    await like("t/link");
+    await like("-x", "-c", "t", "top.txt");
+    await like("-S", "t");
+    await like("-Ssc", "t");
+    await like("-0", "t");
+  });
+
+  test("block sizes, human and SI units, inodes, thresholds and exclusions", async () => {
+    await like("-h", "t");
+    await like("--si", "-a", "t");
+    await like("-am", "t");
+    await like("-BM", "t");
+    await like("-BKB", "t");
+    await like("-B1K", "-a", "t");
+    await like("--block-size=MiB", "t");
+    await like("--apparent", "t");
+    await like("--inodes", "-a", "t");
+    await like("-t", "10K", "-a", "t");
+    await like("-t", "-1K", "-a", "t");
+    await like("--exclude=sub", "t");
+    await like("--exclude=*.txt", "-a", "t");
+    await like("--exclude=sub/deep", "t");
+    await like("-ah", "t/it's");
+  });
+
+  test("errors: missing operands, conflicts and bad values", async () => {
+    await like("missing", "t");
+    await like("-as", "t");
+    await like("-s", "-d1", "t");
+    await like("-q", "t");
+    await like("-d");
+    await like("-d", "x", "t");
+    await like("--block-size=x", "t");
+    await like("--nope", "t");
+  });
+});
