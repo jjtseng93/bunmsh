@@ -2559,16 +2559,25 @@ async function runGrepFallback(argv, state, input, context = {}) {
   const streamStdout = !context.captureStdout && !context.options?.stdoutSink &&
     endpoint.channel === 1 && endpoint.fd === undefined && !endpoint.closed;
   const errorEndpoint = state.fdBindings?.[2] ?? { channel: 2 };
+  // 2>&1 shares stdout's destination, even though dispatch marks stderr as
+  // captured for routing. Keep both channels ordered before that final routing.
+  const merged = endpoint.channel === 1 && errorEndpoint.channel === 1 &&
+    endpoint.fd === undefined && errorEndpoint.fd === undefined && !endpoint.closed && !errorEndpoint.closed;
+  const chunks = [];
+  const writeMerged = async (data) => {
+    if (streamStdout) await writeStream(process.stdout, bytes(data));
+    else chunks.push(bytes(data));
+  };
   const streamStderr = streamStdout && !context.captureStderr && errorEndpoint.channel === 2 &&
     errorEndpoint.fd === undefined && !errorEndpoint.closed;
   const output = await runGrep(argv, {
     cwd: nativePath(state.cwd),
     input: () => fallbackInput(input),
-    write: streamStdout ? (data) => writeStream(process.stdout, bytes(data)) : null,
-    writeError: streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
+    write: merged ? writeMerged : streamStdout ? (data) => writeStream(process.stdout, bytes(data)) : null,
+    writeError: merged ? writeMerged : streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
     tty: !context.captureStdout && Boolean(process.stdout.isTTY),
   });
-  return result(output.status, output.stdout, output.stderr);
+  return result(output.status, merged ? concatBytes([...chunks, output.stdout]) : output.stdout, output.stderr);
 }
 
 // The fallback du lives in ./du.js and streams the same way: each folder's line as it is finished.
@@ -2577,14 +2586,23 @@ async function runDuFallback(argv, state, input, context = {}) {
   const streamStdout = !context.captureStdout && !context.options?.stdoutSink &&
     endpoint.channel === 1 && endpoint.fd === undefined && !endpoint.closed;
   const errorEndpoint = state.fdBindings?.[2] ?? { channel: 2 };
+  // 2>&1 shares stdout's destination, even though dispatch marks stderr as
+  // captured for routing. Keep both channels ordered before that final routing.
+  const merged = endpoint.channel === 1 && errorEndpoint.channel === 1 &&
+    endpoint.fd === undefined && errorEndpoint.fd === undefined && !endpoint.closed && !errorEndpoint.closed;
+  const chunks = [];
+  const writeMerged = async (data) => {
+    if (streamStdout) await writeStream(process.stdout, bytes(data));
+    else chunks.push(bytes(data));
+  };
   const streamStderr = streamStdout && !context.captureStderr && errorEndpoint.channel === 2 &&
     errorEndpoint.fd === undefined && !errorEndpoint.closed;
   const output = await runDu(argv, {
     cwd: nativePath(state.cwd),
-    write: streamStdout ? (text) => writeStream(process.stdout, bytes(text)) : null,
-    writeError: streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
+    write: merged ? writeMerged : streamStdout ? (text) => writeStream(process.stdout, bytes(text)) : null,
+    writeError: merged ? writeMerged : streamStderr ? (text) => writeStream(process.stderr, bytes(text)) : null,
   });
-  return result(output.status, output.stdout, output.stderr);
+  return result(output.status, merged ? concatBytes([...chunks, output.stdout]) : output.stdout, output.stderr);
 }
 
 async function runSedFallback(argv, state, input) {
