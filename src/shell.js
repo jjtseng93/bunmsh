@@ -54,6 +54,7 @@ import { dedupeBunmshHistory, saveBunmshHistory } from "./history.js";
 import { fancyLs } from "./fancy-ls.js";
 import { canonicalEnvironment, environmentValue } from "./environment.js";
 import { findIsRegularBuiltin, runFind } from "./find.js";
+import { grepBasicRegex, grepPosixClasses, runGrep } from "./grep.js";
 import { main as startFileServer, parseServeArguments, waitForInterrupt } from "../serve.js";
 import { main as catFancy } from "./cat-fancy.js";
 import { parseCatOperands } from "./cat-operands.js";
@@ -2550,154 +2551,19 @@ function runDateFallback(argv) {
   return result(0, `${argv[1].slice(1).replace(/%[YmdHMSsFT%]/g, (key) => values[key])}\n`);
 }
 
-function grepFiles(operands, state, recursive) {
-  const output = [];
-  const visit = (shown) => {
-    const path = isAbsolute(nativePath(shown))
-      ? nativePath(shown)
-      : resolvePath(nativePath(state.cwd), nativePath(shown));
-    const stat = statSync(path);
-    if (!stat.isDirectory()) { output.push({ shown, path }); return; }
-    if (!recursive) throw new Error(`${shown}: is a directory`);
-    for (const entry of readdirSync(path, { withFileTypes: true }))
-      visit(`${shown.replace(/\/$/, "")}/${entry.name}`);
-  };
-  for (const operand of operands) visit(operand);
-  return output;
-}
-
-function grepBasicRegex(pattern) {
-  let output = "", inClass = false, branchStart = true;
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (!inClass && ch === "\\" && i + 1 < pattern.length) {
-      const next=pattern[++i];
-      output += "+?|(){}".includes(next) ? next : `\\${next}`;
-      branchStart = next === "(" || next === "|";
-      continue;
-    }
-    if (!inClass && ch === "$") {
-      const anchored = i === pattern.length-1 || pattern.startsWith("\\)",i+1) || pattern.startsWith("\\|",i+1);
-      output += anchored ? "$" : "\\$";
-    } else if (!inClass && ch === "^") output += branchStart ? "^" : "\\^";
-    else if (!inClass && "+?|(){}".includes(ch)) output += `\\${ch}`;
-    else output += ch;
-    if (ch === "[") inClass = true;
-    else if (ch === "]" && inClass) inClass = false;
-    branchStart=false;
-  }
-  return output;
-}
-
-function grepPosixClasses(pattern) {
-  const classes = {
-    alnum: "A-Za-z0-9", alpha: "A-Za-z", blank: " \\t", digit: "0-9",
-    lower: "a-z", space: "\\s", upper: "A-Z", word: "A-Za-z0-9_",
-    xdigit: "A-Fa-f0-9",
-  };
-  return pattern.replace(/\[\[:(alnum|alpha|blank|digit|lower|space|upper|word|xdigit):\]\]/g,
-    (_match, name) => `[${classes[name]}]`);
-}
-
+// The fallback grep lives in ./grep.js. Like find, it streams to an uncaptured stdout
+// endpoint and gathers its output only when the caller captures it.
 async function runGrepFallback(argv, state, input, context = {}) {
-  let flags = "", colorMode = "never", i = 1;
-  const patterns=[];
-  while (argv[i]?.startsWith("-") && argv[i] !== "-") {
-    if (argv[i] === "--") { i++; break; }
-    const colorOption = /^--colou?r(?:=(always|auto|never))?$/.exec(argv[i]);
-    if (colorOption) {
-      colorMode = colorOption[1] ?? "always";
-      i++;
-      continue;
-    }
-    if (argv[i] === "-e" || argv[i].startsWith("-e")) {
-      const option=argv[i++]; const pattern=option.length>2 ? option.slice(2) : argv[i++];
-      if (pattern === undefined) return result(2,"","bunmsh: grep: -e requires a pattern\n");
-      patterns.push(...pattern.split("\n")); continue;
-    }
-    if (!/^-[EFiqvnorxc]+$/.test(argv[i]))
-      return result(2, "", `bunmsh: grep: unsupported option: ${argv[i]}\n`);
-    flags += argv[i++].slice(1);
-  }
-  if (!patterns.length) {
-    const pattern=argv[i++];
-    if (pattern === undefined) return result(2,"","bunmsh: grep: missing pattern\n");
-    patterns.push(...pattern.split("\n"));
-  }
-  let regex;
-  const regexSource=patterns.map(pattern => flags.includes("F")
-    ? pattern.replace(/[\\^$.*+?()[\]{}|]/g,"\\$&")
-    : grepPosixClasses(flags.includes("E") ? pattern : grepBasicRegex(pattern))).map(p=>`(?:${p})`).join("|");
-  try { regex = new RegExp(flags.includes("x") ? `^(?:${regexSource})$` : regexSource, `${flags.includes("i") ? "i" : ""}${flags.includes("o") ? "g" : ""}`); }
-  catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
-  const invert = flags.includes("v"), quiet = flags.includes("q"), numbers = flags.includes("n"), only = flags.includes("o");
-  const color = colorMode === "always" ||
-    (colorMode === "auto" && !context.captureStdout && Boolean(process.stdout.isTTY));
-  const red = "\x1b[01;31m", reset = "\x1b[m";
-  const colored = (value) => color && value.length ? `${red}${value}${reset}` : value;
-  const highlightRegex = color && !only
-    ? new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`)
-    : null;
-  let matched = false, count = 0;
-  const output = [];
-  const processLine = (line, lineNumber, label, showLabel) => {
-    regex.lastIndex = 0;
-    const isMatch = regex.test(line);
-    regex.lastIndex = 0;
-    if (isMatch === invert) return false;
-    matched = true; count++;
-    if (quiet) return true;
-    if (flags.includes("c")) return false;
-    const prefix = `${showLabel ? `${label}:` : ""}${numbers ? `${lineNumber}:` : ""}`;
-    if (only) {
-      if (invert) return false;
-      for (const match of line.matchAll(regex))
-        if (match[0].length) output.push(`${prefix}${colored(match[0])}\n`);
-    } else {
-      const rendered = !invert && highlightRegex
-        ? line.replace(highlightRegex, (match) => colored(match))
-        : line;
-      output.push(`${prefix}${rendered}\n`);
-    }
-    return false;
-  };
-
-  const operands = argv.slice(i);
-  const implicitCwd = !operands.length && flags.includes("r");
-  if (implicitCwd) operands.push(".");
-  if (operands.length) {
-    try {
-      const files = grepFiles(operands, state, flags.includes("r"));
-      const showLabel = files.length > 1 || flags.includes("r");
-      for (const file of files) {
-        count=0;
-        const lines = (await Bun.file(file.path).text()).split("\n");
-        if (lines.at(-1) === "") lines.pop();
-        for (let line = 0; line < lines.length; line++)
-          if (processLine(lines[line], line + 1,
-            implicitCwd ? file.shown.replace(/^\.\//, "") : file.shown, showLabel)) return result(0);
-        if (flags.includes("c")) output.push(`${showLabel ? `${file.shown}:` : ""}${count}\n`);
-      }
-    } catch (error) { return result(2, "", `bunmsh: grep: ${error.message}\n`); }
-  } else {
-    const reader = fallbackInput(input).getReader();
-    const decode = new TextDecoder();
-    let pending = "", lineNumber = 0;
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        pending += decode.decode(value, { stream: !done });
-        const lines = pending.split("\n");
-        pending = done ? "" : lines.pop();
-        if (done && lines.at(-1) === "") lines.pop();
-        for (const line of lines)
-          if (processLine(line, ++lineNumber, "", false)) { await reader.cancel(); return result(0); }
-        if (done) break;
-      }
-    } finally { try { reader.releaseLock(); } catch {} }
-  }
-  if (!operands.length && flags.includes("c") && !quiet) output.push(`${count}\n`);
-  return result(matched ? 0 : 1, output.join(""));
+  const endpoint = state.fdBindings?.[1] ?? { channel: 1 };
+  const streamStdout = !context.captureStdout && !context.options?.stdoutSink &&
+    endpoint.channel === 1 && endpoint.fd === undefined && !endpoint.closed;
+  const output = await runGrep(argv, {
+    cwd: nativePath(state.cwd),
+    input: () => fallbackInput(input),
+    write: streamStdout ? (text) => writeStream(process.stdout, bytes(text)) : null,
+    tty: !context.captureStdout && Boolean(process.stdout.isTTY),
+  });
+  return result(output.status, output.stdout, output.stderr);
 }
 
 async function runSedFallback(argv, state, input) {

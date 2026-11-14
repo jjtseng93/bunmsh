@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createState, decode, execute } from "../src/shell.js";
@@ -68,6 +68,17 @@ async function invokeArgvWithInput(argv, input, cwd = root) {
     new Response(proc.stderr).text(),
   ]);
   return { status, stdout, stderr };
+}
+
+// Messages name the program differently ("bunmsh: grep:" and "/usr/bin/grep:"); after that
+// prefix the text, the status and every byte of stdout must agree.
+const grepMessages = (output) => ({ ...output, stderr: output.stderr.replace(/^(?:bunmsh: grep|\/usr\/bin\/grep): /gm, "grep: ") });
+async function expectBuiltinGrepMessagesLike(args, input, cwd = root) {
+  const [actual, reference] = await Promise.all([
+    invokeArgvWithInput([process.execPath, join(root, "src/main.js"), "-cc", "builtin", "grep", ...args], input, cwd),
+    invokeArgvWithInput(["/usr/bin/grep", ...args], input, cwd),
+  ]);
+  expect(grepMessages(actual)).toEqual(grepMessages(reference));
 }
 
 async function expectBuiltinGrepLike(args, input, cwd = root) {
@@ -541,6 +552,137 @@ describe("system grep reference", () => {
       await expectBuiltinGrepLike(["-rq", "needle"], "", directory);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
+});
+
+describe("system grep reference: files, recursion and output modes", () => {
+  let directory;
+  beforeAll(async () => {
+    directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-tree-"));
+    mkdirSync(join(directory, "t", "sub"), { recursive: true });
+    await Bun.write(join(directory, "t", "a.txt"), "needle a\nx\nneedle b\nneedle c\n");
+    await Bun.write(join(directory, "t", "none.txt"), "none\n");
+    await Bun.write(join(directory, "t", "bin.dat"), "needle\0bin\nneedle again\n");
+    await Bun.write(join(directory, "t", "late.dat"), "text\nneedle late\0x\nneedle after\n");
+    await Bun.write(join(directory, "t", "sub", "s.txt"), "needle s\n");
+    await Bun.write(join(directory, "t", "words.txt"), "needles\na needle here\nneedle_x\n");
+    await Bun.write(join(directory, "locked.txt"), "needle\n");
+    chmodSync(join(directory, "locked.txt"), 0);
+    symlinkSync("a.txt", join(directory, "t", "link.txt"));
+    symlinkSync("..", join(directory, "t", "sub", "up"));
+    // A FIFO met while recursing is skipped, never opened: opening it would block.
+    Bun.spawnSync(["mkfifo", join(directory, "t", "fifo")]);
+  });
+  afterAll(() => {
+    chmodSync(join(directory, "locked.txt"), 0o600);
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const like = (...args) => expectBuiltinGrepMessagesLike(args, "", directory);
+
+  test("-r skips symbolic links and FIFOs it meets, reports binary files and reads in directory order", async () => {
+    await like("-r", "needle", "t");
+    await like("-rn", "needle");
+    await like("-rl", "needle", "t");
+    await like("-rc", "needle", "t");
+  });
+
+  test("a symbolic link operand is followed under -r", async () => {
+    await like("-r", "needle", "t/link.txt", "t/sub");
+  });
+
+  test("binary files: -a reads them as text, -I skips them, --binary-files names either", async () => {
+    await like("needle", "t/bin.dat");
+    await like("needle", "t/late.dat");
+    await like("-a", "needle", "t/bin.dat");
+    await like("--text", "-n", "needle", "t/late.dat");
+    await like("--binary-files=text", "needle", "t/bin.dat");
+    await like("-I", "needle", "t/bin.dat", "t/a.txt");
+    await like("-rI", "needle", "t");
+    await like("--binary-files=without-match", "-c", "needle", "t/bin.dat", "t/a.txt");
+    await like("-c", "needle", "t/bin.dat");
+    await like("-l", "needle", "t/bin.dat");
+  });
+
+  test("-m stops each file after that many selected lines", async () => {
+    await like("-m", "2", "needle", "t/a.txt");
+    await like("-m2", "-c", "needle", "t/a.txt");
+    await like("--max-count=1", "needle", "t/a.txt", "t/sub/s.txt");
+    await like("-rnm1", "needle", "t");
+    await like("-m", "0", "needle", "t/a.txt");
+    await like("-v", "-m", "1", "needle", "t/a.txt");
+  });
+
+  test("-l, -L, -H, -h and -Z name files as GNU grep does", async () => {
+    await like("-l", "needle", "t/a.txt", "t/none.txt", "t/sub/s.txt");
+    await like("-L", "needle", "t/a.txt", "t/none.txt");
+    await like("-L", "needle", "t/a.txt");
+    await like("-L", "needle", "t/none.txt");
+    await like("-lZ", "needle", "t/a.txt", "t/sub/s.txt");
+    await like("-cZ", "needle", "t/a.txt", "t/none.txt");
+    await like("-nZH", "needle", "t/a.txt");
+    await like("-rnZ", "needle", "t/sub");
+    await like("-H", "needle", "t/a.txt");
+    await like("-hn", "needle", "t/a.txt", "t/sub/s.txt");
+    await like("--null", "--files-with-matches", "needle", "t/a.txt");
+  });
+
+  test("-w matches whole words", async () => {
+    await like("-w", "needle", "t/words.txt");
+    await like("-wo", "needle", "t/words.txt");
+    await like("-wc", "needle", "t/words.txt");
+  });
+
+  test("an unreadable or missing file is reported and the search goes on", async () => {
+    await like("needle", "t/missing", "t/a.txt");
+    await like("-s", "needle", "t/missing", "t/a.txt");
+    await like("-q", "needle", "t/missing", "t/a.txt");
+    await like("-q", "needle", "t/a.txt", "t/missing");
+    await like("needle", "locked.txt", "t/sub/s.txt");
+    await like("needle", "t");
+    await like("-s", "needle", "t", "t/a.txt");
+  });
+
+  test("long options and attached arguments", async () => {
+    await like("--regexp=needle", "--line-number", "--with-filename", "t/a.txt");
+    await like("-e", "needle a", "-e", "needle c", "t/a.txt");
+    await like("-eneedle", "--count", "t/a.txt");
+    await like("--fixed-strings", "--ignore-case", "NEEDLE B", "t/a.txt");
+    await like("--line-buffered", "-n", "needle", "t/a.txt");
+  });
+});
+
+test("--exclude and --exclude-dir skip names while walking and named operands", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-exclude-"));
+  try {
+    const d = join(directory, "d");
+    for (const dir of [".git", "sub/.cache", ".hid"]) mkdirSync(join(d, dir), { recursive: true });
+    for (const file of ["a.txt", ".dot.txt", ".git/c", "sub/.cache/x", "sub/b.txt", ".hid/y", "sub/.z"])
+      await Bun.write(join(d, file), "needle\n");
+    const like = (...args) => expectBuiltinGrepMessagesLike(args, "", d);
+    // The bare -r of a hidden-files-off search: the implicit "." is never excluded.
+    await like("-r", "--exclude=.*", "--exclude-dir=.*", "needle");
+    // A named "." is.
+    await like("-r", "--exclude=.*", "--exclude-dir=.*", "needle", ".");
+    await like("-r", "--exclude-dir=.*", "needle", "sub");
+    await like("-r", "--exclude=*.txt", "needle");
+    await like("--exclude=*.txt", "needle", "a.txt");
+    await like("-r", "--exclude-dir=sub", "needle");
+    await like("-r", "--exclude-dir", "sub", "needle", "sub");
+    await like("-r", "--exclude=sub/b.txt", "needle");
+    await like("-r", "--exclude=.*", "needle", ".dot.txt");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("-R follows symbolic links and reports a directory loop instead of entering it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bunmsh-grep-follow-"));
+  try {
+    mkdirSync(join(directory, "t", "sub"), { recursive: true });
+    await Bun.write(join(directory, "t", "a.txt"), "needle a\n");
+    await Bun.write(join(directory, "t", "sub", "s.txt"), "needle s\n");
+    symlinkSync("a.txt", join(directory, "t", "link.txt"));
+    symlinkSync("..", join(directory, "t", "sub", "up"));
+    await expectBuiltinGrepMessagesLike(["-R", "needle", "t"], "", directory);
+    await expectBuiltinGrepMessagesLike(["-Rl", "needle", "t"], "", directory);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 describe("system sed reference", () => {
