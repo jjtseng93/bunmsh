@@ -2,7 +2,7 @@
 
 All notable user-visible changes to bunmsh are documented here.
 
-## [Unreleased]
+## [0.4.3] - 2026-11-16
 
 ### Added and fixed
 
